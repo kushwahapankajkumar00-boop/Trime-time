@@ -15,8 +15,8 @@ android {
     applicationId = "com.trimtime.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 2
+    versionName = "1.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -108,6 +108,7 @@ dependencies {
   // implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+  implementation("org.osmdroid:osmdroid-android:6.1.18")
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)

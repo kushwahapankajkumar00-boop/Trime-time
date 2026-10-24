@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Storefront
@@ -38,12 +39,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Booking
+import com.example.model.Salon
+import com.example.ui.components.launchGeoDirections
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.DarkSurface
@@ -53,6 +57,7 @@ import com.example.ui.theme.RedAlert
 @Composable
 fun CustomerBookingsContent(
     bookings: List<Booking>,
+    salons: List<Salon> = emptyList(),
     cancellationCount: Int = 0,
     isSuspended: Boolean = false,
     onViewBookingDetails: (Booking) -> Unit,
@@ -142,8 +147,12 @@ fun CustomerBookingsContent(
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 items(bookings, key = { it.id }) { booking ->
+                    val matchedSalon = salons.find {
+                        it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true)
+                    }
                     CustomerBookingCard(
                         booking = booking,
+                        salon = matchedSalon,
                         onViewDetails = { onViewBookingDetails(booking) },
                         onCancel = { onCancelBooking(booking.id) }
                     )
@@ -156,11 +165,15 @@ fun CustomerBookingsContent(
 @Composable
 fun CustomerBookingCard(
     booking: Booking,
+    salon: Salon? = null,
     onViewDetails: () -> Unit,
     onCancel: () -> Unit
 ) {
     val isPending = booking.status.equals("pending", ignoreCase = true)
+    val isAccepted = booking.status.equals("accepted", ignoreCase = true)
+    val isActiveSlot = isPending || isAccepted
     val isCompleted = booking.status.equals("completed", ignoreCase = true)
+    val isRejected = booking.status.equals("rejected", ignoreCase = true)
     val isCancelled = booking.status.equals("cancelled", ignoreCase = true)
 
     Card(
@@ -202,17 +215,19 @@ fun CustomerBookingCard(
 
                 // Status chip
                 val statusBg = when {
-                    isCompleted -> Color(0xFF064E3B)
+                    isCompleted || isAccepted -> Color(0xFF064E3B)
                     isPending -> Color(0xFF451A03)
                     else -> Color(0xFF450A0A)
                 }
                 val statusText = when {
                     isCompleted -> "COMPLETED"
+                    isAccepted -> "ACCEPTED • CONFIRMED"
                     isPending -> "PENDING ARRIVAL"
+                    isRejected -> "REJECTED BY SALON"
                     else -> "CANCELLED"
                 }
                 val statusColor = when {
-                    isCompleted -> GreenSuccess
+                    isCompleted || isAccepted -> GreenSuccess
                     isPending -> AmberPrimary
                     else -> RedAlert
                 }
@@ -260,14 +275,17 @@ fun CustomerBookingCard(
                 )
             }
 
-            // Highlighted 4-Digit Service PIN Box (Visible whenever pending or can be checked)
-            if (isPending) {
+            // Highlighted 4-Digit Service PIN Box (Visible whenever pending or accepted)
+            val displayPin = booking.pin.ifBlank { booking.servicePin }
+            if (isActiveSlot) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
                     border = CardDefaults.outlinedCardBorder().copy(
-                        brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
+                        brush = androidx.compose.ui.graphics.SolidColor(
+                            if (isAccepted) GreenSuccess else AmberPrimary
+                        )
                     )
                 ) {
                     Row(
@@ -285,7 +303,7 @@ fun CustomerBookingCard(
                                 Icon(
                                     imageVector = Icons.Default.Lock,
                                     contentDescription = null,
-                                    tint = AmberPrimary,
+                                    tint = if (isAccepted) GreenSuccess else AmberPrimary,
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Text(
@@ -297,9 +315,9 @@ fun CustomerBookingCard(
                                 )
                             }
                             Text(
-                                text = "Provide at shop after service",
+                                text = if (isAccepted) "Salon accepted! Show PIN after service" else "Provide at shop after service",
                                 fontSize = 10.sp,
-                                color = Color(0xFF94A3B8)
+                                color = if (isAccepted) Color(0xFFA7F3D0) else Color(0xFF94A3B8)
                             )
                         }
 
@@ -308,11 +326,11 @@ fun CustomerBookingCard(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(DarkSurface)
-                                .border(1.dp, AmberPrimary, RoundedCornerShape(8.dp))
+                                .border(1.dp, if (isAccepted) GreenSuccess else AmberPrimary, RoundedCornerShape(8.dp))
                                 .padding(horizontal = 14.dp, vertical = 6.dp)
                         ) {
                             Text(
-                                text = booking.pin,
+                                text = displayPin,
                                 fontSize = 22.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = AmberPrimary,
@@ -339,14 +357,15 @@ fun CustomerBookingCard(
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = "Verified with PIN ${booking.pin} • Paid ₹${booking.servicePrice} at salon",
+                        text = "Verified with PIN $displayPin • Paid ₹${booking.servicePrice} at salon",
                         fontSize = 11.sp,
                         color = Color(0xFFA7F3D0)
                     )
                 }
             }
 
-            // Bottom Actions: Pay at Salon note & Cancel Button if Pending
+            // Bottom Actions: Pay at Salon note, Get Directions & Cancel Button if Pending or Accepted
+            val context = LocalContext.current
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -369,15 +388,45 @@ fun CustomerBookingCard(
                     )
                 }
 
-                if (isPending) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     OutlinedButton(
-                        onClick = onCancel,
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
+                        onClick = {
+                            launchGeoDirections(
+                                context = context,
+                                latitude = salon?.latitude ?: 25.5941,
+                                longitude = salon?.longitude ?: 85.1376,
+                                salonName = booking.salonName,
+                                fallbackAddress = salon?.location ?: ""
+                            )
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
                         shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                        modifier = Modifier.testTag("cancel_booking_${booking.id}")
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        modifier = Modifier.testTag("booking_get_directions_${booking.id}")
                     ) {
-                        Text(text = "Cancel Slot", fontSize = 11.sp)
+                        Icon(
+                            imageVector = Icons.Default.Directions,
+                            contentDescription = "Get Directions",
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(text = "Get Directions", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    if (isActiveSlot) {
+                        OutlinedButton(
+                            onClick = onCancel,
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.testTag("cancel_booking_${booking.id}")
+                        ) {
+                            Text(text = "Cancel Slot", fontSize = 11.sp)
+                        }
                     }
                 }
             }

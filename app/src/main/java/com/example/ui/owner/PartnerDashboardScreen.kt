@@ -1,5 +1,6 @@
 package com.example.ui.owner
 
+import android.Manifest
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -27,11 +28,15 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.CurrencyRupee
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.LocationOn
@@ -57,6 +62,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -77,6 +83,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -86,8 +93,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Booking
 import com.example.model.Salon
+import com.example.model.SalonService
 import com.example.model.UserProfile
-import com.example.ui.components.ProjectExportHubCard
+import com.example.ui.components.PartnerLocationPickerOsmMap
+import com.example.ui.components.fetchDeviceGpsLocation
+import com.example.ui.components.hasLocationPermission
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
@@ -104,14 +114,7 @@ enum class PartnerTab(val title: String) {
 /**
  * Partner Mode (Salon Owner Dashboard) UI in Jetpack Compose:
  * Zero-clutter, bold, high-contrast interface designed for salon barbers & shop owners.
- *
- * 1. The "Live Switch": Massive Toggle Button at top for "Shop Open" (Green) / "Shop Closed" (Red).
- * 2. Today's Summary: Stats cards for "Today's Earnings (₹)" and "Total Appointments Today".
- * 3. Live Queue (Pending Bookings): Clean list of incoming bookings with Customer Name, Service Booked,
- *    and clear "Enter 4-digit PIN to Complete" action button.
- * 4. Quick Menu Manager: Dedicated tab for "Services & Pricing" (Haircut, Shaving, Facial, Head Massage)
- *    where owner inputs price (₹) and hits "Save to Profile".
- * 5. Photo Upload Section: Simple "+ Add Shop Image" area using zero-permission Android Photo Picker.
+ * 100% connected to real-time Cloud Firestore (`salons` and `bookings` snapshot listeners).
  */
 @Composable
 fun PartnerDashboardScreen(
@@ -123,30 +126,51 @@ fun PartnerDashboardScreen(
     activeFilter: String,
     onFilterChange: (String) -> Unit,
     onOpenPinVerification: (Booking) -> Unit,
+    onAcceptBooking: (String) -> Unit = {},
+    onRejectBooking: (String) -> Unit = {},
     onToggleSalonOpen: (String) -> Unit,
     onSetSalonOpen: (String, Boolean) -> Unit = { id, _ -> onToggleSalonOpen(id) },
     onSetSalonBusyStatus: (String, String) -> Unit = { _, _ -> },
+    onUpdateChairAvailability: (String, String, Int, Int) -> Unit = { _, _, _, _ -> },
     onSaveMenuPrices: (String, Int, Int, Int, Int) -> Unit = { _, _, _, _, _ -> },
+    onAddService: (String, String, String, Int, Int, String) -> Unit = { _, _, _, _, _, _ -> },
+    onEditService: (String, SalonService) -> Unit = { _, _ -> },
+    onDeleteService: (String, String, String) -> Unit = { _, _, _ -> },
     onSaveShopLocation: (String, String, String, Double, Double) -> Unit = { _, _, _, _, _ -> },
+    onSaveFullProfile: (String, String, String, String, String, String, Double, Double) -> Unit = { salonId, _, _, _, addr, lm, lat, lng ->
+        onSaveShopLocation(salonId, addr, lm, lat, lng)
+    },
     onExitPartnerMode: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Current managed salon: prioritize partner's assigned salonId or selected
-    val currentSalon = salons.find { it.id == (selectedSalonId ?: partnerProfile?.salonId) }
+    // Current managed salon: prioritize selectedSalonId, then partner's own salon by ownerId / partnerId / salonId
+    val currentSalon = salons.find { it.id == selectedSalonId }
+        ?: salons.find {
+            !partnerProfile?.salonId.isNullOrBlank() && it.id == partnerProfile?.salonId
+        }
+        ?: salons.find {
+            !partnerProfile?.id.isNullOrBlank() &&
+                (it.ownerId == partnerProfile?.id || it.partnerId == partnerProfile?.id || it.id == "salon_${partnerProfile?.id}")
+        }
         ?: salons.firstOrNull()
 
-    // Filter bookings for this salon
+    // Filter bookings in real time for this salon
     val salonBookings = if (currentSalon != null) {
         allBookings.filter { it.salonId == currentSalon.id }
     } else {
         allBookings
     }
 
-    val pendingBookings = salonBookings.filter { it.status.equals("pending", ignoreCase = true) }
+    // Active Queue includes both "pending" (new incoming) and "accepted" (confirmed waiting for 4-digit PIN)
+    val pendingBookings = salonBookings.filter {
+        it.status.equals("pending", ignoreCase = true) || it.status.equals("accepted", ignoreCase = true)
+    }
     val completedBookings = salonBookings.filter { it.status.equals("completed", ignoreCase = true) }
 
     // Today's Summary calculations
-    val todayAppointmentsCount = salonBookings.size
+    val todayAppointmentsCount = salonBookings.count {
+        !it.status.equals("rejected", ignoreCase = true) && !it.status.equals("cancelled", ignoreCase = true)
+    }
     val todayEarnings = completedBookings.sumOf { it.servicePrice }
     val pendingCashToCollect = pendingBookings.sumOf { it.servicePrice }
 
@@ -187,12 +211,15 @@ fun PartnerDashboardScreen(
                     salon = currentSalon,
                     onSetSalonOpen = onSetSalonOpen,
                     onSetSalonBusyStatus = onSetSalonBusyStatus,
+                    onUpdateChairAvailability = onUpdateChairAvailability,
                     todayEarnings = todayEarnings,
                     todayAppointmentsCount = todayAppointmentsCount,
                     pendingCashToCollect = pendingCashToCollect,
                     pendingBookings = pendingBookings,
                     completedBookings = completedBookings,
                     onOpenPinVerification = onOpenPinVerification,
+                    onAcceptBooking = onAcceptBooking,
+                    onRejectBooking = onRejectBooking,
                     onNavigateToProfile = { currentTab = PartnerTab.SHOP_PROFILE }
                 )
             }
@@ -200,7 +227,10 @@ fun PartnerDashboardScreen(
             PartnerTab.SERVICES_PRICING -> {
                 PartnerMenuManagerTabContent(
                     salon = currentSalon,
-                    onSavePrices = onSaveMenuPrices
+                    onSavePrices = onSaveMenuPrices,
+                    onAddService = onAddService,
+                    onEditService = onEditService,
+                    onDeleteService = onDeleteService
                 )
             }
 
@@ -208,7 +238,8 @@ fun PartnerDashboardScreen(
                 PartnerShopProfileTabContent(
                     salon = currentSalon,
                     partnerProfile = partnerProfile,
-                    onSaveLocation = onSaveShopLocation
+                    onSaveLocation = onSaveShopLocation,
+                    onSaveFullProfile = onSaveFullProfile
                 )
             }
         }
@@ -373,29 +404,31 @@ fun PartnerDashboardTabs(
 }
 
 /**
- * TAB 1: Live Queue (Includes Live Switch, Today's Summary & Incoming Customer Bookings)
+ * TAB 1: Live Queue (Includes Live Switch, Live Chairs & Waiting Time, Today's Summary & Incoming Customer Bookings)
  */
 @Composable
 fun PartnerLiveQueueTabContent(
     salon: Salon?,
     onSetSalonOpen: (String, Boolean) -> Unit,
     onSetSalonBusyStatus: (String, String) -> Unit = { _, _ -> },
+    onUpdateChairAvailability: (String, String, Int, Int) -> Unit = { _, _, _, _ -> },
     todayEarnings: Int,
     todayAppointmentsCount: Int,
     pendingCashToCollect: Int,
     pendingBookings: List<Booking>,
     completedBookings: List<Booking>,
     onOpenPinVerification: (Booking) -> Unit,
+    onAcceptBooking: (String) -> Unit = {},
+    onRejectBooking: (String) -> Unit = {},
     onNavigateToProfile: () -> Unit = {}
 ) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .testTag("partner_live_queue_feed"),
-        contentPadding = PaddingValues(bottom = 32.dp)
+            contentPadding = PaddingValues(bottom = 32.dp)
     ) {
         // 1. THE "LIVE SWITCH": Massive, highly visible Toggle Button
-        // MANDATORY: Salon owner cannot toggle their shop to Open unless location is provided!
         if (salon != null) {
             item {
                 TheLiveSwitch(
@@ -408,14 +441,18 @@ fun PartnerLiveQueueTabContent(
                 )
             }
 
-            // Real-Time Busy/Free Status System:
-            // 1-Click toggle button for "✂️ Busy (Cutting Hair)" and "🟢 Free (Available)"
+            // Real-Time Busy/Free Status + Available Chairs & Waiting Time System:
             item {
                 BarberAvailabilityToggleCard(
                     currentStatus = salon.currentStatus,
+                    availableChairs = salon.availableChairs,
+                    waitingTimeMinutes = salon.waitingTimeMinutes,
                     isShopOpen = salon.isOpen,
                     onStatusChange = { newStatus ->
                         onSetSalonBusyStatus(salon.id, newStatus)
+                    },
+                    onChairAndWaitChange = { status, chairs, waitMins ->
+                        onUpdateChairAvailability(salon.id, status, chairs, waitMins)
                     }
                 )
             }
@@ -466,7 +503,7 @@ fun PartnerLiveQueueTabContent(
             }
         }
 
-        // 3. LIVE QUEUE (Pending Bookings) Cards
+        // 3. LIVE QUEUE (Pending & Accepted Bookings) Cards
         if (pendingBookings.isEmpty()) {
             item {
                 EmptyQueueCard()
@@ -475,6 +512,8 @@ fun PartnerLiveQueueTabContent(
             items(pendingBookings, key = { it.id }) { booking ->
                 LiveQueueBookingCard(
                     booking = booking,
+                    onAcceptClick = { onAcceptBooking(booking.id) },
+                    onRejectClick = { onRejectBooking(booking.id) },
                     onVerifyPinClick = { onOpenPinVerification(booking) }
                 )
             }
@@ -680,15 +719,17 @@ fun TheLiveSwitch(
 }
 
 /**
- * Real-Time Busy/Free Status System:
- * Partner App UI (Barber's side): Highly visible, 1-click toggle button on the Partner Dashboard
- * saying "✂️ Busy (Cutting Hair)" and "🟢 Free (Available)".
+ * Real-Time Busy/Free Status + Available Chairs & Waiting Time System:
+ * Syncs `currentStatus`, `availableChairs`, and `waitingTimeMinutes` directly to `salons/{salonId}` in Firestore.
  */
 @Composable
 fun BarberAvailabilityToggleCard(
     currentStatus: String,
+    availableChairs: Int = 2,
+    waitingTimeMinutes: Int = 0,
     isShopOpen: Boolean,
-    onStatusChange: (String) -> Unit
+    onStatusChange: (String) -> Unit,
+    onChairAndWaitChange: (String, Int, Int) -> Unit = { _, _, _ -> }
 ) {
     val isBusy = currentStatus.equals("BUSY", ignoreCase = true)
     val statusBg = if (isBusy) Color(0xFF3B151E) else Color(0xFF063522)
@@ -728,7 +769,7 @@ fun BarberAvailabilityToggleCard(
                             .background(if (isBusy) RedAlert else GreenSuccess)
                     )
                     Text(
-                        text = "CHAIR AVAILABILITY STATUS",
+                        text = "CHAIR AVAILABILITY & WAIT TIME",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color(0xFF94A3B8),
@@ -746,7 +787,7 @@ fun BarberAvailabilityToggleCard(
                         .testTag("current_status_badge")
                 ) {
                     Text(
-                        text = if (isBusy) "🔴 CUTTING HAIR" else "🟢 CHAIR FREE",
+                        text = if (isBusy) "🔴 CUTTING HAIR (${waitingTimeMinutes}m wait)" else "🟢 $availableChairs CHAIRS FREE",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Black,
                         color = if (isBusy) RedAlert else GreenSuccess
@@ -756,9 +797,9 @@ fun BarberAvailabilityToggleCard(
 
             Text(
                 text = if (isBusy) {
-                    "Your status is BUSY. Customer app shows: '🔴 Barber is Busy (Approx 15-20 Min Wait)' with Join Waitlist."
+                    "Your status is BUSY ($availableChairs chairs, ~${waitingTimeMinutes}m wait). Customers see live wait time on their Salons list & Map."
                 } else {
-                    "Your status is FREE. Customer app shows: '🟢 Available Now' with instant booking."
+                    "Your status is FREE ($availableChairs chairs available, 0m wait). Customers see '🟢 Available Now' with instant booking."
                 },
                 fontSize = 12.sp,
                 color = Color(0xFFCBD5E1),
@@ -827,6 +868,91 @@ fun BarberAvailabilityToggleCard(
                             fontSize = 13.sp,
                             fontWeight = if (isBusy) FontWeight.Black else FontWeight.SemiBold
                         )
+                    }
+                }
+            }
+
+            HorizontalDivider(color = Color(0xFF334155).copy(alpha = 0.5f))
+
+            // Live Available Chairs & Waiting Time Selector (Syncs immediately to Firestore)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = "Available Chairs: $availableChairs",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(1, 2, 3, 4).forEach { count ->
+                            val selected = availableChairs == count
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) AmberPrimary else Color(0xFF1E293B))
+                                    .border(
+                                        1.dp,
+                                        if (selected) AmberPrimary else Color(0xFF334155),
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable {
+                                        onChairAndWaitChange(currentStatus, count, waitingTimeMinutes)
+                                    }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    .testTag("chair_count_$count")
+                            ) {
+                                Text(
+                                    text = "$count",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (selected) Color(0xFF1E1402) else Color.White
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Wait Time: ${waitingTimeMinutes}m",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        listOf(0, 10, 15, 20, 30).forEach { mins ->
+                            val selected = waitingTimeMinutes == mins
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) Color(0xFF2563EB) else Color(0xFF1E293B))
+                                    .border(
+                                        1.dp,
+                                        if (selected) Color(0xFF60A5FA) else Color(0xFF334155),
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable {
+                                        val nextStatus = if (mins > 0) "BUSY" else "FREE"
+                                        onChairAndWaitChange(nextStatus, availableChairs, mins)
+                                    }
+                                    .padding(horizontal = 7.dp, vertical = 6.dp)
+                                    .testTag("wait_mins_$mins")
+                            ) {
+                                Text(
+                                    text = "${mins}m",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -962,14 +1088,19 @@ fun TodaysSummarySection(
 }
 
 /**
- * 3. LIVE QUEUE (Pending Bookings Card):
- * Must display: Customer Name, Service Booked, and "Enter 4-digit PIN to Complete" action button.
+ * 3. LIVE QUEUE (Incoming Bookings Card):
+ * Displays Customer Name, Phone, Service Booked, Accept/Reject actions, and
+ * "Enter 4-digit PIN to Complete" action button (verifying the Customer's exact 4-digit servicePin).
  */
 @Composable
 fun LiveQueueBookingCard(
     booking: Booking,
+    onAcceptClick: () -> Unit = {},
+    onRejectClick: () -> Unit = {},
     onVerifyPinClick: () -> Unit
 ) {
+    val isAccepted = booking.status.equals("accepted", ignoreCase = true)
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -978,7 +1109,9 @@ fun LiveQueueBookingCard(
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
         border = CardDefaults.outlinedCardBorder().copy(
-            brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary.copy(alpha = 0.4f))
+            brush = androidx.compose.ui.graphics.SolidColor(
+                if (isAccepted) GreenSuccess.copy(alpha = 0.6f) else AmberPrimary.copy(alpha = 0.4f)
+            )
         )
     ) {
         Column(
@@ -1010,6 +1143,19 @@ fun LiveQueueBookingCard(
                             fontWeight = FontWeight.ExtraBold,
                             color = Color.White
                         )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isAccepted) Color(0xFF064E3B) else Color(0xFF3B2306))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = if (isAccepted) "✓ ACCEPTED" else "NEW",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (isAccepted) GreenSuccess else AmberPrimary
+                            )
+                        }
                     }
                     if (booking.customerPhone.isNotBlank()) {
                         Row(
@@ -1081,7 +1227,63 @@ fun LiveQueueBookingCard(
                 )
             }
 
-            // "Enter 4-digit PIN to Complete" Action Button
+            // Accept & Reject Action Row (Syncs directly to Firestore bookings/{bookingId})
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (!isAccepted) {
+                    Button(
+                        onClick = onAcceptClick,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(40.dp)
+                            .testTag("accept_booking_btn_${booking.id}"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = GreenSuccess,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Accept Booking",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Accept Booking",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onRejectClick,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(40.dp)
+                        .testTag("reject_booking_btn_${booking.id}"),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, RedAlert.copy(alpha = 0.7f)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Reject Booking",
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Reject Slot",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            // "Enter 4-digit PIN to Complete" Action Button (Requires exact customer 4-digit servicePin)
             Button(
                 onClick = onVerifyPinClick,
                 modifier = Modifier
@@ -1204,18 +1406,18 @@ fun EmptyQueueCard() {
 }
 
 /**
- * 4. QUICK MENU MANAGER:
- * Dedicated tab for "Services & Pricing". Pre-defined text fields:
- * - Haircut
- * - Shaving
- * - Facial
- * - Head Massage
- * where the owner inputs their Price (₹) and hits "Save to Profile".
+ * 4. REAL-TIME SERVICES & PRICING MANAGER:
+ * Allows the Partner to Add, Edit, and Delete salon services (Name, Category, Price in ₹, Duration in mins)
+ * and persist them directly inside their Firestore salon document (`salons/{salonId}`),
+ * plus quick rate updates for core services.
  */
 @Composable
 fun PartnerMenuManagerTabContent(
     salon: Salon?,
-    onSavePrices: (String, Int, Int, Int, Int) -> Unit
+    onSavePrices: (String, Int, Int, Int, Int) -> Unit,
+    onAddService: (String, String, String, Int, Int, String) -> Unit = { _, _, _, _, _, _ -> },
+    onEditService: (String, SalonService) -> Unit = { _, _ -> },
+    onDeleteService: (String, String, String) -> Unit = { _, _, _ -> }
 ) {
     val existingHaircut = salon?.services?.find { it.category.equals("Haircut", ignoreCase = true) }?.price ?: 120
     val existingShaving = salon?.services?.find { it.category.equals("Beard", ignoreCase = true) }?.price ?: 80
@@ -1227,6 +1429,19 @@ fun PartnerMenuManagerTabContent(
     var facialPrice by remember(salon) { mutableStateOf(existingFacial.toString()) }
     var massagePrice by remember(salon) { mutableStateOf(existingMassage.toString()) }
     var isSaved by remember { mutableStateOf(false) }
+
+    // Add New Service States
+    var newServiceName by remember { mutableStateOf("") }
+    var newServiceCategory by remember { mutableStateOf("Haircut") }
+    var newServicePrice by remember { mutableStateOf("150") }
+    var newServiceDuration by remember { mutableStateOf("20") }
+    var newServiceDesc by remember { mutableStateOf("") }
+
+    // Edit Existing Service State
+    var editingServiceId by remember { mutableStateOf<String?>(null) }
+    var editName by remember { mutableStateOf("") }
+    var editPrice by remember { mutableStateOf("") }
+    var editDuration by remember { mutableStateOf("") }
 
     LazyColumn(
         modifier = Modifier
@@ -1256,19 +1471,402 @@ fun PartnerMenuManagerTabContent(
                     )
                     Column {
                         Text(
-                            text = "Quick Menu & Price Manager",
+                            text = "Real-Time Services & Pricing Manager",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
                         Text(
-                            text = "Set your standard rates in rupees (₹). Displayed instantly to all nearby customers.",
+                            text = "Add, Edit, or Delete services (₹ & mins) directly in your live Firestore salon catalog.",
                             fontSize = 11.sp,
                             color = Color(0xFFCBD5E1)
                         )
                     }
                 }
             }
+        }
+
+        // ==========================================
+        // ADD NEW SERVICE TO FIRESTORE CARD
+        // ==========================================
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("add_new_service_card"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
+                border = CardDefaults.outlinedCardBorder().copy(
+                    brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary.copy(alpha = 0.5f))
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = null,
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "ADD NEW SALON SERVICE",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = AmberPrimary,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = newServiceName,
+                        onValueChange = { newServiceName = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("new_service_name_input"),
+                        label = { Text("Service Name *", color = Color(0xFF94A3B8)) },
+                        placeholder = { Text("e.g. Fade Haircut, Detan Facial, Royal Beard", color = Color(0xFF64748B)) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF475569),
+                            focusedContainerColor = DarkSurface,
+                            unfocusedContainerColor = DarkSurface,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    // Category chips
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(listOf("Haircut", "Beard", "Facial", "Massage", "Combo")) { cat ->
+                            val selected = newServiceCategory.equals(cat, ignoreCase = true)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (selected) AmberPrimary else Color(0xFF1E293B))
+                                    .border(
+                                        1.dp,
+                                        if (selected) AmberPrimary else Color(0xFF334155),
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable { newServiceCategory = cat }
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = cat,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (selected) Color(0xFF1E1402) else Color.White
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = newServicePrice,
+                            onValueChange = { newServicePrice = it.filter { c -> c.isDigit() } },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("new_service_price_input"),
+                            label = { Text("Price (₹) *", color = Color(0xFF94A3B8)) },
+                            leadingIcon = {
+                                Text("₹", color = AmberPrimary, fontWeight = FontWeight.Bold)
+                            },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = AmberPrimary,
+                                unfocusedBorderColor = Color(0xFF475569),
+                                focusedContainerColor = DarkSurface,
+                                unfocusedContainerColor = DarkSurface,
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+
+                        OutlinedTextField(
+                            value = newServiceDuration,
+                            onValueChange = { newServiceDuration = it.filter { c -> c.isDigit() } },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("new_service_duration_input"),
+                            label = { Text("Duration (mins) *", color = Color(0xFF94A3B8)) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = AmberPrimary,
+                                unfocusedBorderColor = Color(0xFF475569),
+                                focusedContainerColor = DarkSurface,
+                                unfocusedContainerColor = DarkSurface,
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            if (salon != null && newServiceName.isNotBlank()) {
+                                val priceVal = newServicePrice.toIntOrNull() ?: 100
+                                val durationVal = newServiceDuration.toIntOrNull() ?: 20
+                                onAddService(
+                                    salon.id,
+                                    newServiceName.trim(),
+                                    newServiceCategory,
+                                    priceVal,
+                                    durationVal,
+                                    newServiceDesc.trim()
+                                )
+                                newServiceName = ""
+                                newServiceDesc = ""
+                            }
+                        },
+                        enabled = newServiceName.isNotBlank() && newServicePrice.isNotBlank(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                            .testTag("add_service_button"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = GreenSuccess,
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "Add Service",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "+ Add Service to Live Catalog",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // LIVE FIRESTORE SERVICES LIST (EDIT / DELETE)
+        // ==========================================
+        val liveServices = salon?.services ?: emptyList()
+        if (liveServices.isNotEmpty()) {
+            item {
+                Text(
+                    text = "LIVE SALON SERVICES IN FIRESTORE (${liveServices.size})",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = Color(0xFF94A3B8),
+                    letterSpacing = 1.sp
+                )
+            }
+
+            items(liveServices, key = { it.id }) { service ->
+                val isEditing = editingServiceId == service.id
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("partner_service_item_${service.id}"),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
+                    border = CardDefaults.outlinedCardBorder().copy(
+                        brush = androidx.compose.ui.graphics.SolidColor(
+                            if (isEditing) AmberPrimary else Color(0xFF334155)
+                        )
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = service.name,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color.White
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(Color(0xFF1E293B))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = service.category,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = AmberPrimary
+                                        )
+                                    }
+                                }
+                                Text(
+                                    text = "₹${service.price} • ${service.durationMinutes} mins",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = GreenSuccess
+                                )
+                            }
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                IconButton(
+                                    onClick = {
+                                        if (isEditing) {
+                                            editingServiceId = null
+                                        } else {
+                                            editingServiceId = service.id
+                                            editName = service.name
+                                            editPrice = service.price.toString()
+                                            editDuration = service.durationMinutes.toString()
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("edit_service_btn_${service.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "Edit Service",
+                                        tint = AmberPrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        if (salon != null) {
+                                            onDeleteService(salon.id, service.id, service.name)
+                                        }
+                                    },
+                                    modifier = Modifier.testTag("delete_service_btn_${service.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete Service",
+                                        tint = RedAlert,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        if (isEditing && salon != null) {
+                            HorizontalDivider(color = Color(0xFF334155))
+                            OutlinedTextField(
+                                value = editName,
+                                onValueChange = { editName = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Service Name", color = Color(0xFF94A3B8)) },
+                                singleLine = true,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = AmberPrimary,
+                                    unfocusedBorderColor = Color(0xFF475569),
+                                    focusedContainerColor = DarkSurface,
+                                    unfocusedContainerColor = DarkSurface,
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                )
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = editPrice,
+                                    onValueChange = { editPrice = it.filter { c -> c.isDigit() } },
+                                    modifier = Modifier.weight(1f),
+                                    label = { Text("Price (₹)", color = Color(0xFF94A3B8)) },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = AmberPrimary,
+                                        unfocusedBorderColor = Color(0xFF475569),
+                                        focusedContainerColor = DarkSurface,
+                                        unfocusedContainerColor = DarkSurface,
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White
+                                    )
+                                )
+                                OutlinedTextField(
+                                    value = editDuration,
+                                    onValueChange = { editDuration = it.filter { c -> c.isDigit() } },
+                                    modifier = Modifier.weight(1f),
+                                    label = { Text("Duration (mins)", color = Color(0xFF94A3B8)) },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = AmberPrimary,
+                                        unfocusedBorderColor = Color(0xFF475569),
+                                        focusedContainerColor = DarkSurface,
+                                        unfocusedContainerColor = DarkSurface,
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White
+                                    )
+                                )
+                            }
+                            Button(
+                                onClick = {
+                                    val updated = service.copy(
+                                        name = editName.trim().ifBlank { service.name },
+                                        price = editPrice.toIntOrNull() ?: service.price,
+                                        durationMinutes = editDuration.toIntOrNull() ?: service.durationMinutes
+                                    )
+                                    onEditService(salon.id, updated)
+                                    editingServiceId = null
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = AmberPrimary,
+                                    contentColor = Color(0xFF1E1402)
+                                ),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text("Save Service Changes to Firestore", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // QUICK STANDARD RATES UPDATER
+        // ==========================================
+        item {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "QUICK STANDARD RATES (₹)",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(0xFF94A3B8),
+                letterSpacing = 1.sp
+            )
         }
 
         // Service 1: Haircut
@@ -1463,29 +2061,47 @@ fun PredefinedServicePriceField(
 }
 
 /**
- * 5. PHOTO UPLOAD SECTION & SHOP PROFILE:
- * A simple "+ Add Shop Image" area in profile settings (prepared for Firebase Storage integration).
+ * 5. REAL-TIME SHOP PROFILE, ADDRESS & GPS MANAGER:
+ * Updates Shop Name, Contact Phone, Tagline, Full Shop Address, Landmark, and
+ * OpenStreetMap GPS coordinates (`latitude`, `longitude`) directly in Firestore `salons/{salonId}`
+ * so Customers see the changes in real time on their Salons list and Map.
  */
 @Composable
 fun PartnerShopProfileTabContent(
     salon: Salon?,
     partnerProfile: UserProfile?,
-    onSaveLocation: (String, String, String, Double, Double) -> Unit = { _, _, _, _, _ -> }
+    onSaveLocation: (String, String, String, Double, Double) -> Unit = { _, _, _, _, _ -> },
+    onSaveFullProfile: (String, String, String, String, String, String, Double, Double) -> Unit = { salonId, _, _, _, addr, lm, lat, lng ->
+        onSaveLocation(salonId, addr, lm, lat, lng)
+    }
 ) {
     var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
     var uploadStatusMessage by remember { mutableStateOf<String?>(null) }
 
-    // Address & GPS Location States
-    var fullAddress by remember(salon?.shopAddress) {
+    // Editable Shop Identity & GPS Location States
+    var shopName by remember(salon?.id, salon?.name) {
+        mutableStateOf(salon?.name ?: "My Grooming Studio")
+    }
+    var shopPhone by remember(salon?.id, salon?.phone, partnerProfile?.phone) {
+        mutableStateOf(
+            salon?.phone?.takeIf { it.isNotBlank() }
+                ?: partnerProfile?.phone?.takeIf { it.isNotBlank() }
+                ?: "+91 98765 43210"
+        )
+    }
+    var shopTagline by remember(salon?.id, salon?.tagline) {
+        mutableStateOf(salon?.tagline ?: "Instant grooming slots • Zero queue wait time")
+    }
+    var fullAddress by remember(salon?.id, salon?.shopAddress) {
         mutableStateOf(salon?.shopAddress?.takeIf { it.isNotBlank() } ?: salon?.location ?: "")
     }
-    var landmark by remember(salon?.landmark) {
+    var landmark by remember(salon?.id, salon?.landmark) {
         mutableStateOf(salon?.landmark ?: "")
     }
-    var currentLatitude by remember(salon?.latitude) {
+    var currentLatitude by remember(salon?.id, salon?.latitude) {
         mutableStateOf(salon?.latitude?.takeIf { it != 0.0 } ?: 25.5941)
     }
-    var currentLongitude by remember(salon?.longitude) {
+    var currentLongitude by remember(salon?.id, salon?.longitude) {
         mutableStateOf(salon?.longitude?.takeIf { it != 0.0 } ?: 85.1376)
     }
     var isGpsFetched by remember(salon?.latitude, salon?.longitude) {
@@ -1511,7 +2127,7 @@ fun PartnerShopProfileTabContent(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // MANDATORY SHOP REGISTRATION & GPS ADDRESS SECTION
+        // MANDATORY SHOP REGISTRATION, PROFILE & GPS ADDRESS SECTION
         item {
             Card(
                 modifier = Modifier
@@ -1547,7 +2163,7 @@ fun PartnerShopProfileTabContent(
                                 modifier = Modifier.size(20.dp)
                             )
                             Text(
-                                text = "SHOP ADDRESS & GPS LOCATION",
+                                text = "SHOP PROFILE, ADDRESS & GPS",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = Color.White,
@@ -1571,7 +2187,7 @@ fun PartnerShopProfileTabContent(
                                     modifier = Modifier.size(12.dp)
                                 )
                                 Text(
-                                    text = "VERIFIED",
+                                    text = "LIVE IN CLOUD",
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color(0xFFA7F3D0)
@@ -1603,29 +2219,136 @@ fun PartnerShopProfileTabContent(
                     }
 
                     Text(
-                        text = "Mandatory for opening shop. Nearby customers discover you and calculate accurate walking distance based on this location.",
+                        text = "Changes to your Shop Name, Phone, Address, and OpenStreetMap Pin sync immediately to Cloud Firestore so nearby customers see them in real time.",
                         fontSize = 11.sp,
                         color = Color(0xFF94A3B8),
                         lineHeight = 16.sp
                     )
 
-                    // 1. GPS Auto-Fetch Button
+                    // 0a. Shop Name Text Field
+                    OutlinedTextField(
+                        value = shopName,
+                        onValueChange = {
+                            shopName = it
+                            locationSaveSuccess = false
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shop_name_input"),
+                        label = { Text("Shop / Salon Name *", color = Color(0xFF94A3B8)) },
+                        placeholder = { Text("e.g. Royal Cuts Grooming Studio", color = Color(0xFF64748B)) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF475569),
+                            focusedContainerColor = DarkSurface,
+                            unfocusedContainerColor = DarkSurface,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    // 0b. Shop Phone Number Text Field
+                    OutlinedTextField(
+                        value = shopPhone,
+                        onValueChange = {
+                            shopPhone = it
+                            locationSaveSuccess = false
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shop_phone_input"),
+                        label = { Text("Shop Contact Phone *", color = Color(0xFF94A3B8)) },
+                        placeholder = { Text("e.g. +91 98765 43210", color = Color(0xFF64748B)) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF475569),
+                            focusedContainerColor = DarkSurface,
+                            unfocusedContainerColor = DarkSurface,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    // 0c. Shop Tagline Text Field
+                    OutlinedTextField(
+                        value = shopTagline,
+                        onValueChange = {
+                            shopTagline = it
+                            locationSaveSuccess = false
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shop_tagline_input"),
+                        label = { Text("Shop Tagline / Specialty", color = Color(0xFF94A3B8)) },
+                        placeholder = { Text("e.g. Instant grooming slots • Zero queue wait time", color = Color(0xFF64748B)) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF475569),
+                            focusedContainerColor = DarkSurface,
+                            unfocusedContainerColor = DarkSurface,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    val context = LocalContext.current
+                    val gpsPermissionLauncher = rememberLauncherForActivityResult(
+                        contract = ActivityResultContracts.RequestMultiplePermissions()
+                    ) { permissions ->
+                        val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                            permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+                        if (granted) {
+                            fetchDeviceGpsLocation(context) { lat, lng, _ ->
+                                currentLatitude = lat
+                                currentLongitude = lng
+                                isGpsFetched = true
+                                isFetchingGps = false
+                                locationSaveSuccess = false
+                                if (fullAddress.isBlank()) {
+                                    fullAddress = "Shop #4, Kankarbagh Main Road, Near Central Park"
+                                }
+                                if (landmark.isBlank()) {
+                                    landmark = "Opposite Metro Pillar #42"
+                                }
+                            }
+                        } else {
+                            isFetchingGps = false
+                        }
+                    }
+
+                    // 1. GPS Auto-Fetch Button (Real GPS + Runtime Permission)
                     Button(
                         onClick = {
                             isFetchingGps = true
-                            // Simulate GPS high accuracy capture for Patna / local area
-                            val randomLatOffset = ((System.currentTimeMillis() % 1000) - 500) / 100000.0
-                            val randomLngOffset = ((System.currentTimeMillis() % 900) - 450) / 100000.0
-                            currentLatitude = 25.5941 + randomLatOffset
-                            currentLongitude = 85.1376 + randomLngOffset
-                            isGpsFetched = true
-                            if (fullAddress.isBlank()) {
-                                fullAddress = "Shop #4, Kankarbagh Main Road, Near Central Park"
+                            if (hasLocationPermission(context)) {
+                                fetchDeviceGpsLocation(context) { lat, lng, _ ->
+                                    currentLatitude = lat
+                                    currentLongitude = lng
+                                    isGpsFetched = true
+                                    isFetchingGps = false
+                                    locationSaveSuccess = false
+                                    if (fullAddress.isBlank()) {
+                                        fullAddress = "Shop #4, Kankarbagh Main Road, Near Central Park"
+                                    }
+                                    if (landmark.isBlank()) {
+                                        landmark = "Opposite Metro Pillar #42"
+                                    }
+                                }
+                            } else {
+                                gpsPermissionLauncher.launch(
+                                    arrayOf(
+                                        Manifest.permission.ACCESS_FINE_LOCATION,
+                                        Manifest.permission.ACCESS_COARSE_LOCATION
+                                    )
+                                )
                             }
-                            if (landmark.isBlank()) {
-                                landmark = "Opposite Metro Pillar #42"
-                            }
-                            isFetchingGps = false
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1655,30 +2378,41 @@ fun PartnerShopProfileTabContent(
                         }
                     }
 
-                    // GPS Coordinates preview pill
-                    if (isGpsFetched) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF0F172A))
-                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Lat: ${"%.4f".format(currentLatitude)}, Lng: ${"%.4f".format(currentLongitude)}",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF67E8F9)
-                            )
-                            Text(
-                                text = "High Accuracy GPS (±5m)",
-                                fontSize = 10.sp,
-                                color = Color(0xFF94A3B8)
-                            )
+                    // 1b. Interactive OpenStreetMap Shop Pin Picker (Tap or Drag Pin)
+                    PartnerLocationPickerOsmMap(
+                        latitude = currentLatitude,
+                        longitude = currentLongitude,
+                        salonName = shopName.ifBlank { salon?.name ?: "My Salon" },
+                        onLocationPicked = { pickedLat, pickedLng ->
+                            currentLatitude = pickedLat
+                            currentLongitude = pickedLng
+                            isGpsFetched = true
+                            locationSaveSuccess = false
                         }
+                    )
+
+                    // GPS Coordinates preview pill
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF0F172A))
+                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Lat: ${"%.4f".format(currentLatitude)}, Lng: ${"%.4f".format(currentLongitude)}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF67E8F9)
+                        )
+                        Text(
+                            text = if (isGpsFetched) "Pin Locked • Ready to Save" else "Tap map to adjust pin",
+                            fontSize = 10.sp,
+                            color = Color(0xFF94A3B8)
+                        )
                     }
 
                     // 2. Full Shop Address Text Field
@@ -1730,12 +2464,15 @@ fun PartnerShopProfileTabContent(
                         shape = RoundedCornerShape(10.dp)
                     )
 
-                    // 4. Save Location to Firestore Action Button
+                    // 4. Save Full Shop Profile & Location to Firestore Action Button
                     Button(
                         onClick = {
                             if (salon != null && fullAddress.isNotBlank()) {
-                                onSaveLocation(
+                                onSaveFullProfile(
                                     salon.id,
+                                    shopName.trim().ifBlank { salon.name },
+                                    shopPhone.trim(),
+                                    shopTagline.trim(),
                                     fullAddress.trim(),
                                     landmark.trim(),
                                     currentLatitude,
@@ -1744,7 +2481,7 @@ fun PartnerShopProfileTabContent(
                                 locationSaveSuccess = true
                             }
                         },
-                        enabled = fullAddress.isNotBlank(),
+                        enabled = fullAddress.isNotBlank() && shopName.isNotBlank(),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(48.dp)
@@ -1766,7 +2503,7 @@ fun PartnerShopProfileTabContent(
                                 modifier = Modifier.size(18.dp)
                             )
                             Text(
-                                text = "Save Location to Firestore",
+                                text = "Save Shop Profile & GPS to Firestore",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = DarkBackground
@@ -1791,7 +2528,7 @@ fun PartnerShopProfileTabContent(
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "Location saved! Shop can now toggle online.",
+                                text = "Shop Profile & GPS synced to Cloud Firestore!",
                                 fontSize = 11.sp,
                                 color = Color(0xFFA7F3D0),
                                 fontWeight = FontWeight.SemiBold
@@ -1914,7 +2651,7 @@ fun PartnerShopProfileTabContent(
             }
         }
 
-        // Shop Information & Profile Details
+        // Live Firestore Document Summary
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -1928,25 +2665,22 @@ fun PartnerShopProfileTabContent(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = "SALON SHOP DETAILS",
+                        text = "LIVE FIRESTORE SALON DOCUMENT",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF94A3B8),
                         letterSpacing = 1.sp
                     )
 
+                    ShopDetailRow(label = "Firestore Doc ID", value = salon?.id ?: "Not Linked")
                     ShopDetailRow(label = "Salon Name", value = salon?.name ?: "TrimTime Partner Salon")
                     ShopDetailRow(label = "Location", value = salon?.location ?: "Hyper-local Street")
+                    ShopDetailRow(label = "Available Chairs", value = "${salon?.availableChairs ?: 2} Chairs (${salon?.waitingTimeMinutes ?: 0}m wait)")
                     ShopDetailRow(label = "Rating", value = "${salon?.rating ?: 4.8} ★ (${salon?.reviewCount ?: 120} reviews)")
-                    ShopDetailRow(label = "Partner Account", value = partnerProfile?.email ?: "Registered Partner")
-                    ShopDetailRow(label = "Contact Phone", value = partnerProfile?.phone ?: "+91 98765 43210")
+                    ShopDetailRow(label = "Owner Account", value = partnerProfile?.email ?: "Registered Partner")
+                    ShopDetailRow(label = "Shop Phone", value = salon?.phone?.ifBlank { partnerProfile?.phone ?: "" } ?: "+91 98765 43210")
                 }
             }
-        }
-
-        // Project Export & Share Hub (Download Project Source Code .ZIP for External APK Build)
-        item {
-            ProjectExportHubCard()
         }
     }
 }

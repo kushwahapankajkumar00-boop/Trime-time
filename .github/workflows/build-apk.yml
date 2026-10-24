@@ -152,8 +152,8 @@ jobs:
               applicationId = "com.trimtime.app"
               minSdk = 24
               targetSdk = 35
-              versionCode = 1
-              versionName = "1.0"
+              versionCode = 2
+              versionName = "1.1"
 
               testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
             }
@@ -239,6 +239,7 @@ jobs:
             implementation(libs.googleid)
             implementation(libs.kotlinx.coroutines.android)
             implementation(libs.kotlinx.coroutines.core)
+            implementation("org.osmdroid:osmdroid-android:6.1.18")
             testImplementation(libs.androidx.compose.ui.test.junit4)
             testImplementation(libs.androidx.core)
             testImplementation(libs.androidx.junit)

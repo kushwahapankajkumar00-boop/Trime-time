@@ -156,7 +156,8 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
                 if (snapshot != null) {
                     if (snapshot.isEmpty) {
-                        Log.d(tag, "Salons collection is empty in Firestore.")
+                        Log.d(tag, "Salons collection is empty in Firestore. Seeding initial live salons...")
+                        seedLiveSalonsIntoFirestore(db)
                     } else {
                         val liveSalons = snapshot.documents.mapNotNull { doc ->
                             try {
@@ -197,10 +198,15 @@ class TrimTimeRepository private constructor(context: Context) {
                                     ?: doc.getString("reviewCount")?.toIntOrNull()
                                     ?: 15
 
-                                val partnerId = doc.getString("partnerId")
-                                    ?: doc.getString("ownerId")
+                                val ownerId = doc.getString("ownerId")
+                                    ?: doc.getString("partnerId")
                                     ?: doc.getString("userId")
                                     ?: ""
+
+                                val partnerId = doc.getString("partnerId")
+                                    ?: ownerId
+
+                                val phone = doc.getString("phone") ?: ""
 
                                 val isOpen = doc.getBoolean("isOpen")
                                     ?: doc.getString("isOpen")?.toBooleanStrictOrNull()
@@ -208,13 +214,21 @@ class TrimTimeRepository private constructor(context: Context) {
 
                                 val currentStatus = doc.getString("currentStatus") ?: "FREE"
 
+                                val availableChairs = (doc.get("availableChairs") as? Number)?.toInt()
+                                    ?: doc.getString("availableChairs")?.toIntOrNull()
+                                    ?: 2
+
+                                val waitingTimeMinutes = (doc.get("waitingTimeMinutes") as? Number)?.toInt()
+                                    ?: doc.getString("waitingTimeMinutes")?.toIntOrNull()
+                                    ?: if (currentStatus.equals("BUSY", ignoreCase = true)) 15 else 0
+
                                 val tagline = doc.getString("tagline")
                                     ?: doc.getString("description")
                                     ?: "Instant grooming slots"
 
                                 val nextSlotMinutes = (doc.get("nextSlotMinutes") as? Number)?.toInt()
                                     ?: doc.getString("nextSlotMinutes")?.toIntOrNull()
-                                    ?: 15
+                                    ?: if (waitingTimeMinutes > 0) waitingTimeMinutes else 15
 
                                 val servicesRaw = doc.get("services") as? List<Map<String, Any?>> ?: emptyList()
                                 val parsedServices = servicesRaw.mapIndexed { idx, sMap ->
@@ -289,9 +303,13 @@ class TrimTimeRepository private constructor(context: Context) {
                                     rating = rating,
                                     reviewCount = reviewCount,
                                     partnerId = partnerId,
+                                    ownerId = ownerId,
+                                    phone = phone,
                                     services = finalServices,
                                     isOpen = isOpen,
                                     currentStatus = currentStatus,
+                                    availableChairs = availableChairs,
+                                    waitingTimeMinutes = waitingTimeMinutes,
                                     tagline = tagline,
                                     nextSlotMinutes = nextSlotMinutes,
                                     shopAddress = shopAddress,
@@ -323,6 +341,9 @@ class TrimTimeRepository private constructor(context: Context) {
                 if (snapshot != null) {
                     val liveBookings = snapshot.documents.mapNotNull { doc ->
                         try {
+                            val resolvedPin = doc.getString("servicePin")?.takeIf { it.isNotBlank() }
+                                ?: doc.getString("pin")?.takeIf { it.isNotBlank() }
+                                ?: "0000"
                             Booking(
                                 id = doc.getString("id") ?: doc.id,
                                 customerId = doc.getString("customerId") ?: "",
@@ -335,7 +356,7 @@ class TrimTimeRepository private constructor(context: Context) {
                                 timeSlot = doc.getString("timeSlot") ?: "",
                                 bookingDate = doc.getString("bookingDate") ?: "Today",
                                 status = doc.getString("status") ?: "pending",
-                                pin = doc.getString("pin") ?: "0000",
+                                pin = resolvedPin,
                                 createdAt = doc.getLong("createdAt") ?: 0L,
                                 completedAt = doc.getLong("completedAt")
                             )
@@ -574,15 +595,19 @@ class TrimTimeRepository private constructor(context: Context) {
                     _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) UserRole.PARTNER else UserRole.CUSTOMER
                     _authState.value = AppAuthState.Authenticated(_currentRole.value)
                     _isLoading.value = false
+                    if (_currentRole.value == UserRole.PARTNER) {
+                        ensurePartnerSalonInFirestore(userProfile)
+                    }
                     onSuccess()
                 } else {
+                    val assignedSalonId = if (asPartner) "salon_$uid" else null
                     val newProfile = UserProfile(
                         id = uid,
                         name = trimmedName,
                         email = trimmedEmail,
                         phone = formattedPhone,
                         role = targetRoleStr,
-                        salonId = null,
+                        salonId = assignedSalonId,
                         cancellationCount = 0,
                         isSuspended = false,
                         createdAt = System.currentTimeMillis()
@@ -601,6 +626,9 @@ class TrimTimeRepository private constructor(context: Context) {
                             _currentRole.value = if (asPartner) UserRole.PARTNER else UserRole.CUSTOMER
                             _authState.value = AppAuthState.Authenticated(_currentRole.value)
                             _isLoading.value = false
+                            if (asPartner) {
+                                ensurePartnerSalonInFirestore(newProfile)
+                            }
                             onSuccess()
                         }
                         .addOnFailureListener { setErr ->
@@ -617,6 +645,182 @@ class TrimTimeRepository private constructor(context: Context) {
                 _authError.value = errMsg
                 onError(errMsg)
             }
+    }
+
+    /**
+     * Simple 1-Identifier Login for Existing Users (Mobile Number OR Email Address):
+     * Searches Firestore `users` collection for an existing account matching the phone or email.
+     * - If found: logs the user in immediately with their saved Name, Role (Customer/Partner), and profile data.
+     * - If not found: triggers `onAccountNotFound(prefillEmail, prefillPhone)` with message
+     *   "Account not found. Switching to Sign Up..." so the UI switches to the Sign Up tab with pre-filled data.
+     */
+    fun loginExistingUser(
+        identifier: String,
+        onSuccess: (UserProfile) -> Unit,
+        onAccountNotFound: (prefillEmail: String, prefillPhone: String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val trimmed = identifier.trim()
+        if (trimmed.isBlank()) {
+            val msg = "Please enter your registered 10-Digit Mobile Number or Email Address."
+            _authError.value = msg
+            onError(msg)
+            return
+        }
+
+        val firestoreDb = firestore
+        if (firestoreDb == null) {
+            _isLoading.value = false
+            val msg = "Firestore database is not connected."
+            _authError.value = msg
+            onError(msg)
+            return
+        }
+
+        _isLoading.value = true
+        _authError.value = null
+        _showSha1FallbackDialog.value = false
+
+        if (trimmed.contains("@")) {
+            val cleanEmail = trimmed.lowercase()
+            if (!cleanEmail.contains(".")) {
+                _isLoading.value = false
+                val msg = "Please enter a valid email address."
+                _authError.value = msg
+                onError(msg)
+                return
+            }
+
+            val deterministicUid = "usr_" + cleanEmail.replace(Regex("[^a-z0-9]"), "_")
+            firestoreDb.collection("users").document(deterministicUid).get()
+                .addOnSuccessListener { doc ->
+                    if (doc != null && doc.exists()) {
+                        applyExistingUserDocument(doc, onSuccess)
+                    } else {
+                        // Also query by 'email' field in case account was created with Google UID
+                        firestoreDb.collection("users")
+                            .whereEqualTo("email", cleanEmail)
+                            .limit(1)
+                            .get()
+                            .addOnSuccessListener { querySnapshot ->
+                                val matchedDoc = querySnapshot?.documents?.firstOrNull()
+                                if (matchedDoc != null && matchedDoc.exists()) {
+                                    applyExistingUserDocument(matchedDoc, onSuccess)
+                                } else {
+                                    _isLoading.value = false
+                                    val notFoundMsg = "Account not found. Switching to Sign Up..."
+                                    _authError.value = notFoundMsg
+                                    onAccountNotFound(cleanEmail, "")
+                                }
+                            }
+                            .addOnFailureListener { err ->
+                                _isLoading.value = false
+                                val errMsg = "Failed to look up email in Firestore: ${err.localizedMessage}"
+                                _authError.value = errMsg
+                                onError(errMsg)
+                            }
+                    }
+                }
+                .addOnFailureListener { err ->
+                    _isLoading.value = false
+                    val errMsg = "Failed to connect to Firestore: ${err.localizedMessage}"
+                    _authError.value = errMsg
+                    onError(errMsg)
+                }
+        } else {
+            val rawDigits = trimmed.filter { it.isDigit() }
+            val tenDigits = if (rawDigits.length > 10 && rawDigits.startsWith("91")) {
+                rawDigits.drop(2).take(10)
+            } else {
+                rawDigits.takeLast(10)
+            }
+
+            if (tenDigits.length != 10) {
+                _isLoading.value = false
+                val msg = "Please enter a valid 10-Digit Mobile Number or Email Address."
+                _authError.value = msg
+                onError(msg)
+                return
+            }
+
+            val candidatePhones = listOf(
+                "+91 $tenDigits",
+                tenDigits,
+                "+91$tenDigits",
+                "+91-$tenDigits"
+            )
+
+            firestoreDb.collection("users")
+                .whereIn("phone", candidatePhones)
+                .limit(1)
+                .get()
+                .addOnSuccessListener { querySnapshot ->
+                    val matchedDoc = querySnapshot?.documents?.firstOrNull()
+                    if (matchedDoc != null && matchedDoc.exists()) {
+                        applyExistingUserDocument(matchedDoc, onSuccess)
+                    } else {
+                        _isLoading.value = false
+                        val notFoundMsg = "Account not found. Switching to Sign Up..."
+                        _authError.value = notFoundMsg
+                        onAccountNotFound("", tenDigits)
+                    }
+                }
+                .addOnFailureListener { err ->
+                    _isLoading.value = false
+                    val errMsg = "Failed to look up mobile number in Firestore: ${err.localizedMessage}"
+                    _authError.value = errMsg
+                    onError(errMsg)
+                }
+        }
+    }
+
+    private fun applyExistingUserDocument(
+        doc: com.google.firebase.firestore.DocumentSnapshot,
+        onSuccess: (UserProfile) -> Unit
+    ) {
+        val uid = doc.id
+        val existingName = doc.getString("name")?.takeIf { it.isNotBlank() }
+            ?: doc.getString("displayName")?.takeIf { it.isNotBlank() }
+            ?: "Customer"
+        val existingEmail = doc.getString("email") ?: ""
+        val existingPhone = doc.getString("phone") ?: ""
+        val existingRole = doc.getString("role") ?: "customer"
+        val existingSalonId = doc.getString("salonId")
+        val existingCancellationCount = doc.getLong("cancellationCount")?.toInt() ?: 0
+        val existingIsSuspended = doc.getBoolean("isSuspended") ?: (existingCancellationCount >= 3)
+        val existingCreatedAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
+
+        val userProfile = UserProfile(
+            id = uid,
+            name = existingName,
+            email = existingEmail,
+            phone = existingPhone,
+            role = existingRole,
+            salonId = existingSalonId,
+            cancellationCount = existingCancellationCount,
+            isSuspended = existingIsSuspended,
+            createdAt = existingCreatedAt
+        )
+
+        sessionPrefs.edit()
+            .putString("saved_uid", uid)
+            .putString("saved_name", existingName)
+            .putString("saved_email", existingEmail)
+            .putString("saved_role", existingRole)
+            .apply()
+
+        _currentUserProfile.value = userProfile
+        _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) {
+            UserRole.PARTNER
+        } else {
+            UserRole.CUSTOMER
+        }
+        _authState.value = AppAuthState.Authenticated(_currentRole.value)
+        _isLoading.value = false
+        if (_currentRole.value == UserRole.PARTNER) {
+            ensurePartnerSalonInFirestore(userProfile)
+        }
+        onSuccess(userProfile)
     }
 
     /**
@@ -703,6 +907,9 @@ class TrimTimeRepository private constructor(context: Context) {
                     _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) UserRole.PARTNER else UserRole.CUSTOMER
                     _authState.value = AppAuthState.Authenticated(_currentRole.value)
                     _isLoading.value = false
+                    if (_currentRole.value == UserRole.PARTNER) {
+                        ensurePartnerSalonInFirestore(userProfile)
+                    }
                     onSuccess()
                 } else {
                     // New User: Create document in Firestore
@@ -806,16 +1013,182 @@ class TrimTimeRepository private constructor(context: Context) {
         _authState.value = AppAuthState.Unauthenticated
     }
 
-    fun switchToPartnerRole() {
+    fun switchToPartnerRole(onSalonReady: (String) -> Unit = {}) {
         _currentRole.value = UserRole.PARTNER
         _authState.value = AppAuthState.Authenticated(UserRole.PARTNER)
         sessionPrefs.edit().putString("saved_role", "partner").apply()
+        val currentProfile = _currentUserProfile.value
+        if (currentProfile != null) {
+            ensurePartnerSalonInFirestore(currentProfile, onSalonReady)
+        }
     }
 
     fun switchToCustomerRole() {
         _currentRole.value = UserRole.CUSTOMER
         _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
         sessionPrefs.edit().putString("saved_role", "customer").apply()
+    }
+
+    /**
+     * Real-Time Salon Profile & Creation (`salons` collection):
+     * When a Partner logs in or switches to Partner Mode, fetches their salon document from Firestore
+     * `salons` collection matching their `ownerId` / `partnerId` (or creates a new live document in
+     * Firestore if they don't have one yet), and links `salonId` to their `users/{uid}` document.
+     */
+    fun ensurePartnerSalonInFirestore(
+        profile: UserProfile,
+        onSalonReady: (String) -> Unit = {}
+    ) {
+        val db = firestore ?: return
+        val uid = profile.id
+        if (uid.isBlank()) return
+
+        // 1. Check if already in loaded _salons matching ownerId, partnerId, or profile.salonId
+        val existingInMemory = _salons.value.find {
+            it.ownerId == uid ||
+            it.partnerId == uid ||
+            (!profile.salonId.isNullOrBlank() && it.id == profile.salonId) ||
+            it.id == "salon_$uid"
+        }
+
+        if (existingInMemory != null) {
+            if (profile.salonId != existingInMemory.id || !profile.role.equals("partner", ignoreCase = true)) {
+                val updatedProfile = profile.copy(role = "partner", salonId = existingInMemory.id)
+                _currentUserProfile.value = updatedProfile
+                db.collection("users").document(uid).set(
+                    mapOf("role" to "partner", "salonId" to existingInMemory.id),
+                    com.google.firebase.firestore.SetOptions.merge()
+                )
+            }
+            onSalonReady(existingInMemory.id)
+            return
+        }
+
+        // 2. Query Firestore 'salons' collection for ownerId == uid
+        db.collection("salons")
+            .whereEqualTo("ownerId", uid)
+            .limit(1)
+            .get()
+            .addOnSuccessListener { ownerQuery ->
+                val matchedDoc = ownerQuery?.documents?.firstOrNull()
+                if (matchedDoc != null && matchedDoc.exists()) {
+                    val foundSalonId = matchedDoc.id
+                    val updatedProfile = profile.copy(role = "partner", salonId = foundSalonId)
+                    _currentUserProfile.value = updatedProfile
+                    db.collection("users").document(uid).set(
+                        mapOf("role" to "partner", "salonId" to foundSalonId),
+                        com.google.firebase.firestore.SetOptions.merge()
+                    )
+                    onSalonReady(foundSalonId)
+                } else {
+                    // Check deterministic document ID 'salon_$uid' or profile.salonId
+                    val targetSalonId = profile.salonId?.takeIf { it.isNotBlank() } ?: "salon_$uid"
+                    db.collection("salons").document(targetSalonId).get()
+                        .addOnSuccessListener { doc ->
+                            if (doc != null && doc.exists()) {
+                                val updatedProfile = profile.copy(role = "partner", salonId = targetSalonId)
+                                _currentUserProfile.value = updatedProfile
+                                db.collection("users").document(uid).set(
+                                    mapOf("role" to "partner", "salonId" to targetSalonId),
+                                    com.google.firebase.firestore.SetOptions.merge()
+                                )
+                                onSalonReady(targetSalonId)
+                            } else {
+                                // Create a new live Salon document in Firestore for this Partner
+                                val cleanOwnerName = profile.name.takeIf { it.isNotBlank() } ?: "Partner"
+                                val defaultShopName = if (cleanOwnerName.contains("Salon", ignoreCase = true) ||
+                                    cleanOwnerName.contains("Studio", ignoreCase = true)
+                                ) {
+                                    cleanOwnerName
+                                } else {
+                                    "$cleanOwnerName's Grooming Studio"
+                                }
+
+                                val newSalon = Salon(
+                                    id = targetSalonId,
+                                    name = defaultShopName,
+                                    location = "Kankarbagh Main Road, Patna",
+                                    distance = "0.4 km",
+                                    rating = 4.9,
+                                    reviewCount = 1,
+                                    partnerId = uid,
+                                    ownerId = uid,
+                                    phone = profile.phone.ifBlank { "+91 98765 43210" },
+                                    isOpen = true,
+                                    currentStatus = "FREE",
+                                    availableChairs = 2,
+                                    waitingTimeMinutes = 0,
+                                    tagline = "Instant grooming slots • Zero queue wait time",
+                                    nextSlotMinutes = 15,
+                                    shopAddress = "Kankarbagh Main Road, Near Central Park, Patna",
+                                    landmark = "Near Central Park",
+                                    latitude = 25.5941,
+                                    longitude = 85.1376,
+                                    services = listOf(
+                                        SalonService(
+                                            id = "${targetSalonId}_s1",
+                                            name = "Haircut",
+                                            category = "Haircut",
+                                            price = 120,
+                                            durationMinutes = 20,
+                                            description = "Precision scissor & clipper cut with styling",
+                                            isPopular = true
+                                        ),
+                                        SalonService(
+                                            id = "${targetSalonId}_s2",
+                                            name = "Beard Trim & Shave",
+                                            category = "Beard",
+                                            price = 80,
+                                            durationMinutes = 15,
+                                            description = "Clean foam shave & razor edge lineup",
+                                            isPopular = true
+                                        ),
+                                        SalonService(
+                                            id = "${targetSalonId}_s3",
+                                            name = "Facial & Detan",
+                                            category = "Facial",
+                                            price = 250,
+                                            durationMinutes = 25,
+                                            description = "Deep cleanse & charcoal glow facial",
+                                            isPopular = false
+                                        ),
+                                        SalonService(
+                                            id = "${targetSalonId}_s4",
+                                            name = "Head Massage",
+                                            category = "Massage",
+                                            price = 100,
+                                            durationMinutes = 15,
+                                            description = "Relaxing herbal oil head massage",
+                                            isPopular = false
+                                        )
+                                    )
+                                )
+
+                                // Update local state immediately and write to Firestore
+                                _salons.value = listOf(newSalon) + _salons.value.filterNot { it.id == targetSalonId }
+                                val updatedProfile = profile.copy(role = "partner", salonId = targetSalonId)
+                                _currentUserProfile.value = updatedProfile
+
+                                db.collection("salons").document(targetSalonId).set(newSalon.toMap())
+                                    .addOnSuccessListener {
+                                        Log.d(tag, "Created new live Partner salon in Firestore: $targetSalonId")
+                                        db.collection("users").document(uid).set(
+                                            mapOf("role" to "partner", "salonId" to targetSalonId),
+                                            com.google.firebase.firestore.SetOptions.merge()
+                                        )
+                                        onSalonReady(targetSalonId)
+                                    }
+                                    .addOnFailureListener { err ->
+                                        Log.e(tag, "Failed to create Partner salon in Firestore: ${err.message}")
+                                        onSalonReady(targetSalonId)
+                                    }
+                            }
+                        }
+                }
+            }
+            .addOnFailureListener { err ->
+                Log.w(tag, "Error querying Partner salon by ownerId: ${err.message}")
+            }
     }
 
     private fun fetchUserProfile(uid: String) {
@@ -830,7 +1203,8 @@ class TrimTimeRepository private constructor(context: Context) {
         firestoreDb.collection("users").document(uid).get()
             .addOnSuccessListener { doc ->
                 if (doc != null && doc.exists()) {
-                    val roleStr = doc.getString("role") ?: "customer"
+                    val savedRolePref = sessionPrefs.getString("saved_role", null)
+                    val roleStr = savedRolePref ?: doc.getString("role") ?: "customer"
                     val cancelCount = doc.getLong("cancellationCount")?.toInt() ?: 0
                     val suspended = doc.getBoolean("isSuspended") ?: (cancelCount >= 3)
                     val profile = UserProfile(
@@ -848,6 +1222,7 @@ class TrimTimeRepository private constructor(context: Context) {
                     if (roleStr.equals("partner", ignoreCase = true) || roleStr.equals("owner", ignoreCase = true)) {
                         _currentRole.value = UserRole.PARTNER
                         _authState.value = AppAuthState.Authenticated(UserRole.PARTNER)
+                        ensurePartnerSalonInFirestore(profile)
                     } else {
                         _currentRole.value = UserRole.CUSTOMER
                         _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
@@ -909,7 +1284,7 @@ class TrimTimeRepository private constructor(context: Context) {
 
         // Rule 2: Enforce One Active Booking Rule
         val hasActivePending = _bookings.value.any { b ->
-            b.status.equals("pending", ignoreCase = true) && (
+            (b.status.equals("pending", ignoreCase = true) || b.status.equals("accepted", ignoreCase = true)) && (
                 b.customerId == customerId ||
                 (customerPhone.isNotBlank() && b.customerPhone == customerPhone)
             )
@@ -956,6 +1331,45 @@ class TrimTimeRepository private constructor(context: Context) {
         }
 
         return newBooking
+    }
+
+    /**
+     * Partner Action: Accept an incoming customer booking in real time in Firestore.
+     */
+    fun acceptBooking(bookingId: String): Boolean {
+        val currentBookings = _bookings.value
+        val booking = currentBookings.find { it.id == bookingId } ?: return false
+        val acceptedBooking = booking.copy(status = BookingStatus.ACCEPTED.name.lowercase())
+        _bookings.value = currentBookings.map { if (it.id == bookingId) acceptedBooking else it }
+
+        firestore?.collection("bookings")?.document(bookingId)?.update("status", "accepted")
+            ?.addOnSuccessListener {
+                Log.d(tag, "Booking $bookingId accepted in Firestore.")
+            }
+            ?.addOnFailureListener { e ->
+                Log.w(tag, "Failed to accept booking in Firestore: ${e.message}")
+            }
+        return true
+    }
+
+    /**
+     * Partner Action: Reject an incoming customer booking in real time in Firestore
+     * (Does NOT add a cancellation strike to the customer since the partner rejected it).
+     */
+    fun rejectBooking(bookingId: String): Boolean {
+        val currentBookings = _bookings.value
+        val booking = currentBookings.find { it.id == bookingId } ?: return false
+        val rejectedBooking = booking.copy(status = BookingStatus.REJECTED.name.lowercase())
+        _bookings.value = currentBookings.map { if (it.id == bookingId) rejectedBooking else it }
+
+        firestore?.collection("bookings")?.document(bookingId)?.update("status", "rejected")
+            ?.addOnSuccessListener {
+                Log.d(tag, "Booking $bookingId rejected in Firestore.")
+            }
+            ?.addOnFailureListener { e ->
+                Log.w(tag, "Failed to reject booking in Firestore: ${e.message}")
+            }
+        return true
     }
 
     fun verifyAndCompleteBooking(bookingId: String, enteredPin: String): PinVerificationResult {
@@ -1054,7 +1468,10 @@ class TrimTimeRepository private constructor(context: Context) {
         _salons.value = updated
         val updatedSalon = updated.find { it.id == salonId }
         if (updatedSalon != null) {
-            firestore?.collection("salons")?.document(salonId)?.update("isOpen", updatedSalon.isOpen)
+            firestore?.collection("salons")?.document(salonId)?.set(
+                mapOf("isOpen" to updatedSalon.isOpen),
+                com.google.firebase.firestore.SetOptions.merge()
+            )
         }
     }
 
@@ -1064,7 +1481,10 @@ class TrimTimeRepository private constructor(context: Context) {
             if (it.id == salonId) it.copy(isOpen = isOpen) else it
         }
         _salons.value = updated
-        firestore?.collection("salons")?.document(salonId)?.update("isOpen", isOpen)
+        firestore?.collection("salons")?.document(salonId)?.set(
+            mapOf("isOpen" to isOpen),
+            com.google.firebase.firestore.SetOptions.merge()
+        )
             ?.addOnSuccessListener {
                 Log.d(tag, "Salon $salonId isOpen updated to $isOpen in Firestore.")
             }
@@ -1079,19 +1499,71 @@ class TrimTimeRepository private constructor(context: Context) {
      */
     fun setSalonBusyStatus(salonId: String, status: String) {
         val normalizedStatus = if (status.equals("BUSY", ignoreCase = true)) "BUSY" else "FREE"
+        val defaultWait = if (normalizedStatus == "BUSY") 15 else 0
         val currentSalons = _salons.value
         val updated = currentSalons.map {
-            if (it.id == salonId) it.copy(currentStatus = normalizedStatus) else it
+            if (it.id == salonId) {
+                it.copy(
+                    currentStatus = normalizedStatus,
+                    waitingTimeMinutes = defaultWait,
+                    nextSlotMinutes = if (defaultWait > 0) defaultWait else 15
+                )
+            } else it
         }
         _salons.value = updated
 
-        firestore?.collection("salons")?.document(salonId)?.update("currentStatus", normalizedStatus)
+        firestore?.collection("salons")?.document(salonId)?.set(
+            mapOf(
+                "currentStatus" to normalizedStatus,
+                "waitingTimeMinutes" to defaultWait,
+                "nextSlotMinutes" to if (defaultWait > 0) defaultWait else 15
+            ),
+            com.google.firebase.firestore.SetOptions.merge()
+        )
             ?.addOnSuccessListener {
                 Log.d(tag, "Salon $salonId currentStatus successfully set to $normalizedStatus in Firestore.")
             }
             ?.addOnFailureListener { err ->
                 Log.w(tag, "Failed to update currentStatus in Firestore: ${err.message}")
             }
+    }
+
+    /**
+     * Real-Time Chair Availability & Waiting Time Update (`salons/{salonId}`):
+     * Writes `currentStatus`, `availableChairs`, `waitingTimeMinutes`, and `nextSlotMinutes` directly to Firestore.
+     */
+    fun updateSalonChairAvailability(
+        salonId: String,
+        currentStatus: String,
+        availableChairs: Int,
+        waitingTimeMinutes: Int
+    ) {
+        val normalizedStatus = if (currentStatus.equals("BUSY", ignoreCase = true) || waitingTimeMinutes > 0) "BUSY" else "FREE"
+        val nextSlot = if (waitingTimeMinutes > 0) waitingTimeMinutes else 10
+        val currentSalons = _salons.value
+        val updated = currentSalons.map {
+            if (it.id == salonId) {
+                it.copy(
+                    currentStatus = normalizedStatus,
+                    availableChairs = availableChairs.coerceAtLeast(0),
+                    waitingTimeMinutes = waitingTimeMinutes.coerceAtLeast(0),
+                    nextSlotMinutes = nextSlot
+                )
+            } else it
+        }
+        _salons.value = updated
+
+        firestore?.collection("salons")?.document(salonId)?.set(
+            mapOf(
+                "currentStatus" to normalizedStatus,
+                "availableChairs" to availableChairs.coerceAtLeast(0),
+                "waitingTimeMinutes" to waitingTimeMinutes.coerceAtLeast(0),
+                "nextSlotMinutes" to nextSlot
+            ),
+            com.google.firebase.firestore.SetOptions.merge()
+        )?.addOnSuccessListener {
+            Log.d(tag, "Updated chair availability ($availableChairs chairs, ${waitingTimeMinutes}m wait) for $salonId in Firestore.")
+        }
     }
 
     fun updateSalonServices(
@@ -1108,14 +1580,140 @@ class TrimTimeRepository private constructor(context: Context) {
 
         val servicesMap = updatedServices.map { it.toMap() }
         firestore?.collection("salons")?.document(salonId)
-            ?.update("services", servicesMap)
+            ?.set(mapOf("services" to servicesMap), com.google.firebase.firestore.SetOptions.merge())
             ?.addOnSuccessListener {
                 Log.d(tag, "Services updated in Firestore for salon: $salonId")
                 onSuccess()
             }
             ?.addOnFailureListener { e ->
                 Log.w(tag, "Failed to update services in Firestore: ${e.message}")
-                onSuccess() // Keep local in-memory update
+                onError(e.message ?: "Failed to update services")
+            } ?: onSuccess()
+    }
+
+    /**
+     * Real-Time Add Service to Partner's Salon in Firestore (`salons/{salonId}`):
+     */
+    fun addSalonService(
+        salonId: String,
+        name: String,
+        category: String,
+        price: Int,
+        durationMinutes: Int,
+        description: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        val currentSalon = _salons.value.find { it.id == salonId } ?: return
+        val newServiceId = "${salonId}_srv_${System.currentTimeMillis().toString().takeLast(5)}"
+        val newService = SalonService(
+            id = newServiceId,
+            name = name.trim(),
+            category = category.trim().ifBlank { "Haircut" },
+            price = price.coerceAtLeast(10),
+            durationMinutes = durationMinutes.coerceAtLeast(5),
+            description = description.trim().ifBlank { "$name ($durationMinutes mins)" },
+            isPopular = true
+        )
+        val updatedList = currentSalon.services + newService
+        updateSalonServices(salonId = salonId, updatedServices = updatedList, onSuccess = onSuccess)
+    }
+
+    /**
+     * Real-Time Edit Existing Service in Partner's Salon in Firestore (`salons/{salonId}`):
+     */
+    fun editSalonService(
+        salonId: String,
+        updatedService: SalonService,
+        onSuccess: () -> Unit = {}
+    ) {
+        val currentSalon = _salons.value.find { it.id == salonId } ?: return
+        val updatedList = currentSalon.services.map {
+            if (it.id == updatedService.id) updatedService else it
+        }
+        updateSalonServices(salonId = salonId, updatedServices = updatedList, onSuccess = onSuccess)
+    }
+
+    /**
+     * Real-Time Delete Service from Partner's Salon in Firestore (`salons/{salonId}`):
+     */
+    fun deleteSalonService(
+        salonId: String,
+        serviceId: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        val currentSalon = _salons.value.find { it.id == salonId } ?: return
+        val updatedList = currentSalon.services.filterNot { it.id == serviceId }
+        updateSalonServices(salonId = salonId, updatedServices = updatedList, onSuccess = onSuccess)
+    }
+
+    /**
+     * Updates Salon's Full Profile (Shop Name, Phone, Tagline, Physical Address, Landmark, and GPS Coordinates)
+     * directly in Firestore `salons/{salonId}` so Customers see changes in real time on their Salons list and Map.
+     */
+    fun updateSalonFullProfile(
+        salonId: String,
+        name: String,
+        phone: String,
+        tagline: String,
+        shopAddress: String,
+        landmark: String,
+        latitude: Double,
+        longitude: Double,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val calculatedDistKm = calculateDistanceKm(25.5941, 85.1376, latitude, longitude)
+        val dynamicDistance = String.format(java.util.Locale.US, "%.1f km", calculatedDistKm)
+        val shortLocation = if (landmark.isNotBlank()) "$landmark, $shopAddress".take(40) else shopAddress.take(40)
+        val cleanName = name.trim().ifBlank { "TrimTime Partner Salon" }
+        val cleanPhone = phone.trim()
+        val cleanTagline = tagline.trim().ifBlank { "Instant grooming slots • Zero queue wait time" }
+
+        val currentSalons = _salons.value
+        val updated = currentSalons.map {
+            if (it.id == salonId) {
+                it.copy(
+                    name = cleanName,
+                    phone = cleanPhone,
+                    tagline = cleanTagline,
+                    shopAddress = shopAddress,
+                    landmark = landmark,
+                    latitude = latitude,
+                    longitude = longitude,
+                    distance = dynamicDistance,
+                    location = shortLocation.ifBlank { it.location }
+                )
+            } else it
+        }
+        _salons.value = updated
+
+        val coordinatesMap = mapOf(
+            "lat" to latitude,
+            "lng" to longitude
+        )
+
+        val updates = mapOf(
+            "name" to cleanName,
+            "phone" to cleanPhone,
+            "tagline" to cleanTagline,
+            "shopAddress" to shopAddress,
+            "landmark" to landmark,
+            "coordinates" to coordinatesMap,
+            "latitude" to latitude,
+            "longitude" to longitude,
+            "distance" to dynamicDistance,
+            "location" to shortLocation
+        )
+
+        firestore?.collection("salons")?.document(salonId)
+            ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+            ?.addOnSuccessListener {
+                Log.d(tag, "Salon full profile & GPS synced to Firestore for $salonId")
+                onSuccess()
+            }
+            ?.addOnFailureListener { e ->
+                Log.w(tag, "Failed to update salon profile in Firestore: ${e.message}")
+                onError(e.message ?: "Failed to sync to Firestore")
             } ?: onSuccess()
     }
 
@@ -1132,52 +1730,19 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
-        val calculatedDistKm = calculateDistanceKm(25.5941, 85.1376, latitude, longitude)
-        val dynamicDistance = String.format(java.util.Locale.US, "%.1f km", calculatedDistKm)
-        val shortLocation = if (landmark.isNotBlank()) "$landmark, $shopAddress".take(30) else shopAddress.take(30)
-
-        // Update in-memory state immediately
-        val currentSalons = _salons.value
-        val updated = currentSalons.map {
-            if (it.id == salonId) {
-                it.copy(
-                    shopAddress = shopAddress,
-                    landmark = landmark,
-                    latitude = latitude,
-                    longitude = longitude,
-                    distance = dynamicDistance,
-                    location = if (it.location.isBlank() || it.location == "Hyper-local Street") shortLocation else it.location
-                )
-            } else it
-        }
-        _salons.value = updated
-
-        // Sync to Firestore 'salons' collection
-        val coordinatesMap = mapOf(
-            "lat" to latitude,
-            "lng" to longitude
+        val currentSalon = _salons.value.find { it.id == salonId }
+        updateSalonFullProfile(
+            salonId = salonId,
+            name = currentSalon?.name ?: "My Salon",
+            phone = currentSalon?.phone ?: (_currentUserProfile.value?.phone ?: ""),
+            tagline = currentSalon?.tagline ?: "Instant grooming slots",
+            shopAddress = shopAddress,
+            landmark = landmark,
+            latitude = latitude,
+            longitude = longitude,
+            onSuccess = onSuccess,
+            onError = onError
         )
-
-        val updates = mapOf(
-            "shopAddress" to shopAddress,
-            "landmark" to landmark,
-            "coordinates" to coordinatesMap,
-            "latitude" to latitude,
-            "longitude" to longitude,
-            "distance" to dynamicDistance,
-            "location" to shortLocation
-        )
-
-        firestore?.collection("salons")?.document(salonId)
-            ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
-            ?.addOnSuccessListener {
-                Log.d(tag, "Salon location & GPS coordinates successfully synced to Firestore for $salonId")
-                onSuccess()
-            }
-            ?.addOnFailureListener { e ->
-                Log.w(tag, "Failed to update salon location in Firestore: ${e.message}")
-                onError(e.message ?: "Failed to sync to Firestore")
-            } ?: onSuccess()
     }
 
     companion object {

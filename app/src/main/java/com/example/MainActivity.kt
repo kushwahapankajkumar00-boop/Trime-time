@@ -116,8 +116,10 @@ fun TrimTimeApp(
         }
     }
 
-    // Number of pending customer bookings for badge
-    val pendingBookingsCount = allBookings.count { it.status.equals("pending", ignoreCase = true) }
+    // Number of pending/accepted customer bookings for badge
+    val pendingBookingsCount = allBookings.count {
+        it.status.equals("pending", ignoreCase = true) || it.status.equals("accepted", ignoreCase = true)
+    }
 
     AnimatedContent(
         targetState = authState,
@@ -159,6 +161,12 @@ fun TrimTimeApp(
                     showSha1FallbackDialog = showSha1FallbackDialog,
                     onDismissSha1FallbackDialog = {
                         viewModel.dismissSha1FallbackDialog()
+                    },
+                    onLoginExistingUser = { identifier, onNotFound ->
+                        viewModel.loginExistingUser(
+                            identifier = identifier,
+                            onAccountNotFound = onNotFound
+                        )
                     },
                     onSignInWithRealIdentity = { name, email, phone, asPartner ->
                         viewModel.signInWithRealIdentity(name, email, phone, asPartner)
@@ -277,6 +285,7 @@ fun TrimTimeApp(
                                             CustomerNavTab.MY_BOOKINGS -> {
                                                 CustomerBookingsContent(
                                                     bookings = allBookings,
+                                                    salons = allSalons,
                                                     cancellationCount = currentUserProfile?.cancellationCount ?: 0,
                                                     isSuspended = isUserSuspended,
                                                     onViewBookingDetails = { /* detail */ },
@@ -318,12 +327,29 @@ fun TrimTimeApp(
                                 activeFilter = partnerBookingFilter,
                                 onFilterChange = { viewModel.setPartnerBookingFilter(it) },
                                 onOpenPinVerification = { viewModel.openPinVerificationDialog(it) },
+                                onAcceptBooking = { viewModel.acceptBooking(it) },
+                                onRejectBooking = { viewModel.rejectBooking(it) },
                                 onToggleSalonOpen = { viewModel.toggleSalonOpenStatus(it) },
                                 onSetSalonOpen = { id, isOpen -> viewModel.setSalonOpenStatus(id, isOpen) },
                                 onSetSalonBusyStatus = { id, status -> viewModel.setSalonBusyStatus(id, status) },
+                                onUpdateChairAvailability = { id, currentStatus, chairs, waitMins ->
+                                    viewModel.updateSalonChairAvailability(id, currentStatus, chairs, waitMins)
+                                },
                                 onSaveMenuPrices = { id, h, s, f, m -> viewModel.saveSalonMenuPrices(id, h, s, f, m) },
+                                onAddService = { id, name, category, price, duration, description ->
+                                    viewModel.addSalonService(id, name, category, price, duration, description)
+                                },
+                                onEditService = { id, updatedService ->
+                                    viewModel.editSalonService(id, updatedService)
+                                },
+                                onDeleteService = { id, serviceId, serviceName ->
+                                    viewModel.deleteSalonService(id, serviceId, serviceName)
+                                },
                                 onSaveShopLocation = { id, address, landmark, lat, lng ->
                                     viewModel.saveSalonLocation(id, address, landmark, lat, lng)
+                                },
+                                onSaveFullProfile = { id, name, phone, tagline, address, landmark, lat, lng ->
+                                    viewModel.saveSalonFullProfile(id, name, phone, tagline, address, landmark, lat, lng)
                                 },
                                 onExitPartnerMode = { viewModel.switchToCustomerRole() },
                                 modifier = Modifier.padding(innerPadding)

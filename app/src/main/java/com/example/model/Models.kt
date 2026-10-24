@@ -63,9 +63,13 @@ data class Salon(
     val rating: Double = 4.8,
     val reviewCount: Int = 0,
     val partnerId: String = "",
+    val ownerId: String = "",
+    val phone: String = "",
     val services: List<SalonService> = emptyList(),
     val isOpen: Boolean = true,
     val currentStatus: String = "FREE", // "FREE" or "BUSY"
+    val availableChairs: Int = 2,
+    val waitingTimeMinutes: Int = 0,
     val tagline: String = "",
     val nextSlotMinutes: Int = 15,
     val shopAddress: String = "",
@@ -80,7 +84,8 @@ data class Salon(
         get() = !isBusy
 
     val hasLocationSetup: Boolean
-        get() = (shopAddress.isNotBlank() || location.isNotBlank()) && (latitude != null && longitude != null && latitude != 0.0 && longitude != 0.0)
+        get() = (shopAddress.isNotBlank() || location.isNotBlank()) &&
+            (latitude != null && longitude != null && latitude != 0.0 && longitude != 0.0)
 
     fun toMap(): Map<String, Any?> = mapOf(
         "id" to id,
@@ -89,14 +94,20 @@ data class Salon(
         "distance" to distance,
         "rating" to rating,
         "reviewCount" to reviewCount,
-        "partnerId" to partnerId,
+        "partnerId" to partnerId.ifBlank { ownerId },
+        "ownerId" to ownerId.ifBlank { partnerId },
+        "phone" to phone,
         "services" to services.map { it.toMap() },
         "isOpen" to isOpen,
         "currentStatus" to currentStatus,
+        "availableChairs" to availableChairs,
+        "waitingTimeMinutes" to waitingTimeMinutes,
         "tagline" to tagline,
         "nextSlotMinutes" to nextSlotMinutes,
         "shopAddress" to shopAddress,
         "landmark" to landmark,
+        "latitude" to latitude,
+        "longitude" to longitude,
         "coordinates" to if (latitude != null && longitude != null) mapOf(
             "lat" to latitude,
             "lng" to longitude
@@ -106,8 +117,10 @@ data class Salon(
 
 enum class BookingStatus(val displayName: String) {
     PENDING("Pending Arrival"),
+    ACCEPTED("Accepted • Confirmed"),
     IN_PROGRESS("In Chair"),
     COMPLETED("Completed"),
+    REJECTED("Rejected"),
     CANCELLED("Cancelled")
 }
 
@@ -122,11 +135,14 @@ data class Booking(
     val servicePrice: Int = 100,
     val timeSlot: String = "",
     val bookingDate: String = "Today",
-    val status: String = "pending", // pending, in_progress, completed, cancelled
+    val status: String = "pending", // pending, accepted, in_progress, completed, rejected, cancelled
     val pin: String = "", // 4-digit Service PIN
     val createdAt: Long = System.currentTimeMillis(),
     val completedAt: Long? = null
 ) {
+    val servicePin: String
+        get() = pin
+
     fun toMap(): Map<String, Any?> = mapOf(
         "id" to id,
         "customerId" to customerId,
@@ -140,6 +156,7 @@ data class Booking(
         "bookingDate" to bookingDate,
         "status" to status,
         "pin" to pin,
+        "servicePin" to pin,
         "createdAt" to createdAt,
         "completedAt" to completedAt
     )

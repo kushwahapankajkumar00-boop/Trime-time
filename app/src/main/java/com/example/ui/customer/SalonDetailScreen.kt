@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Payments
@@ -38,6 +39,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -47,12 +49,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Salon
 import com.example.model.SalonService
+import com.example.ui.components.launchGeoDirections
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
@@ -372,25 +376,66 @@ fun SalonHeaderBanner(salon: Salon) {
                 }
             }
 
+            val context = LocalContext.current
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.LocationOn,
-                        contentDescription = "Location",
-                        tint = Color(0xFF94A3B8),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = salon.location,
-                        fontSize = 12.sp,
-                        color = Color(0xFFCBD5E1)
-                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = "Location",
+                            tint = Color(0xFF94A3B8),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = salon.shopAddress.ifBlank { salon.location },
+                            fontSize = 12.sp,
+                            color = Color(0xFFCBD5E1)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    OutlinedButton(
+                        onClick = {
+                            launchGeoDirections(
+                                context = context,
+                                latitude = salon.latitude,
+                                longitude = salon.longitude,
+                                salonName = salon.name,
+                                fallbackAddress = salon.location
+                            )
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("salon_detail_get_directions_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Directions,
+                            contentDescription = "Get Directions",
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = "Get Directions",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
                 Row(

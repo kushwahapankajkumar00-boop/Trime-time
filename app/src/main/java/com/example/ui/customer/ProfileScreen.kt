@@ -19,18 +19,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Logout
-import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -51,7 +47,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.UserProfile
 import com.example.ui.auth.Sha1RealAccountLoginDialog
-import com.example.ui.components.ProjectExportHubCard
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
@@ -77,7 +72,7 @@ fun ProfileScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // 1. User Profile Summary Card + Edit/Switch Account Button
+        // 1. User Account Info Card
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -152,7 +147,6 @@ fun ProfileScreen(
                         }
                     }
 
-                    // Button to update or switch Name & Email directly on device
                     OutlinedButton(
                         onClick = { showEditAccountDialog = true },
                         modifier = Modifier
@@ -182,7 +176,7 @@ fun ProfileScreen(
             }
         }
 
-        // 2. Easy 1-Tap Customer ↔ Partner (Salon Owner) Mode Switcher Card
+        // 2. Switch to Partner / Salon Owner Mode Card
         item {
             Card(
                 modifier = Modifier
@@ -235,14 +229,6 @@ fun ProfileScreen(
                         }
                     }
 
-                    Text(
-                        text = "Switch between Customer Mode (discover & book salons) and Partner / Salon Owner Mode (manage live queue, toggle Busy/Free status, verify 4-digit PINs, and edit service prices).",
-                        fontSize = 11.sp,
-                        color = Color(0xFFCBD5E1),
-                        lineHeight = 15.sp
-                    )
-
-                    // Instant 1-Tap Switch to Partner Mode Button
                     Button(
                         onClick = onSwitchToPartner,
                         modifier = Modifier
@@ -270,55 +256,7 @@ fun ProfileScreen(
             }
         }
 
-        // 3. Safety & Policies
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = DarkCardSurface)
-            ) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(
-                        text = "SAFETY & POLICIES",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF94A3B8),
-                        letterSpacing = 1.sp
-                    )
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Payments, contentDescription = null, tint = GreenSuccess, modifier = Modifier.size(20.dp))
-                        Column {
-                            Text(text = "Pay at Salon Guarantee", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
-                            Text(text = "₹0 prepayment required online. Pay after grooming.", fontSize = 11.sp, color = Color(0xFF94A3B8))
-                        }
-                    }
-
-                    HorizontalDivider(color = Color(0xFF334155))
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Security, contentDescription = null, tint = AmberPrimary, modifier = Modifier.size(20.dp))
-                        Column {
-                            Text(text = "Anti-Fake Service PIN", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
-                            Text(text = "Salons cannot mark jobs complete without your 4-digit PIN.", fontSize = 11.sp, color = Color(0xFF94A3B8))
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. Project Export & Share Hub
-        item {
-            ProjectExportHubCard()
-        }
-
-        // 5. Log Out Button
+        // 3. Log Out / Switch Account Button
         item {
             OutlinedButton(
                 onClick = onLogout,

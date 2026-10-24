@@ -170,7 +170,8 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         val currentPhone = profile?.phone
         val currentName = profile?.name
         bookings.any { booking ->
-            booking.status.equals("pending", ignoreCase = true) && (
+            (booking.status.equals("pending", ignoreCase = true) ||
+                booking.status.equals("accepted", ignoreCase = true)) && (
                 (!currentUid.isNullOrBlank() && booking.customerId == currentUid) ||
                 (!currentPhone.isNullOrBlank() && booking.customerPhone == currentPhone) ||
                 (!currentName.isNullOrBlank() && booking.customerName == currentName)
@@ -265,10 +266,41 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             asPartner = asPartner,
             onSuccess = {
                 _userMessage.value = "Signed in as $name"
-                if (!asPartner) {
+                if (asPartner) {
+                    currentUserProfile.value?.salonId?.let { _partnerSelectedSalonId.value = it }
+                } else {
                     _currentNavTab.value = CustomerNavTab.SALONS
                 }
                 onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    /**
+     * Simple 1-Identifier Login for Existing Users (Mobile Number OR Email Address):
+     */
+    fun loginExistingUser(
+        identifier: String,
+        onAccountNotFound: (prefillEmail: String, prefillPhone: String) -> Unit = { _, _ -> },
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.loginExistingUser(
+            identifier = identifier,
+            onSuccess = { profile ->
+                _userMessage.value = "Welcome back, ${profile.name}!"
+                if (profile.role.equals("partner", ignoreCase = true)) {
+                    profile.salonId?.let { _partnerSelectedSalonId.value = it }
+                } else {
+                    _currentNavTab.value = CustomerNavTab.SALONS
+                }
+                onSuccess()
+            },
+            onAccountNotFound = { prefillEmail, prefillPhone ->
+                _userMessage.value = "Account not found. Switching to Sign Up..."
+                onAccountNotFound(prefillEmail, prefillPhone)
             },
             onError = { err ->
                 _userMessage.value = err
@@ -302,7 +334,9 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun switchToPartnerRole() {
-        repository.switchToPartnerRole()
+        repository.switchToPartnerRole { salonId ->
+            _partnerSelectedSalonId.value = salonId
+        }
         _authMode.value = AuthMode.NONE
         _userMessage.value = "Switched to Partner / Salon Owner Mode"
     }
@@ -318,6 +352,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         _currentNavTab.value = CustomerNavTab.SALONS
         _selectedSalon.value = null
         _serviceToBook.value = null
+        _partnerSelectedSalonId.value = null
         _userMessage.value = "Logged out successfully"
     }
 
@@ -331,6 +366,18 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
 
     fun setPartnerBookingFilter(filter: String) {
         _partnerBookingFilter.value = filter
+    }
+
+    fun acceptBooking(bookingId: String) {
+        if (repository.acceptBooking(bookingId)) {
+            _userMessage.value = "Booking ACCEPTED! Customer notified in real time."
+        }
+    }
+
+    fun rejectBooking(bookingId: String) {
+        if (repository.rejectBooking(bookingId)) {
+            _userMessage.value = "Booking REJECTED and removed from active queue."
+        }
     }
 
     fun openPinVerificationDialog(booking: Booking) {
@@ -418,6 +465,69 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun updateSalonChairAvailability(
+        salonId: String,
+        currentStatus: String,
+        availableChairs: Int,
+        waitingTimeMinutes: Int
+    ) {
+        repository.updateSalonChairAvailability(
+            salonId = salonId,
+            currentStatus = currentStatus,
+            availableChairs = availableChairs,
+            waitingTimeMinutes = waitingTimeMinutes
+        )
+        _userMessage.value = "Live Chairs ($availableChairs) & Wait Time (${waitingTimeMinutes}m) synced to Firestore!"
+    }
+
+    fun addSalonService(
+        salonId: String,
+        name: String,
+        category: String,
+        price: Int,
+        durationMinutes: Int,
+        description: String = ""
+    ) {
+        repository.addSalonService(
+            salonId = salonId,
+            name = name,
+            category = category,
+            price = price,
+            durationMinutes = durationMinutes,
+            description = description,
+            onSuccess = {
+                _userMessage.value = "Added '$name' (₹$price • ${durationMinutes}m) to Firestore!"
+            }
+        )
+    }
+
+    fun editSalonService(
+        salonId: String,
+        updatedService: SalonService
+    ) {
+        repository.editSalonService(
+            salonId = salonId,
+            updatedService = updatedService,
+            onSuccess = {
+                _userMessage.value = "Updated '${updatedService.name}' (₹${updatedService.price} • ${updatedService.durationMinutes}m) in Firestore!"
+            }
+        )
+    }
+
+    fun deleteSalonService(
+        salonId: String,
+        serviceId: String,
+        serviceName: String = "Service"
+    ) {
+        repository.deleteSalonService(
+            salonId = salonId,
+            serviceId = serviceId,
+            onSuccess = {
+                _userMessage.value = "Removed '$serviceName' from Firestore!"
+            }
+        )
+    }
+
     fun saveSalonMenuPrices(
         salonId: String,
         haircutPrice: Int,
@@ -427,6 +537,16 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         onSuccess: () -> Unit = {}
     ) {
         val currentSalon = allSalons.value.find { it.id == salonId } ?: return
+        val customServices = currentSalon.services.filterNot {
+            it.id == "${salonId}_s1" ||
+                it.id == "${salonId}_s2" ||
+                it.id == "${salonId}_s3" ||
+                it.id == "${salonId}_s4" ||
+                it.name.equals("Haircut", ignoreCase = true) ||
+                it.name.equals("Shaving / Beard", ignoreCase = true) ||
+                it.name.equals("Facial", ignoreCase = true) ||
+                it.name.equals("Head Massage", ignoreCase = true)
+        }
         val updatedServices = listOf(
             SalonService(
                 id = "${salonId}_s1",
@@ -464,13 +584,44 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 description = "Relaxing herbal oil head massage",
                 isPopular = false
             )
-        )
+        ) + customServices
+
         repository.updateSalonServices(
             salonId = salonId,
             updatedServices = updatedServices,
             onSuccess = {
                 _userMessage.value = "Menu prices saved to profile & Firestore!"
                 onSuccess()
+            }
+        )
+    }
+
+    fun saveSalonFullProfile(
+        salonId: String,
+        name: String,
+        phone: String,
+        tagline: String,
+        shopAddress: String,
+        landmark: String,
+        latitude: Double,
+        longitude: Double,
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.updateSalonFullProfile(
+            salonId = salonId,
+            name = name,
+            phone = phone,
+            tagline = tagline,
+            shopAddress = shopAddress,
+            landmark = landmark,
+            latitude = latitude,
+            longitude = longitude,
+            onSuccess = {
+                _userMessage.value = "Shop Profile & GPS synced to Firestore!"
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
             }
         )
     }

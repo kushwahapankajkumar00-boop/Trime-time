@@ -28,9 +28,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.CurrencyRupee
+import androidx.compose.material.icons.filled.Directions
+import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Person
@@ -39,6 +42,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -59,6 +63,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,6 +71,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Booking
 import com.example.model.Salon
+import com.example.ui.components.CustomerSalonsOsmMapSection
+import com.example.ui.components.launchGeoDirections
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.AmberSecondary
 import com.example.ui.theme.DarkBackground
@@ -99,6 +106,8 @@ fun CustomerHomeScreen(
 ) {
     // Smart Filter state (Blinkit style)
     var selectedFilter by remember { mutableStateOf<String?>(null) }
+    // Toggle between "List View" and "Live Map View" (OpenStreetMap)
+    var isMapView by remember { mutableStateOf(false) }
 
     // Filter salons according to selected Smart Filter
     val displayedSalons = remember(salons, selectedFilter) {
@@ -168,38 +177,126 @@ fun CustomerHomeScreen(
             )
         }
 
-        // 5. Section Header with Live Counter
+        // 5. Section Header with Live Counter & List / Live Map View Switcher
         item {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(GreenSuccess)
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(GreenSuccess)
+                        )
+                        Text(
+                            text = "NEARBY SALONS & INSTANT CHAIRS",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF94A3B8),
+                            letterSpacing = 1.sp
+                        )
+                    }
                     Text(
-                        text = "NEARBY SALONS & INSTANT CHAIRS",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF94A3B8),
-                        letterSpacing = 1.sp
+                        text = "${displayedSalons.size} nearby",
+                        fontSize = 12.sp,
+                        color = AmberPrimary,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
-                Text(
-                    text = "${displayedSalons.size} nearby",
-                    fontSize = 12.sp,
-                    color = AmberPrimary,
-                    fontWeight = FontWeight.SemiBold
+
+                // List View vs Live Map View Toggle Pill
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(DarkCardSurface)
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(12.dp))
+                        .padding(4.dp)
+                        .testTag("customer_view_mode_toggle_row"),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val listSelected = !isMapView
+                    val mapSelected = isMapView
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(40.dp)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (listSelected) AmberPrimary else Color.Transparent)
+                            .clickable { isMapView = false }
+                            .testTag("toggle_list_view_button"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FormatListBulleted,
+                                contentDescription = "List View",
+                                tint = if (listSelected) DarkBackground else Color(0xFFCBD5E1),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "List View",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (listSelected) DarkBackground else Color(0xFFCBD5E1)
+                            )
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(40.dp)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (mapSelected) AmberPrimary else Color.Transparent)
+                            .clickable { isMapView = true }
+                            .testTag("toggle_live_map_view_button"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Map,
+                                contentDescription = "Live Map View",
+                                tint = if (mapSelected) DarkBackground else AmberPrimary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "Live Map View",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (mapSelected) DarkBackground else Color.White
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5b. Real Interactive OpenStreetMap Section (when Live Map View is active)
+        if (isMapView) {
+            item {
+                CustomerSalonsOsmMapSection(
+                    salons = displayedSalons,
+                    onSalonSelected = onSalonSelected
                 )
             }
         }
@@ -665,8 +762,17 @@ fun BlinkitSalonCard(
                                         text = if (isBusy) "🔴" else "🟢",
                                         fontSize = 9.sp
                                     )
+                                    val waitLabel = if (salon.waitingTimeMinutes > 0) {
+                                        "~${salon.waitingTimeMinutes}m Wait"
+                                    } else {
+                                        "No Wait"
+                                    }
                                     Text(
-                                        text = if (isBusy) "Barber is Busy (Approx 15-20 Min Wait)" else "Available Now",
+                                        text = if (isBusy) {
+                                            "Busy (${salon.availableChairs} Chairs • $waitLabel)"
+                                        } else {
+                                            "Available (${salon.availableChairs} Chairs • $waitLabel)"
+                                        },
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.ExtraBold,
                                         color = if (isBusy) Color(0xFFFDBA74) else GreenSuccess
@@ -686,6 +792,20 @@ fun BlinkitSalonCard(
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = Color(0xFF34D399)
+                                    )
+                                }
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(Color(0xFF450A0A))
+                                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                                ) {
+                                    Text(
+                                        text = "CLOSED",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = RedAlert
                                     )
                                 }
                             }
@@ -842,7 +962,8 @@ fun BlinkitSalonCard(
 
                 Spacer(modifier = Modifier.height(2.dp))
 
-                // Bottom Action: Pay at Salon Guarantee + "View & Book" / "Join Waitlist"
+                // Bottom Action: Pay at Salon Guarantee + Directions + "View & Book" / "Join Waitlist"
+                val context = LocalContext.current
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -850,7 +971,8 @@ fun BlinkitSalonCard(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Payments,
@@ -859,33 +981,63 @@ fun BlinkitSalonCard(
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = "₹0 Advance • Pay in Cash/UPI",
+                            text = "₹0 Advance • Pay at Salon",
                             fontSize = 11.sp,
                             color = Color(0xFFA7F3D0),
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
-                    // 6. Booking Action: "View & Book" or "Join Waitlist" if busy
-                    Button(
-                        onClick = onBookClick,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
-                            contentColor = if (isBusy) Color.White else Color(0xFF1E1402)
-                        ),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
-                        modifier = Modifier.testTag("view_and_book_button_${salon.id}")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        OutlinedButton(
+                            onClick = {
+                                launchGeoDirections(
+                                    context = context,
+                                    latitude = salon.latitude,
+                                    longitude = salon.longitude,
+                                    salonName = salon.name,
+                                    fallbackAddress = salon.location
+                                )
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("salon_card_directions_${salon.id}")
                         ) {
-                            Text(
-                                text = if (isBusy) "Join Waitlist" else "View & Book",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold
+                            Icon(
+                                imageVector = Icons.Default.Directions,
+                                contentDescription = "Get Directions",
+                                modifier = Modifier.size(15.dp)
                             )
+                        }
+
+                        // 6. Booking Action: "View & Book" or "Join Waitlist" if busy
+                        Button(
+                            onClick = onBookClick,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
+                                contentColor = if (isBusy) Color.White else Color(0xFF1E1402)
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
+                            modifier = Modifier.testTag("view_and_book_button_${salon.id}")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = if (isBusy) "Join Waitlist" else "View & Book",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
