@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -91,6 +92,7 @@ fun TrimTimeApp(
     val authMode by viewModel.authMode.collectAsState()
     val isAuthLoading by viewModel.isLoading.collectAsState()
     val authError by viewModel.authError.collectAsState()
+    val showSha1FallbackDialog by viewModel.showSha1FallbackDialog.collectAsState()
 
     // Anti-Spam & Booking Rules State
     val hasActivePendingBooking by viewModel.hasActivePendingBooking.collectAsState()
@@ -150,11 +152,17 @@ fun TrimTimeApp(
             }
 
             is AppAuthState.Unauthenticated -> {
-                // Frictionless Google Sign-In with Developer Test Login fallback for web emulator
                 val context = LocalContext.current
                 AuthFullScreen(
                     isLoading = isAuthLoading,
                     errorMessage = authError,
+                    showSha1FallbackDialog = showSha1FallbackDialog,
+                    onDismissSha1FallbackDialog = {
+                        viewModel.dismissSha1FallbackDialog()
+                    },
+                    onSignInWithRealIdentity = { name, email, phone, asPartner ->
+                        viewModel.signInWithRealIdentity(name, email, phone, asPartner)
+                    },
                     onContinueWithGoogle = {
                         viewModel.signInWithGoogle(context)
                     },
@@ -200,12 +208,14 @@ fun TrimTimeApp(
                             Scaffold(
                                 modifier = Modifier.fillMaxSize(),
                                 containerColor = DarkBackground,
+                                contentWindowInsets = WindowInsets(0, 0, 0, 0),
                                 snackbarHost = { SnackbarHost(snackbarHostState) },
                                 topBar = {
                                     if (selectedSalon == null) {
                                         AppTopBar(
                                             isCloudSynced = isCloudSynced,
-                                            onHelpClicked = { showHelpDialog = true }
+                                            onHelpClicked = { showHelpDialog = true },
+                                            onSwitchToPartnerMode = { viewModel.switchToPartnerRole() }
                                         )
                                     }
                                 },
@@ -278,6 +288,10 @@ fun TrimTimeApp(
                                                 ProfileScreen(
                                                     userProfile = currentUserProfile,
                                                     onOpenAuth = { viewModel.openAuth(it) },
+                                                    onSwitchToPartner = { viewModel.switchToPartnerRole() },
+                                                    onUpdateAccountIdentity = { name, email, phone, asPartner ->
+                                                        viewModel.signInWithRealIdentity(name, email, phone, asPartner)
+                                                    },
                                                     onLogout = { viewModel.logout() }
                                                 )
                                             }
@@ -289,7 +303,7 @@ fun TrimTimeApp(
                     }
 
                     UserRole.PARTNER -> {
-                        // Partner Mode App (Accessible only when authenticated with verified Partner role)
+                        // Partner Mode App (Accessible with 1-tap switcher between Customer & Partner)
                         Scaffold(
                             modifier = Modifier.fillMaxSize(),
                             containerColor = DarkBackground,
@@ -311,7 +325,7 @@ fun TrimTimeApp(
                                 onSaveShopLocation = { id, address, landmark, lat, lng ->
                                     viewModel.saveSalonLocation(id, address, landmark, lat, lng)
                                 },
-                                onExitPartnerMode = { viewModel.logout() },
+                                onExitPartnerMode = { viewModel.switchToCustomerRole() },
                                 modifier = Modifier.padding(innerPadding)
                             )
                         }

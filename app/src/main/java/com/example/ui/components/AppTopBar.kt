@@ -1,6 +1,8 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,12 +11,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -28,6 +32,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.theme.AmberPrimary
@@ -38,6 +43,7 @@ import com.example.ui.theme.GreenSuccess
 fun AppTopBar(
     isCloudSynced: Boolean,
     onHelpClicked: () -> Unit,
+    onSwitchToPartnerMode: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -48,18 +54,23 @@ fun AppTopBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .statusBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
+            // Left: Logo + Title + Subtitle (weighted so it never clips on narrow mobile screens)
             Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .size(38.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(9.dp))
                         .background(
                             Brush.linearGradient(
                                 listOf(AmberPrimary, Color(0xFFD97706))
@@ -71,54 +82,77 @@ fun AppTopBar(
                         imageVector = Icons.Default.ContentCut,
                         contentDescription = "TrimTime Logo",
                         tint = Color.Black,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(19.dp)
                     )
                 }
 
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         Text(
                             text = "TrimTime",
-                            style = MaterialTheme.typography.titleLarge.copy(
+                            style = MaterialTheme.typography.titleMedium.copy(
                                 fontWeight = FontWeight.ExtraBold,
-                                letterSpacing = 0.5.sp
+                                fontSize = 17.sp,
+                                letterSpacing = 0.3.sp
                             ),
-                            color = Color.White
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
-                                .background(Color(0xFFFEF3C7))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                .background(Color(0xFF064E3B))
+                                .padding(horizontal = 5.dp, vertical = 1.dp)
                         ) {
-                            Text(
-                                text = "Instant Slots",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF92400E)
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudDone,
+                                    contentDescription = "Synced",
+                                    tint = if (isCloudSynced) GreenSuccess else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(10.dp)
+                                )
+                                Text(
+                                    text = "LIVE",
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (isCloudSynced) Color(0xFF6EE7B7) else Color(0xFF94A3B8)
+                                )
+                            }
                         }
                     }
                     Text(
                         text = "Hyper-local slots • Pay at Salon • Anti-Fake PIN",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8),
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
+            // Right: 1-Tap Partner Mode Switcher + Help Icon
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // Cloud Firestore Status Badge
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(if (isCloudSynced) Color(0xFF064E3B) else Color(0xFF1E293B))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF1E3A8A))
+                        .border(1.dp, Color(0xFF3B82F6), RoundedCornerShape(10.dp))
+                        .clickable { onSwitchToPartnerMode() }
+                        .padding(horizontal = 9.dp, vertical = 6.dp)
+                        .testTag("top_bar_partner_switch_btn"),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(
@@ -126,16 +160,17 @@ fun AppTopBar(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.CloudDone,
-                            contentDescription = "Database",
-                            tint = if (isCloudSynced) GreenSuccess else Color(0xFF94A3B8),
-                            modifier = Modifier.size(13.dp)
+                            imageVector = Icons.Default.Storefront,
+                            contentDescription = "Switch to Partner Mode",
+                            tint = Color(0xFF93C5FD),
+                            modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = if (isCloudSynced) "Firestore" else "Local",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (isCloudSynced) Color(0xFF6EE7B7) else Color(0xFF94A3B8)
+                            text = "Partner",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1
                         )
                     }
                 }
@@ -143,14 +178,14 @@ fun AppTopBar(
                 IconButton(
                     onClick = onHelpClicked,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(34.dp)
                         .testTag("help_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.HelpOutline,
                         contentDescription = "Test instructions",
                         tint = AmberPrimary,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(19.dp)
                     )
                 }
             }

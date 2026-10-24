@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,24 +15,44 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,29 +65,41 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.AmberSecondary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
+import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
 
 /**
- * Authentication Screen:
- * Frictionless "Continue with Google" login.
- * Minimalist, distinctive layout containing ONLY the app logo and the Google Sign-In button.
- * All text fields, phone numbers, and OTP input fields have been completely removed.
+ * Physical-Device Compatible Authentication Screen:
+ * 1. Direct Name + Email (+ Phone) Sign-In / Registration that works on ANY APK without SHA-1 restrictions.
+ * 2. Role Selector (Customer Mode vs Partner / Salon Owner Mode) right on login.
+ * 3. Google Sign-In option, which opens a helpful Real Account Sign-In Dialog if SHA-1 is unregistered on the APK.
  */
 @Composable
 fun AuthFullScreen(
     isLoading: Boolean,
     errorMessage: String?,
+    showSha1FallbackDialog: Boolean = false,
+    onDismissSha1FallbackDialog: () -> Unit = {},
+    onSignInWithRealIdentity: (name: String, email: String, phone: String, asPartner: Boolean) -> Unit = { _, _, _, _ -> },
     onContinueWithGoogle: () -> Unit,
     onDeveloperTestLogin: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    var fullName by remember { mutableStateOf("") }
+    var emailAddress by remember { mutableStateOf("") }
+    var phoneDigits by remember { mutableStateOf("") }
+    var loginAsPartner by remember { mutableStateOf(false) }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -79,36 +112,21 @@ fun AuthFullScreen(
                     )
                 )
             )
-            .padding(horizontal = 24.dp, vertical = 32.dp),
-        contentAlignment = Alignment.Center
+            .statusBarsPadding()
+            .imePadding()
     ) {
-        // Decorative ambient glow behind logo
-        Box(
-            modifier = Modifier
-                .size(260.dp)
-                .clip(CircleShape)
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            AmberPrimary.copy(alpha = 0.12f),
-                            Color.Transparent
-                        )
-                    )
-                )
-        )
-
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // App Logo Section
+            // Compact Brand Header
             Box(
                 modifier = Modifier
-                    .size(112.dp)
-                    .shadow(elevation = 20.dp, shape = CircleShape, spotColor = AmberPrimary.copy(alpha = 0.4f))
+                    .size(72.dp)
+                    .shadow(elevation = 14.dp, shape = CircleShape, spotColor = AmberPrimary.copy(alpha = 0.4f))
                     .clip(CircleShape)
                     .background(
                         Brush.linearGradient(
@@ -128,7 +146,6 @@ fun AuthFullScreen(
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                // Intersecting Barber Scissors & Time Icon
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center
@@ -137,163 +154,327 @@ fun AuthFullScreen(
                         imageVector = Icons.Default.ContentCut,
                         contentDescription = "Salon Scissors",
                         tint = AmberPrimary,
-                        modifier = Modifier.size(38.dp)
+                        modifier = Modifier.size(26.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
                     Icon(
                         imageVector = Icons.Default.Schedule,
                         contentDescription = "Instant Slots Clock",
                         tint = AmberSecondary,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(28.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // App Name & Tagline
             Text(
                 text = "TrimTime",
-                style = MaterialTheme.typography.headlineLarge.copy(
+                style = MaterialTheme.typography.headlineMedium.copy(
                     fontWeight = FontWeight.ExtraBold,
-                    letterSpacing = 1.sp
+                    letterSpacing = 0.8.sp
                 ),
                 color = Color.White
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
-
             Text(
                 text = "Instant Salon & Barber Appointments",
-                fontSize = 14.sp,
+                fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
                 color = Color(0xFF94A3B8),
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Trust & Value Prop Badge
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(DarkCardSurface.copy(alpha = 0.7f))
-                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(20.dp))
-                    .padding(horizontal = 14.dp, vertical = 6.dp)
-            ) {
-                Text(
-                    text = "Pay at Salon • Zero Prepayment • Instant Slots",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFFCBD5E1)
+            // Primary Sign-In Card (Works on ANY APK without SHA-1 restrictions)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
+                border = CardDefaults.outlinedCardBorder().copy(
+                    brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF334155))
                 )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Sign In or Create Account",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "Enter your real Name & Email to access your Cloud Firestore account on any device.",
+                        fontSize = 11.sp,
+                        color = Color(0xFF94A3B8),
+                        lineHeight = 15.sp
+                    )
+
+                    // Role Toggle: Customer vs Partner / Salon Owner
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF0F172A))
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (!loginAsPartner) AmberPrimary else Color.Transparent)
+                                .clickable { loginAsPartner = false }
+                                .padding(vertical = 8.dp)
+                                .testTag("role_select_customer"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Person,
+                                    contentDescription = null,
+                                    tint = if (!loginAsPartner) Color.Black else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = "Customer",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (!loginAsPartner) Color.Black else Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (loginAsPartner) Color(0xFF2563EB) else Color.Transparent)
+                                .clickable { loginAsPartner = true }
+                                .padding(vertical = 8.dp)
+                                .testTag("role_select_partner"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Storefront,
+                                    contentDescription = null,
+                                    tint = if (loginAsPartner) Color.White else Color(0xFF94A3B8),
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = "Partner / Salon",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (loginAsPartner) Color.White else Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+                    }
+
+                    // Full Name Input
+                    OutlinedTextField(
+                        value = fullName,
+                        onValueChange = { fullName = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("auth_name_input"),
+                        label = { Text("Full Name", fontSize = 12.sp) },
+                        placeholder = { Text("e.g. Pankaj Kumar", fontSize = 13.sp, color = Color(0xFF64748B)) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = "Name",
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Text,
+                            imeAction = ImeAction.Next
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF334155),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedLabelColor = AmberPrimary,
+                            unfocusedLabelColor = Color(0xFF94A3B8)
+                        )
+                    )
+
+                    // Email Address Input
+                    OutlinedTextField(
+                        value = emailAddress,
+                        onValueChange = { emailAddress = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("auth_email_input"),
+                        label = { Text("Email Address", fontSize = 12.sp) },
+                        placeholder = { Text("yourname@gmail.com", fontSize = 13.sp, color = Color(0xFF64748B)) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Email,
+                                contentDescription = "Email",
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Email,
+                            imeAction = ImeAction.Next
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF334155),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedLabelColor = AmberPrimary,
+                            unfocusedLabelColor = Color(0xFF94A3B8)
+                        )
+                    )
+
+                    // 10-Digit Phone Input
+                    OutlinedTextField(
+                        value = phoneDigits,
+                        onValueChange = { input ->
+                            phoneDigits = input.filter { it.isDigit() }.take(10)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("auth_phone_input"),
+                        label = { Text("10-Digit Mobile Number", fontSize = 12.sp) },
+                        placeholder = { Text("9876543210", fontSize = 13.sp, color = Color(0xFF64748B)) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Phone,
+                                contentDescription = "Phone",
+                                tint = GreenSuccess,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF334155),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedLabelColor = AmberPrimary,
+                            unfocusedLabelColor = Color(0xFF94A3B8)
+                        )
+                    )
+
+                    Button(
+                        onClick = {
+                            onSignInWithRealIdentity(fullName, emailAddress, phoneDigits, loginAsPartner)
+                        },
+                        enabled = !isLoading,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                            .testTag("sign_in_email_button"),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AmberPrimary,
+                            contentColor = Color.Black
+                        )
+                    ) {
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.Black
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Connecting to Firestore...",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                        } else {
+                            Text(
+                                text = if (loginAsPartner) "Continue as Partner / Salon Owner" else "Sign In / Continue",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                }
             }
 
-            Spacer(modifier = Modifier.height(48.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Frictionless Single "Continue with Google" Button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color(0xFF334155))
+                Text(text = "OR", fontSize = 11.sp, color = Color(0xFF64748B), fontWeight = FontWeight.Bold)
+                HorizontalDivider(modifier = Modifier.weight(1f), color = Color(0xFF334155))
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Google Sign-In Button
             Button(
                 onClick = onContinueWithGoogle,
                 enabled = !isLoading,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(54.dp)
-                    .shadow(elevation = 8.dp, shape = RoundedCornerShape(28.dp), spotColor = Color.White.copy(alpha = 0.15f))
+                    .height(48.dp)
                     .testTag("continue_with_google_button"),
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(24.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Color.White,
                     contentColor = Color(0xFF1F1F1F),
                     disabledContainerColor = Color(0xFFE2E8F0),
                     disabledContentColor = Color(0xFF64748B)
-                ),
-                elevation = ButtonDefaults.buttonElevation(
-                    defaultElevation = 2.dp,
-                    pressedElevation = 6.dp
-                )
-            ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(22.dp),
-                        strokeWidth = 2.5.dp,
-                        color = AmberPrimary
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = "Signing in with Google...",
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF1F1F1F)
-                    )
-                } else {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        // Pixel-perfect Google 'G' 4-color icon
-                        GoogleLogoIcon(modifier = Modifier.size(22.dp))
-
-                        Spacer(modifier = Modifier.width(12.dp))
-
-                        Text(
-                            text = "Continue with Google",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFF1F1F1F)
-                        )
-                    }
-                }
-            }
-
-            // Developer Test Login (Web Emulator bypass button to verify Salon list, booking flow & Anti-Spam screen)
-            Spacer(modifier = Modifier.height(14.dp))
-            OutlinedButton(
-                onClick = onDeveloperTestLogin,
-                enabled = !isLoading,
-                modifier = Modifier
-                    .fillMaxWidth(0.9f)
-                    .height(42.dp)
-                    .testTag("developer_test_login_button"),
-                shape = RoundedCornerShape(20.dp),
-                border = ButtonDefaults.outlinedButtonBorder.copy(
-                    brush = Brush.linearGradient(
-                        colors = listOf(AmberPrimary.copy(alpha = 0.6f), AmberSecondary.copy(alpha = 0.4f))
-                    ),
-                    width = 1.dp
-                ),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = DarkCardSurface.copy(alpha = 0.7f),
-                    contentColor = AmberPrimary
                 )
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Code,
-                        contentDescription = null,
-                        tint = AmberPrimary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    GoogleLogoIcon(modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "Developer Test Login",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = AmberPrimary
+                        text = "Continue with Google",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF1F1F1F)
                     )
                 }
             }
 
-            // Error Message (if any)
+            // Error Message Banner
             AnimatedVisibility(
                 visible = !errorMessage.isNullOrBlank(),
                 enter = fadeIn(),
                 exit = fadeOut()
             ) {
                 errorMessage?.let { errorText ->
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -321,12 +502,227 @@ fun AuthFullScreen(
             }
         }
     }
+
+    // Helpful Dialog when Google Sign-In fails on physical APK due to SHA-1 fingerprint mismatch
+    if (showSha1FallbackDialog) {
+        Sha1RealAccountLoginDialog(
+            initialName = fullName,
+            initialEmail = emailAddress,
+            initialPhone = phoneDigits,
+            isLoading = isLoading,
+            onDismiss = onDismissSha1FallbackDialog,
+            onConfirmSignIn = { name, email, phone, isPartner ->
+                onSignInWithRealIdentity(name, email, phone, isPartner)
+            }
+        )
+    }
+}
+
+@Composable
+fun Sha1RealAccountLoginDialog(
+    initialName: String = "",
+    initialEmail: String = "",
+    initialPhone: String = "",
+    isLoading: Boolean = false,
+    onDismiss: () -> Unit,
+    onConfirmSignIn: (name: String, email: String, phone: String, asPartner: Boolean) -> Unit
+) {
+    var name by remember { mutableStateOf(initialName) }
+    var email by remember { mutableStateOf(initialEmail) }
+    var phone by remember { mutableStateOf(initialPhone) }
+    var asPartner by remember { mutableStateOf(false) }
+    var localError by remember { mutableStateOf<String?>(null) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("sha1_fallback_login_dialog"),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF111827)),
+            border = CardDefaults.outlinedCardBorder().copy(
+                brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary.copy(alpha = 0.6f))
+            )
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Text(
+                            text = "Sign In with Name & Email",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White
+                        )
+                    }
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = Color(0xFF94A3B8),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Text(
+                    text = "This externally built APK uses a temporary debug keystore whose SHA-1 is not registered for Google One-Tap. Enter your real Name & Email below to log in or create your real Firestore account directly:",
+                    fontSize = 12.sp,
+                    color = Color(0xFFCBD5E1),
+                    lineHeight = 16.sp
+                )
+
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = {
+                        name = it
+                        localError = null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Your Full Name", fontSize = 12.sp) },
+                    placeholder = { Text("e.g. Pankaj Kumar", fontSize = 13.sp) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AmberPrimary,
+                        unfocusedBorderColor = Color(0xFF334155),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = {
+                        email = it
+                        localError = null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Your Email Address", fontSize = 12.sp) },
+                    placeholder = { Text("yourname@gmail.com", fontSize = 13.sp) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AmberPrimary,
+                        unfocusedBorderColor = Color(0xFF334155),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+
+                OutlinedTextField(
+                    value = phone,
+                    onValueChange = { input ->
+                        phone = input.filter { it.isDigit() }.take(10)
+                        localError = null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("10-Digit Mobile Number", fontSize = 12.sp) },
+                    placeholder = { Text("9876543210", fontSize = 13.sp) },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AmberPrimary,
+                        unfocusedBorderColor = Color(0xFF334155),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+
+                // Role toggle inside dialog
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { asPartner = false },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (!asPartner) Color(0xFF2E2210) else Color.Transparent,
+                            contentColor = if (!asPartner) AmberPrimary else Color(0xFF94A3B8)
+                        )
+                    ) {
+                        Text("Customer", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = { asPartner = true },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (asPartner) Color(0xFF1E3A8A) else Color.Transparent,
+                            contentColor = if (asPartner) Color.White else Color(0xFF94A3B8)
+                        )
+                    ) {
+                        Text("Salon Partner", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                localError?.let { err ->
+                    Text(
+                        text = err,
+                        fontSize = 11.sp,
+                        color = RedAlert,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        if (name.trim().length < 2) {
+                            localError = "Please enter your full name."
+                        } else if (!email.contains("@") || !email.contains(".")) {
+                            localError = "Please enter a valid email address."
+                        } else {
+                            onConfirmSignIn(name.trim(), email.trim(), phone.trim(), asPartner)
+                        }
+                    },
+                    enabled = !isLoading,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AmberPrimary,
+                        contentColor = Color.Black
+                    )
+                ) {
+                    Text(
+                        text = "Sign In to My Account",
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+        }
+    }
 }
 
 /**
  * Custom Canvas-rendered Google "G" 4-color logo.
- * Precision-drawn using the official Google brand colors:
- * Blue (#4285F4), Red (#EA4335), Yellow (#FBBC05), Green (#34A853).
  */
 @Composable
 fun GoogleLogoIcon(modifier: Modifier = Modifier) {
@@ -337,7 +733,6 @@ fun GoogleLogoIcon(modifier: Modifier = Modifier) {
         val radius = (width - strokeWidth) / 2f
         val center = Offset(width / 2f, height / 2f)
 
-        // Blue Arc (Top right & Horizontal bar)
         drawArc(
             color = Color(0xFF4285F4),
             startAngle = -45f,
@@ -347,8 +742,6 @@ fun GoogleLogoIcon(modifier: Modifier = Modifier) {
             size = Size(radius * 2, radius * 2),
             style = Stroke(width = strokeWidth)
         )
-
-        // Green Arc (Bottom)
         drawArc(
             color = Color(0xFF34A853),
             startAngle = 45f,
@@ -358,8 +751,6 @@ fun GoogleLogoIcon(modifier: Modifier = Modifier) {
             size = Size(radius * 2, radius * 2),
             style = Stroke(width = strokeWidth)
         )
-
-        // Yellow Arc (Bottom left)
         drawArc(
             color = Color(0xFFFBBC05),
             startAngle = 135f,
@@ -369,8 +760,6 @@ fun GoogleLogoIcon(modifier: Modifier = Modifier) {
             size = Size(radius * 2, radius * 2),
             style = Stroke(width = strokeWidth)
         )
-
-        // Red Arc (Top)
         drawArc(
             color = Color(0xFFEA4335),
             startAngle = 225f,
@@ -380,8 +769,6 @@ fun GoogleLogoIcon(modifier: Modifier = Modifier) {
             size = Size(radius * 2, radius * 2),
             style = Stroke(width = strokeWidth)
         )
-
-        // Blue center horizontal crossbar
         val barPath = Path().apply {
             moveTo(center.x - 1f, center.y)
             lineTo(width - strokeWidth / 4f, center.y)

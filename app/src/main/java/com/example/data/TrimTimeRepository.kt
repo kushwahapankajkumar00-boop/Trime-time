@@ -43,6 +43,8 @@ class TrimTimeRepository private constructor(context: Context) {
 
     private val tag = "TrimTimeRepository"
     private val scope = CoroutineScope(Dispatchers.IO)
+    private val appContext = context.applicationContext
+    private val sessionPrefs = appContext.getSharedPreferences("trimtime_session_prefs", Context.MODE_PRIVATE)
 
     // Firebase Instances
     private var auth: FirebaseAuth? = null
@@ -79,11 +81,23 @@ class TrimTimeRepository private constructor(context: Context) {
     private val _authError = MutableStateFlow<String?>(null)
     val authError: StateFlow<String?> = _authError.asStateFlow()
 
+    // Triggered when Google Sign-In fails on physical APK due to unregistered SHA-1
+    private val _showSha1FallbackDialog = MutableStateFlow(false)
+    val showSha1FallbackDialog: StateFlow<Boolean> = _showSha1FallbackDialog.asStateFlow()
+
     private val _isCloudSynced = MutableStateFlow(false)
     val isCloudSynced: StateFlow<Boolean> = _isCloudSynced.asStateFlow()
 
     init {
         initFirebase(context)
+    }
+
+    fun dismissSha1FallbackDialog() {
+        _showSha1FallbackDialog.value = false
+    }
+
+    fun clearAuthError() {
+        _authError.value = null
     }
 
     private fun initFirebase(context: Context) {
@@ -97,12 +111,17 @@ class TrimTimeRepository private constructor(context: Context) {
                 _isCloudSynced.value = true
                 Log.d(tag, "Firebase Auth and custom Firestore ($customDbId) initialized successfully.")
 
-                // Check real Firebase Auth state on startup
+                // Check real Firebase Auth state or persisted Firestore account session on startup
                 val firebaseUser = auth?.currentUser
+                val savedUid = sessionPrefs.getString("saved_uid", null)
                 if (firebaseUser != null) {
                     Log.d(tag, "Active Firebase session detected for uid: ${firebaseUser.uid}")
                     _authState.value = AppAuthState.Loading
                     fetchUserProfile(firebaseUser.uid)
+                } else if (!savedUid.isNullOrBlank() && savedUid != "dev_test_user_001") {
+                    Log.d(tag, "Restoring persisted Firestore user session for uid: $savedUid")
+                    _authState.value = AppAuthState.Loading
+                    fetchUserProfile(savedUid)
                 } else {
                     Log.d(tag, "No active session found. Setting Unauthenticated.")
                     _currentUserProfile.value = null
@@ -445,33 +464,164 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
             } catch (cancelEx: GetCredentialCancellationException) {
                 _isLoading.value = false
-                val msg = "Google Sign-In was cancelled. Tap 'Continue with Google' or use 'Developer Test Login'."
+                val msg = "Google Sign-In was cancelled. You can sign in with your Name & Email below."
                 _authError.value = msg
                 Log.i(tag, "Google Sign-In cancelled by user: ${cancelEx.message}")
                 onError(msg)
             } catch (noCredEx: NoCredentialException) {
-                // On emulators or devices without a signed-in Google account, automatically authenticate
-                // with the real Firestore-backed Developer Test account so login succeeds seamlessly.
-                Log.w(tag, "No Google account found on device/emulator (${noCredEx.message}). Falling back to Firestore Developer Test Login.")
-                developerTestLogin(
-                    onSuccess = onSuccess,
-                    onError = onError
-                )
+                // On physical devices with an externally built APK (unregistered SHA-1), do NOT silently force Dev Tester.
+                // Instead, open the Real Account Sign-In Dialog so the user can enter their real Name & Email.
+                _isLoading.value = false
+                _showSha1FallbackDialog.value = true
+                val msg = "Google OAuth SHA-1 is not registered for this APK build. Please sign in with your Name & Email."
+                _authError.value = msg
+                Log.w(tag, "NoCredentialException on device (${noCredEx.message}). Prompting user for Name & Email login.")
+                onError(msg)
             } catch (e: Exception) {
-                Log.w(tag, "CredentialManager unavailable (${e.message}). Falling back to Firestore Developer Test Login.")
-                developerTestLogin(
-                    onSuccess = onSuccess,
-                    onError = onError
-                )
+                _isLoading.value = false
+                _showSha1FallbackDialog.value = true
+                val msg = "Google Sign-In unavailable on this build. Please sign in with your Name & Email."
+                _authError.value = msg
+                Log.w(tag, "CredentialManager exception (${e.message}). Prompting user for Name & Email login.")
+                onError(msg)
             }
         }
     }
 
     /**
+     * Direct Firestore Account Sign-In / Registration (Works on ANY APK without SHA-1 restrictions):
+     * Creates or logs into the user's real Firestore 'users' document using their Name, Email, and optional 10-digit Phone.
+     */
+    fun signInWithRealIdentity(
+        name: String,
+        email: String,
+        phone: String = "",
+        asPartner: Boolean = false,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val trimmedName = name.trim()
+        val trimmedEmail = email.trim().lowercase()
+        if (trimmedName.length < 2) {
+            val msg = "Please enter your full name (at least 2 characters)."
+            _authError.value = msg
+            onError(msg)
+            return
+        }
+        if (!trimmedEmail.contains("@") || !trimmedEmail.contains(".")) {
+            val msg = "Please enter a valid email address."
+            _authError.value = msg
+            onError(msg)
+            return
+        }
+
+        val rawDigits = phone.filter { it.isDigit() }
+        val tenDigits = if (rawDigits.length > 10 && rawDigits.startsWith("91")) {
+            rawDigits.drop(2).take(10)
+        } else {
+            rawDigits.takeLast(10)
+        }
+        val formattedPhone = if (tenDigits.length == 10) "+91 $tenDigits" else ""
+
+        val uid = "usr_" + trimmedEmail.replace(Regex("[^a-z0-9]"), "_")
+        _isLoading.value = true
+        _authError.value = null
+        _showSha1FallbackDialog.value = false
+
+        val firestoreDb = firestore
+        if (firestoreDb == null) {
+            _isLoading.value = false
+            val msg = "Firestore database is not connected."
+            _authError.value = msg
+            onError(msg)
+            return
+        }
+
+        val targetRoleStr = if (asPartner) "partner" else "customer"
+        val userDocRef = firestoreDb.collection("users").document(uid)
+        userDocRef.get()
+            .addOnSuccessListener { existingDoc ->
+                if (existingDoc != null && existingDoc.exists()) {
+                    val existingPhone = existingDoc.getString("phone") ?: ""
+                    val resolvedPhone = formattedPhone.ifBlank { existingPhone }
+                    val existingCancellationCount = existingDoc.getLong("cancellationCount")?.toInt() ?: 0
+                    val existingIsSuspended = existingDoc.getBoolean("isSuspended") ?: (existingCancellationCount >= 3)
+                    val existingRole = if (asPartner) "partner" else (existingDoc.getString("role") ?: "customer")
+                    val existingSalonId = existingDoc.getString("salonId")
+                    val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
+
+                    val userProfile = UserProfile(
+                        id = uid,
+                        name = trimmedName,
+                        email = trimmedEmail,
+                        phone = resolvedPhone,
+                        role = existingRole,
+                        salonId = existingSalonId,
+                        cancellationCount = existingCancellationCount,
+                        isSuspended = existingIsSuspended,
+                        createdAt = existingCreatedAt
+                    )
+
+                    userDocRef.set(userProfile.toMap(), com.google.firebase.firestore.SetOptions.merge())
+                    sessionPrefs.edit()
+                        .putString("saved_uid", uid)
+                        .putString("saved_name", trimmedName)
+                        .putString("saved_email", trimmedEmail)
+                        .putString("saved_role", existingRole)
+                        .apply()
+
+                    _currentUserProfile.value = userProfile
+                    _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) UserRole.PARTNER else UserRole.CUSTOMER
+                    _authState.value = AppAuthState.Authenticated(_currentRole.value)
+                    _isLoading.value = false
+                    onSuccess()
+                } else {
+                    val newProfile = UserProfile(
+                        id = uid,
+                        name = trimmedName,
+                        email = trimmedEmail,
+                        phone = formattedPhone,
+                        role = targetRoleStr,
+                        salonId = null,
+                        cancellationCount = 0,
+                        isSuspended = false,
+                        createdAt = System.currentTimeMillis()
+                    )
+
+                    userDocRef.set(newProfile.toMap())
+                        .addOnSuccessListener {
+                            sessionPrefs.edit()
+                                .putString("saved_uid", uid)
+                                .putString("saved_name", trimmedName)
+                                .putString("saved_email", trimmedEmail)
+                                .putString("saved_role", targetRoleStr)
+                                .apply()
+
+                            _currentUserProfile.value = newProfile
+                            _currentRole.value = if (asPartner) UserRole.PARTNER else UserRole.CUSTOMER
+                            _authState.value = AppAuthState.Authenticated(_currentRole.value)
+                            _isLoading.value = false
+                            onSuccess()
+                        }
+                        .addOnFailureListener { setErr ->
+                            _isLoading.value = false
+                            val errMsg = "Failed to save account to Firestore: ${setErr.localizedMessage}"
+                            _authError.value = errMsg
+                            onError(errMsg)
+                        }
+                }
+            }
+            .addOnFailureListener { getErr ->
+                _isLoading.value = false
+                val errMsg = "Failed to connect to Firestore: ${getErr.localizedMessage}"
+                _authError.value = errMsg
+                onError(errMsg)
+            }
+    }
+
+    /**
      * Developer Test Login:
-     * Bypasses Google Play Services / CredentialManager in environments where Play Services is absent,
-     * but directly verifies / writes to the real Firestore 'users' collection with a test UID.
-     * Triggers the Anti-Spam (10-digit phone number) flow if the user document is new or lacks a phone number.
+     * Explicitly invoked only when user taps "Developer Test Login".
      */
     fun developerTestLogin(
         testUid: String = "dev_test_user_001",
@@ -495,7 +645,7 @@ class TrimTimeRepository private constructor(context: Context) {
             onError = { err ->
                 _isLoading.value = false
                 _authError.value = err
-                Log.e(tag, "Developer Test Login error: $err")
+                Log.w(tag, "Developer Test Login error: $err")
                 onError(err)
             }
         )
@@ -647,8 +797,10 @@ class TrimTimeRepository private constructor(context: Context) {
         try {
             auth?.signOut()
         } catch (e: Exception) {
-            Log.e(tag, "Sign out error: ${e.message}")
+            Log.w(tag, "Sign out error: ${e.message}")
         }
+        sessionPrefs.edit().clear().apply()
+        _showSha1FallbackDialog.value = false
         _currentRole.value = UserRole.CUSTOMER
         _currentUserProfile.value = null
         _authState.value = AppAuthState.Unauthenticated
@@ -657,11 +809,13 @@ class TrimTimeRepository private constructor(context: Context) {
     fun switchToPartnerRole() {
         _currentRole.value = UserRole.PARTNER
         _authState.value = AppAuthState.Authenticated(UserRole.PARTNER)
+        sessionPrefs.edit().putString("saved_role", "partner").apply()
     }
 
     fun switchToCustomerRole() {
         _currentRole.value = UserRole.CUSTOMER
         _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+        sessionPrefs.edit().putString("saved_role", "customer").apply()
     }
 
     private fun fetchUserProfile(uid: String) {

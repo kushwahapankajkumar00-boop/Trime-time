@@ -2,7 +2,6 @@ package com.example.ui.customer
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,14 +18,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Storefront
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -37,20 +36,25 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.UserProfile
+import com.example.ui.auth.Sha1RealAccountLoginDialog
 import com.example.ui.components.ProjectExportHubCard
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
-import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.viewmodel.AuthMode
 
@@ -58,10 +62,12 @@ import com.example.viewmodel.AuthMode
 fun ProfileScreen(
     userProfile: UserProfile?,
     onOpenAuth: (AuthMode) -> Unit,
+    onSwitchToPartner: () -> Unit = {},
+    onUpdateAccountIdentity: (name: String, email: String, phone: String, asPartner: Boolean) -> Unit = { _, _, _, _ -> },
     onLogout: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val isGuest = userProfile == null || userProfile.id.startsWith("guest")
+    var showEditAccountDialog by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = modifier
@@ -69,9 +75,9 @@ fun ProfileScreen(
             .background(DarkBackground)
             .testTag("customer_profile_screen"),
         contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        // User Profile Summary Card
+        // 1. User Profile Summary Card + Edit/Switch Account Button
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -79,82 +85,192 @@ fun ProfileScreen(
                 colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Box(
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(50.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF334155)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = "Avatar",
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = userProfile?.name ?: "Customer",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = userProfile?.email?.takeIf { it.isNotBlank() } ?: "Not signed in",
+                                fontSize = 12.sp,
+                                color = Color(0xFF94A3B8),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (!userProfile?.phone.isNullOrBlank()) {
+                                Text(
+                                    text = userProfile?.phone ?: "",
+                                    fontSize = 11.sp,
+                                    color = AmberPrimary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xFF0F261D))
+                                .border(1.dp, Color(0xFF065F46), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                text = "Customer",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = GreenSuccess
+                            )
+                        }
+                    }
+
+                    // Button to update or switch Name & Email directly on device
+                    OutlinedButton(
+                        onClick = { showEditAccountDialog = true },
                         modifier = Modifier
-                            .size(54.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF334155)),
-                        contentAlignment = Alignment.Center
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .testTag("edit_account_identity_btn"),
+                        shape = RoundedCornerShape(10.dp),
+                        border = ButtonDefaults.outlinedButtonBorder.copy(
+                            brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary.copy(alpha = 0.6f))
+                        )
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Person,
-                            contentDescription = "Avatar",
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Edit Account",
                             tint = AmberPrimary,
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(15.dp)
                         )
-                    }
-
-                    Column(modifier = Modifier.weight(1f)) {
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = userProfile?.name ?: "Customer",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
-                        )
-                        Text(
-                            text = userProfile?.email?.takeIf { it.isNotBlank() } ?: "Google Account",
+                            text = "Change / Sign In with Your Name & Email",
+                            color = AmberPrimary,
                             fontSize = 12.sp,
-                            color = Color(0xFF94A3B8)
-                        )
-                    }
-
-                    // Role Chip
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF0F261D))
-                            .border(1.dp, Color(0xFF065F46), RoundedCornerShape(6.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "Customer",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = GreenSuccess
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
             }
         }
 
-        // Customer Authentication Actions
+        // 2. Easy 1-Tap Customer ↔ Partner (Salon Owner) Mode Switcher Card
         item {
-            OutlinedButton(
-                onClick = onLogout,
+            Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(44.dp)
-                    .testTag("customer_logout_btn"),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Logout,
-                    contentDescription = "Logout",
-                    tint = Color(0xFFEF4444),
-                    modifier = Modifier.size(16.dp)
+                    .testTag("partner_portal_section"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF131B2E)),
+                border = CardDefaults.outlinedCardBorder().copy(
+                    brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF3B82F6))
                 )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(text = "Log Out of Customer Account", color = Color(0xFFEF4444), fontSize = 13.sp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF1E3A8A)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Storefront,
+                                contentDescription = null,
+                                tint = Color(0xFF93C5FD),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "MODE SWITCHER",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF93C5FD),
+                                letterSpacing = 0.8.sp
+                            )
+                            Text(
+                                text = "Customer ↔ Partner (Salon Owner)",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                color = Color.White
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "Switch between Customer Mode (discover & book salons) and Partner / Salon Owner Mode (manage live queue, toggle Busy/Free status, verify 4-digit PINs, and edit service prices).",
+                        fontSize = 11.sp,
+                        color = Color(0xFFCBD5E1),
+                        lineHeight = 15.sp
+                    )
+
+                    // Instant 1-Tap Switch to Partner Mode Button
+                    Button(
+                        onClick = onSwitchToPartner,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("login_as_partner_btn"),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SwapHoriz,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Switch to Partner / Salon Owner Mode",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 13.sp,
+                            color = Color.White
+                        )
+                    }
+                }
             }
         }
 
-        // App Features & Guarantees
+        // 3. Safety & Policies
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -197,126 +313,44 @@ fun ProfileScreen(
             }
         }
 
-        // Project Export & Share Hub (Download Project Source Code .ZIP for External APK Build)
+        // 4. Project Export & Share Hub
         item {
             ProjectExportHubCard()
         }
 
-        // Discreet Partner Access Portal Section (Requirement 3)
+        // 5. Log Out Button
         item {
-            Card(
+            OutlinedButton(
+                onClick = onLogout,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 10.dp)
-                    .testTag("partner_portal_section"),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF131B2E)),
-                border = CardDefaults.outlinedCardBorder().copy(
-                    brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF3B82F6))
-                )
+                    .height(44.dp)
+                    .testTag("customer_logout_btn"),
+                shape = RoundedCornerShape(12.dp)
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(32.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF1E3A8A)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Storefront,
-                                contentDescription = null,
-                                tint = Color(0xFF93C5FD),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-
-                        Column {
-                            Text(
-                                text = "Salon & Barber Partners",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFF93C5FD)
-                            )
-                            Text(
-                                text = "Partner Portal",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
-                                color = Color.White
-                            )
-                        }
-                    }
-
-                    Text(
-                        text = "Are you a salon or barber shop? Manage your incoming bookings, view time slots, verify customer PINs, and manage your live queue in Partner Mode.",
-                        fontSize = 11.sp,
-                        color = Color(0xFFCBD5E1),
-                        lineHeight = 15.sp
-                    )
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF0F172A))
-                            .padding(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(imageVector = Icons.Default.Info, contentDescription = null, tint = Color(0xFF60A5FA), modifier = Modifier.size(14.dp))
-                        Text(
-                            text = "Protected Portal: Requires registered partner credentials. Customers cannot access partner mode.",
-                            fontSize = 10.sp,
-                            color = Color(0xFF94A3B8)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    // Discreet Login as Partner Button
-                    Button(
-                        onClick = { onOpenAuth(AuthMode.PARTNER_AUTH) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(46.dp)
-                            .testTag("login_as_partner_btn"),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Text(
-                                text = "Login as Partner",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp,
-                                color = Color.White
-                            )
-                        }
-                    }
-
-                    OutlinedButton(
-                        onClick = { onOpenAuth(AuthMode.PARTNER_AUTH) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(42.dp)
-                            .testTag("register_partner_btn"),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text(text = "Register Your Salon Shop", color = Color(0xFF93C5FD), fontSize = 12.sp)
-                    }
-                }
+                Icon(
+                    imageVector = Icons.Default.Logout,
+                    contentDescription = "Logout",
+                    tint = Color(0xFFEF4444),
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(text = "Log Out / Switch Account", color = Color(0xFFEF4444), fontSize = 13.sp)
             }
         }
+    }
+
+    if (showEditAccountDialog) {
+        val initialPhoneDigits = userProfile?.phone?.filter { it.isDigit() }?.takeLast(10) ?: ""
+        Sha1RealAccountLoginDialog(
+            initialName = if (userProfile?.name == "Dev Tester") "" else (userProfile?.name ?: ""),
+            initialEmail = if (userProfile?.email == "devtester@trimtime.local") "" else (userProfile?.email ?: ""),
+            initialPhone = initialPhoneDigits,
+            onDismiss = { showEditAccountDialog = false },
+            onConfirmSignIn = { name, email, phone, asPartner ->
+                showEditAccountDialog = false
+                onUpdateAccountIdentity(name, email, phone, asPartner)
+            }
+        )
     }
 }

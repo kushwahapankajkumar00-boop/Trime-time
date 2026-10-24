@@ -43,6 +43,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val isCloudSynced: StateFlow<Boolean> = repository.isCloudSynced
     val isLoading: StateFlow<Boolean> = repository.isLoading
     val authError: StateFlow<String?> = repository.authError
+    val showSha1FallbackDialog: StateFlow<Boolean> = repository.showSha1FallbackDialog
 
     // Real-Time Salons & Bookings from Firestore
     val allSalons = repository.salons
@@ -243,10 +244,41 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
+    fun dismissSha1FallbackDialog() {
+        repository.dismissSha1FallbackDialog()
+    }
+
+    /**
+     * Direct Firestore Account Sign-In / Registration (Works on ANY APK without SHA-1 restrictions):
+     */
+    fun signInWithRealIdentity(
+        name: String,
+        email: String,
+        phone: String = "",
+        asPartner: Boolean = false,
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.signInWithRealIdentity(
+            name = name,
+            email = email,
+            phone = phone,
+            asPartner = asPartner,
+            onSuccess = {
+                _userMessage.value = "Signed in as $name"
+                if (!asPartner) {
+                    _currentNavTab.value = CustomerNavTab.SALONS
+                }
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
     /**
      * Developer Test Login:
      * Directly runs Firestore logic (check/create 'users' document) with dummy UID.
-     * Triggers Anti-Spam (10-digit phone number) flow for verification.
      */
     fun developerTestLogin(onSuccess: () -> Unit = {}) {
         repository.developerTestLogin(
@@ -272,7 +304,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     fun switchToPartnerRole() {
         repository.switchToPartnerRole()
         _authMode.value = AuthMode.NONE
-        _userMessage.value = "Welcome to Partner Portal"
+        _userMessage.value = "Switched to Partner / Salon Owner Mode"
     }
 
     fun switchToCustomerRole() {

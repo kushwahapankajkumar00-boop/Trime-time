@@ -226,22 +226,25 @@ fun PartnerTopBar(
 ) {
     Surface(
         color = Color(0xFF111827),
-        shadowElevation = 6.dp
+        shadowElevation = 4.dp
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .size(40.dp)
+                        .size(36.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .background(Color(0xFF2563EB)),
                     contentAlignment = Alignment.Center
@@ -250,50 +253,59 @@ fun PartnerTopBar(
                         imageVector = Icons.Default.Storefront,
                         contentDescription = "Salon Partner Mode",
                         tint = Color.White,
-                        modifier = Modifier.size(24.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = salonName,
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text(
-                        text = "Barber Dashboard • $partnerName",
+                        text = salonName,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 16.sp
+                        ),
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "Partner Mode • $partnerName",
                         fontSize = 11.sp,
-                        color = Color(0xFF94A3B8)
+                        color = Color(0xFF94A3B8),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
-            // Exit Partner Mode button
+            // 1-Tap Switch back to Customer Mode button
             OutlinedButton(
                 onClick = onExitPartnerMode,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
-                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                shape = RoundedCornerShape(10.dp),
                 border = ButtonDefaults.outlinedButtonBorder.copy(
-                    brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF38BDF8))
+                    brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
+                ),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    containerColor = Color(0xFF2E2210)
                 ),
                 modifier = Modifier.testTag("exit_partner_mode_btn")
             ) {
                 Icon(
-                    imageVector = Icons.Default.Logout,
-                    contentDescription = "Customer Mode",
-                    tint = Color(0xFF38BDF8),
+                    imageVector = Icons.Default.Person,
+                    contentDescription = "Switch to Customer Mode",
+                    tint = AmberPrimary,
                     modifier = Modifier.size(14.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = "Customer App",
+                    text = "Customer Mode",
                     fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFF38BDF8)
+                    fontWeight = FontWeight.Bold,
+                    color = AmberPrimary,
+                    maxLines = 1
                 )
             }
         }
