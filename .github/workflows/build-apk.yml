@@ -12,7 +12,7 @@ on:
 
 jobs:
   build-apk:
-    name: Compile Debug APK (JDK 17 & Gradle)
+    name: Compile Debug APK (JDK 17 & Gradle 8.9)
     runs-on: ubuntu-latest
 
     steps:
@@ -24,11 +24,283 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
 
-      - name: Make gradlew Executable & Prepare Signing Keystore
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
+
+      - name: Configure Stable Gradle 8.9 / AGP 8.6.0 / Kotlin 2.0.20 Build Environment
         run: |
-          chmod +x gradlew
+          # 1. Force Gradle 8.9 in gradle-wrapper.properties
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.9-bin.zip
+          networkTimeout=10000
+          validateDistributionUrl=true
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+
+          # 2. Configure clean gradle.properties for CI (without in-process compiler strategy)
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          kotlin.code.style=official
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          org.gradle.caching=true
+          googleServices.missing.passthrough=true
+          EOF
+
+          # 3. Configure gradle/libs.versions.toml with stable AGP 8.6.0 and Kotlin 2.0.20 (no KSP)
+          cat > gradle/libs.versions.toml << 'EOF'
+          [versions]
+          agp = "8.6.0"
+          kotlin = "2.0.20"
+          coreKtx = "1.13.1"
+          junit = "4.13.2"
+          junitVersion = "1.2.1"
+          espressoCore = "3.6.1"
+          lifecycleRuntimeKtx = "2.8.6"
+          lifecycleViewmodelCompose = "2.8.6"
+          lifecycleRuntimeCompose = "2.8.6"
+          activityCompose = "1.9.2"
+          composeBom = "2024.09.00"
+          kotlinxCoroutinesTest = "1.8.1"
+          core = "1.6.1"
+          runner = "1.6.2"
+          kotlinxCoroutinesAndroid = "1.8.1"
+          kotlinxCoroutinesCore = "1.8.1"
+          robolectric = "4.13"
+          firebaseBom = "33.5.1"
+          secretsGradlePlugin = "2.0.1"
+          googleServices = "4.4.2"
+          credentials = "1.3.0"
+          googleid = "1.1.1"
+
+          [libraries]
+          androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+          junit = { group = "junit", name = "junit", version.ref = "junit" }
+          androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
+          androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
+          androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+          androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycleViewmodelCompose" }
+          androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycleRuntimeCompose" }
+          androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+          androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+          androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+          androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+          androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+          androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+          androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+          androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+          androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+          androidx-compose-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
+          androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
+          kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesTest" }
+          androidx-core = { group = "androidx.test", name = "core", version.ref = "core" }
+          androidx-runner = { group = "androidx.test", name = "runner", version.ref = "runner" }
+          kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutinesAndroid" }
+          kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinxCoroutinesCore" }
+          robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+          firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
+          firebase-firestore = { group = "com.google.firebase", name = "firebase-firestore" }
+          firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
+          androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
+          androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
+          googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
+
+          [plugins]
+          android-application = { id = "com.android.application", version.ref = "agp" }
+          kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+          kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+          secrets = { id = "com.google.android.libraries.mapsplatform.secrets-gradle-plugin", version.ref = "secretsGradlePlugin" }
+          google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }
+          EOF
+
+          # 4. Configure root build.gradle.kts for AGP 8.6.0 & Kotlin 2.0.20 (no KSP)
+          cat > build.gradle.kts << 'EOF'
+          plugins {
+            alias(libs.plugins.android.application) apply false
+            alias(libs.plugins.kotlin.android) apply false
+            alias(libs.plugins.kotlin.compose) apply false
+            alias(libs.plugins.secrets) apply false
+            alias(libs.plugins.google.services) apply false
+          }
+          EOF
+
+          # 5. Configure app/build.gradle.kts for AGP 8.6.0, JDK 17, and conditional google-services
+          cat > app/build.gradle.kts << 'EOF'
+          plugins {
+            alias(libs.plugins.android.application)
+            alias(libs.plugins.kotlin.android)
+            alias(libs.plugins.kotlin.compose)
+            alias(libs.plugins.secrets)
+          }
+
+          if (file("google-services.json").exists()) {
+            apply(plugin = "com.google.gms.google-services")
+          }
+
+          android {
+            namespace = "com.example"
+            compileSdk = 35
+
+            defaultConfig {
+              applicationId = "com.trimtime.app"
+              minSdk = 24
+              targetSdk = 35
+              versionCode = 1
+              versionName = "1.0"
+
+              testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+            }
+
+            signingConfigs {
+              create("release") {
+                val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("STORE_PASSWORD")
+                keyAlias = "upload"
+                keyPassword = System.getenv("KEY_PASSWORD")
+              }
+              create("debugConfig") {
+                storeFile = file("${rootDir}/debug.keystore")
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+              }
+            }
+
+            buildTypes {
+              release {
+                isCrunchPngs = false
+                isMinifyEnabled = false
+                proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                signingConfig = signingConfigs.getByName("release")
+              }
+              debug {
+                signingConfig = signingConfigs.getByName("debugConfig")
+              }
+            }
+
+            compileOptions {
+              sourceCompatibility = JavaVersion.VERSION_17
+              targetCompatibility = JavaVersion.VERSION_17
+            }
+
+            kotlinOptions {
+              jvmTarget = "17"
+            }
+
+            buildFeatures {
+              compose = true
+              buildConfig = true
+            }
+
+            testOptions {
+              unitTests {
+                isIncludeAndroidResources = true
+              }
+            }
+
+            dependenciesInfo {
+              includeInApk = false
+              includeInBundle = true
+            }
+          }
+
+          secrets {
+            propertiesFileName = ".env"
+            defaultPropertiesFileName = ".env.example"
+            ignoreList.add("FIREBASE_APPCHECK_DEBUG_TOKEN")
+          }
+
+          dependencies {
+            implementation(platform(libs.androidx.compose.bom))
+            implementation(platform(libs.firebase.bom))
+            implementation(libs.androidx.activity.compose)
+            implementation(libs.androidx.compose.material.icons.core)
+            implementation(libs.androidx.compose.material.icons.extended)
+            implementation(libs.androidx.compose.material3)
+            implementation(libs.androidx.compose.ui)
+            implementation(libs.androidx.compose.ui.graphics)
+            implementation(libs.androidx.compose.ui.tooling.preview)
+            implementation(libs.androidx.core.ktx)
+            implementation(libs.androidx.lifecycle.runtime.compose)
+            implementation(libs.androidx.lifecycle.runtime.ktx)
+            implementation(libs.androidx.lifecycle.viewmodel.compose)
+            implementation(libs.firebase.firestore)
+            implementation(libs.firebase.auth)
+            implementation(libs.androidx.credentials)
+            implementation(libs.androidx.credentials.play.services)
+            implementation(libs.googleid)
+            implementation(libs.kotlinx.coroutines.android)
+            implementation(libs.kotlinx.coroutines.core)
+            testImplementation(libs.androidx.compose.ui.test.junit4)
+            testImplementation(libs.androidx.core)
+            testImplementation(libs.androidx.junit)
+            testImplementation(libs.junit)
+            testImplementation(libs.kotlinx.coroutines.test)
+            testImplementation(libs.robolectric)
+            androidTestImplementation(platform(libs.androidx.compose.bom))
+            androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+            androidTestImplementation(libs.androidx.espresso.core)
+            androidTestImplementation(libs.androidx.junit)
+            androidTestImplementation(libs.androidx.runner)
+            debugImplementation(libs.androidx.compose.ui.test.manifest)
+            debugImplementation(libs.androidx.compose.ui.tooling)
+          }
+          EOF
+
+          # 6. Ensure app/google-services.json exists for debug builds
+          if [ ! -f "app/google-services.json" ]; then
+            cat > app/google-services.json << 'EOF'
+          {
+            "project_info": {
+              "project_number": "314496859185",
+              "project_id": "gen-lang-client-0392891123",
+              "storage_bucket": "gen-lang-client-0392891123.firebasestorage.app"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:314496859185:android:649b6da91b29890b4ca910",
+                  "android_client_info": {
+                    "package_name": "com.trimtime.app"
+                  }
+                },
+                "oauth_client": [
+                  {
+                    "client_id": "314496859185-c47bt3c5kflmsr6vmk885eqlbk12tluu.apps.googleusercontent.com",
+                    "client_type": 3
+                  }
+                ],
+                "api_key": [
+                  {
+                    "current_key": "AIzaSyA6ooeEyRJqOX960zpoT0Vxwc9NgiHDrfk"
+                  }
+                ],
+                "services": {
+                  "appinvite_service": {
+                    "other_platform_oauth_client": [
+                      {
+                        "client_id": "314496859185-c47bt3c5kflmsr6vmk885eqlbk12tluu.apps.googleusercontent.com",
+                        "client_type": 3
+                      }
+                    ]
+                  }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+          fi
+
+          # 7. Prepare debug.keystore & .env
           if [ -f "debug.keystore.base64" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f "debug.keystore" ]; then
@@ -48,13 +320,15 @@ jobs:
             touch .env
           fi
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug
+          chmod +x gradlew
 
-      - name: Upload app-debug.apk Artifact
+      - name: Build Debug APK with Gradle 8.9
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
