@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:translateX="0"
+        android:translateY="0">
+        <!-- Center badge background pill -->
+        <path
+            android:fillColor="#1E293B"
+            android:pathData="M54,26 C69.46,26 82,38.54 82,54 C82,69.46 69.46,82 54,82 C38.54,82 26,69.46 26,54 C26,38.54 38.54,26 54,26 Z" />
+        
+        <!-- Outer accent ring -->
+        <path
+            android:strokeColor="#F59E0B"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round"
+            android:pathData="M54,30 A24,24 0 1,1 53.9,30" />
+
+        <!-- Stylized Scissors/Shears & Comb Silhouette -->
+        <!-- Blade 1 -->
+        <path
+            android:fillColor="#FBBF24"
+            android:pathData="M44.5,41.5 L61,64 C62,65.3 64,65.3 65,64 L65.5,63.5 C66.5,62.2 66.2,60.3 64.8,59.3 L48.5,40.2 Z" />
+        <!-- Blade 2 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M63.5,41.5 L47,64 C46,65.3 44,65.3 43,64 L42.5,63.5 C41.5,62.2 41.8,60.3 43.2,59.3 L59.5,40.2 Z" />
+
+        <!-- Shear Pivot Pin -->
+        <path
+            android:fillColor="#D97706"
+            android:pathData="M54,52 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0" />
+
+        <!-- Finger rings / handles -->
+        <path
+            android:strokeColor="#FBBF24"
+            android:strokeWidth="2.5"
+            android:fillColor="#00000000"
+            android:pathData="M41,68 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2.5"
+            android:fillColor="#00000000"
+            android:pathData="M67,68 m-4.5,0 a4.5,4.5 0 1,0 9,0 a4.5,4.5 0 1,0 -9,0" />
+
+        <!-- Clock hands motif at upper portion to symbolize "TrimTime" -->
+        <path
+            android:strokeColor="#F59E0B"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:pathData="M54,34 L54,40 L58,42" />
+
+        <!-- Quick 10-Min Flash Badge -->
+        <path
+            android:fillColor="#EF4444"
+            android:pathData="M68,31 L64,37 L67,37 L63,44 L71,38 L68,38 Z" />
+    </group>
+</vector>

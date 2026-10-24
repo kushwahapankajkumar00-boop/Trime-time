@@ -1,0 +1,75 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account profile for customers and salon partners",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "role": { "type": "string", "enum": ["customer", "partner"] },
+        "salonId": { "type": "string" },
+        "cancellationCount": { "type": "integer" },
+        "isSuspended": { "type": "boolean" },
+        "createdAt": { "type": "integer" }
+      },
+      "required": ["id", "name", "email", "role"]
+    },
+    "Salon": {
+      "title": "Salon",
+      "description": "Registered salon details and operational catalog",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "address": { "type": "string" },
+        "rating": { "type": "number" },
+        "reviewCount": { "type": "integer" },
+        "distanceKm": { "type": "number" },
+        "estimatedWaitMinutes": { "type": "integer" },
+        "isOpen": { "type": "boolean" },
+        "openTime": { "type": "string" },
+        "closeTime": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Appointment booking between customer and salon",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "salonId": { "type": "string" },
+        "salonName": { "type": "string" },
+        "service": { "type": "string" },
+        "servicePrice": { "type": "integer" },
+        "timeSlot": { "type": "string" },
+        "bookingDate": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "completed", "cancelled"] },
+        "verificationPin": { "type": "string" },
+        "isPaid": { "type": "boolean" },
+        "createdAt": { "type": "integer" }
+      },
+      "required": ["id", "customerId", "salonId", "service", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profile collection storing role, phone, and cancellation strikes"
+    },
+    "/salons/{salonId}": {
+      "schema": { "$ref": "#/entities/Salon" },
+      "description": "Salon catalog and availability"
+    },
+    "/bookings/{bookingId}": {
+      "schema": { "$ref": "#/entities/Booking" },
+      "description": "Customer bookings and partner verification state"
+    }
+  }
+}

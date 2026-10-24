@@ -1,0 +1,6 @@
+{
+  "name": "TrimTime",
+  "description": "Hyper-local salon and barber booking app with instant time slots, Pay-at-Salon, and 4-digit PIN verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

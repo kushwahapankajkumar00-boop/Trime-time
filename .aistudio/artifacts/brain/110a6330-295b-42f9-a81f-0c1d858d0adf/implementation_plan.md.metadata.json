@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan for adding an in-app Project Source Code ZIP Export & Share Hub inside the Customer and Partner Profile settings, enabling one-click generation and download/sharing of a complete Android project ZIP archive (Gradle build scripts, Kotlin sources, manifest, and external APK build guide).",
+  "updatedAt": "2026-10-17T09:00:03.128749008Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
