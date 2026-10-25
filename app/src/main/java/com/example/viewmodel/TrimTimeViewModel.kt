@@ -49,6 +49,19 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val allSalons = repository.salons
     val allBookings = repository.bookings
 
+    // Customer-isolated bookings: strictly filtered where booking.customerId == currentUser.uid
+    val customerBookings: StateFlow<List<Booking>> = combine(
+        repository.customerBookings,
+        currentUserProfile
+    ) { bookings, profile ->
+        val uid = profile?.id?.trim().orEmpty()
+        if (uid.isBlank()) {
+            emptyList()
+        } else {
+            bookings.filter { it.customerId == uid }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     // Customer Navigation (Bottom Bar)
     private val _currentNavTab = MutableStateFlow(CustomerNavTab.SALONS)
     val currentNavTab: StateFlow<CustomerNavTab> = _currentNavTab.asStateFlow()
@@ -161,31 +174,33 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
-    // Rule 2: One Active Booking Rule
+    // Rule 2: One Active Booking Rule (strictly scoped to currentUser.uid)
     val hasActivePendingBooking: StateFlow<Boolean> = combine(
-        allBookings,
+        customerBookings,
         currentUserProfile
     ) { bookings, profile ->
-        val currentUid = profile?.id
-        val currentPhone = profile?.phone
-        val currentName = profile?.name
-        bookings.any { booking ->
-            (booking.status.equals("pending", ignoreCase = true) ||
-                booking.status.equals("accepted", ignoreCase = true)) && (
-                (!currentUid.isNullOrBlank() && booking.customerId == currentUid) ||
-                (!currentPhone.isNullOrBlank() && booking.customerPhone == currentPhone) ||
-                (!currentName.isNullOrBlank() && booking.customerName == currentName)
-            )
+        val currentUid = profile?.id?.trim().orEmpty()
+        currentUid.isNotBlank() && bookings.any { booking ->
+            booking.customerId == currentUid && (
+                booking.status.equals("pending", ignoreCase = true) ||
+                    booking.status.equals("accepted", ignoreCase = true)
+                )
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     // Rule 3: Strike / Auto-Block System (3 cancellations = blocked)
-    val isUserSuspended: StateFlow<Boolean> = currentUserProfile.combine(allBookings) { profile, _ ->
+    val isUserSuspended: StateFlow<Boolean> = currentUserProfile.combine(customerBookings) { profile, _ ->
         (profile?.cancellationCount ?: 0) >= 3 || (profile?.isSuspended == true)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     fun confirmBooking(customerName: String, customerPhone: String) {
         val profile = currentUserProfile.value
+        val custId = profile?.id?.trim().orEmpty()
+        if (custId.isBlank()) {
+            _userMessage.value = "Please log in to confirm your booking."
+            return
+        }
+
         // Rule 3 Auto-Block check
         if (profile != null && (profile.cancellationCount >= 3 || profile.isSuspended)) {
             _userMessage.value = "Your account has been suspended for too many cancellations"
@@ -201,13 +216,12 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         val salon = _selectedSalon.value ?: return
         val service = _serviceToBook.value ?: return
         val slot = _selectedTimeSlot.value
-        val custId = profile?.id ?: "guest_${System.currentTimeMillis()}"
 
         try {
             val newBooking = repository.createBooking(
                 customerId = custId,
                 customerName = customerName.ifBlank { profile?.name ?: "Customer" },
-                customerPhone = customerPhone.ifBlank { profile?.phone ?: "+91 98765 43210" },
+                customerPhone = customerPhone.ifBlank { profile?.phone ?: "" },
                 salonId = salon.id,
                 salonName = salon.name,
                 service = service.name,

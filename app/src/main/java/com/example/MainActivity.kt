@@ -79,6 +79,7 @@ fun TrimTimeApp(
     val allSalons by viewModel.allSalons.collectAsState()
     val filteredSalons by viewModel.filteredSalons.collectAsState()
     val allBookings by viewModel.allBookings.collectAsState()
+    val customerBookings by viewModel.customerBookings.collectAsState()
 
     val currentNavTab by viewModel.currentNavTab.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -116,9 +117,12 @@ fun TrimTimeApp(
         }
     }
 
-    // Number of pending/accepted customer bookings for badge
-    val pendingBookingsCount = allBookings.count {
-        it.status.equals("pending", ignoreCase = true) || it.status.equals("accepted", ignoreCase = true)
+    // Number of pending/accepted customer bookings for badge (strictly for the logged-in customer)
+    val currentCustomerUid = currentUserProfile?.id?.trim().orEmpty()
+    val pendingBookingsCount = customerBookings.count {
+        currentCustomerUid.isNotBlank() &&
+            it.customerId == currentCustomerUid &&
+            (it.status.equals("pending", ignoreCase = true) || it.status.equals("accepted", ignoreCase = true))
     }
 
     AnimatedContent(
@@ -262,8 +266,14 @@ fun TrimTimeApp(
                                         // Bottom Nav Tabs
                                         when (currentNavTab) {
                                             CustomerNavTab.SALONS -> {
-                                                val pastBooking = allBookings.firstOrNull { it.status == "completed" }
-                                                    ?: allBookings.firstOrNull()
+                                                val pastBooking = customerBookings.firstOrNull {
+                                                    currentCustomerUid.isNotBlank() &&
+                                                        it.customerId == currentCustomerUid &&
+                                                        it.status.equals("completed", ignoreCase = true)
+                                                } ?: customerBookings.firstOrNull {
+                                                    currentCustomerUid.isNotBlank() &&
+                                                        it.customerId == currentCustomerUid
+                                                }
                                                 CustomerHomeScreen(
                                                     salons = filteredSalons,
                                                     searchQuery = searchQuery,
@@ -284,7 +294,8 @@ fun TrimTimeApp(
 
                                             CustomerNavTab.MY_BOOKINGS -> {
                                                 CustomerBookingsContent(
-                                                    bookings = allBookings,
+                                                    bookings = customerBookings,
+                                                    currentUserId = currentCustomerUid,
                                                     salons = allSalons,
                                                     cancellationCount = currentUserProfile?.cancellationCount ?: 0,
                                                     isSuspended = isUserSuspended,

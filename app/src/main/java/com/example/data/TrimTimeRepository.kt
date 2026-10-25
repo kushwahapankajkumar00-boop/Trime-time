@@ -53,7 +53,10 @@ class TrimTimeRepository private constructor(context: Context) {
 
     private var salonsListener: ListenerRegistration? = null
     private var bookingsListener: ListenerRegistration? = null
+    private var customerBookingsListener: ListenerRegistration? = null
     private var userDocListener: ListenerRegistration? = null
+
+    private val invalidSharedUserIds = setOf("dev_test_user_001", "dev_tester", "default_user", "guest")
 
     // App Authentication State: Loading, Unauthenticated, Authenticated
     private val _authState = MutableStateFlow<AppAuthState>(AppAuthState.Loading)
@@ -71,9 +74,13 @@ class TrimTimeRepository private constructor(context: Context) {
     private val _salons = MutableStateFlow<List<Salon>>(emptyList())
     val salons: StateFlow<List<Salon>> = _salons.asStateFlow()
 
-    // Real-time Bookings directly from Firestore
+    // Real-time All Bookings from Firestore (for Partner Salon Queue filtering by salonId)
     private val _bookings = MutableStateFlow<List<Booking>>(emptyList())
     val bookings: StateFlow<List<Booking>> = _bookings.asStateFlow()
+
+    // Strictly isolated Bookings for the currently logged-in Customer (where booking.customerId == currentUser.uid)
+    private val _customerBookings = MutableStateFlow<List<Booking>>(emptyList())
+    val customerBookings: StateFlow<List<Booking>> = _customerBookings.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -114,17 +121,19 @@ class TrimTimeRepository private constructor(context: Context) {
                 // Check real Firebase Auth state or persisted Firestore account session on startup
                 val firebaseUser = auth?.currentUser
                 val savedUid = sessionPrefs.getString("saved_uid", null)
-                if (firebaseUser != null) {
+                if (firebaseUser != null && firebaseUser.uid !in invalidSharedUserIds) {
                     Log.d(tag, "Active Firebase session detected for uid: ${firebaseUser.uid}")
                     _authState.value = AppAuthState.Loading
                     fetchUserProfile(firebaseUser.uid)
-                } else if (!savedUid.isNullOrBlank() && savedUid != "dev_test_user_001") {
+                } else if (!savedUid.isNullOrBlank() && savedUid !in invalidSharedUserIds) {
                     Log.d(tag, "Restoring persisted Firestore user session for uid: $savedUid")
                     _authState.value = AppAuthState.Loading
                     fetchUserProfile(savedUid)
                 } else {
                     Log.d(tag, "No active session found. Setting Unauthenticated.")
+                    sessionPrefs.edit().clear().apply()
                     _currentUserProfile.value = null
+                    _customerBookings.value = emptyList()
                     _authState.value = AppAuthState.Unauthenticated
                 }
 
@@ -354,7 +363,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
             }
 
-            // Live Real-Time Listener for Bookings collection
+            // Live Real-Time Listener for Bookings collection (used for Partner Salon Queue by salonId)
             bookingsListener?.remove()
             bookingsListener = db.collection("bookings").addSnapshotListener { snapshot, error ->
                 if (error != null) {
@@ -363,36 +372,88 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
                 if (snapshot != null) {
                     val liveBookings = snapshot.documents.mapNotNull { doc ->
-                        try {
-                            val resolvedPin = doc.getString("servicePin")?.takeIf { it.isNotBlank() }
-                                ?: doc.getString("pin")?.takeIf { it.isNotBlank() }
-                                ?: "0000"
-                            Booking(
-                                id = doc.getString("id") ?: doc.id,
-                                customerId = doc.getString("customerId") ?: "",
-                                customerName = doc.getString("customerName") ?: "",
-                                customerPhone = doc.getString("customerPhone") ?: "",
-                                salonId = doc.getString("salonId") ?: "",
-                                salonName = doc.getString("salonName") ?: "",
-                                service = doc.getString("service") ?: "",
-                                servicePrice = doc.getLong("servicePrice")?.toInt() ?: 100,
-                                timeSlot = doc.getString("timeSlot") ?: "",
-                                bookingDate = doc.getString("bookingDate") ?: "Today",
-                                status = doc.getString("status") ?: "pending",
-                                pin = resolvedPin,
-                                createdAt = doc.getLong("createdAt") ?: 0L,
-                                completedAt = doc.getLong("completedAt")
-                            )
-                        } catch (e: Exception) {
-                            null
-                        }
+                        parseBookingDocument(doc)
+                    }.filter { booking ->
+                        booking.customerId.isNotBlank() &&
+                            booking.customerId !in invalidSharedUserIds &&
+                            booking.id != "past_demo_1"
                     }
-                    _bookings.value = liveBookings.sortedByDescending { it.createdAt }
+                    val sortedAll = liveBookings.sortedByDescending { it.createdAt }
+                    _bookings.value = sortedAll
+
+                    // Also keep _customerBookings strictly filtered to currentUser.uid
+                    val activeUid = _currentUserProfile.value?.id
+                    if (!activeUid.isNullOrBlank() && activeUid !in invalidSharedUserIds) {
+                        _customerBookings.value = sortedAll.filter { it.customerId == activeUid }
+                    } else {
+                        _customerBookings.value = emptyList()
+                    }
                 }
             }
         } catch (e: Exception) {
             Log.e(tag, "Error setting up live listeners: ${e.message}")
         }
+    }
+
+    private fun parseBookingDocument(doc: com.google.firebase.firestore.DocumentSnapshot): Booking? {
+        return try {
+            val resolvedPin = doc.getString("servicePin")?.takeIf { it.isNotBlank() }
+                ?: doc.getString("pin")?.takeIf { it.isNotBlank() }
+                ?: "0000"
+            Booking(
+                id = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id,
+                customerId = doc.getString("customerId")?.trim() ?: "",
+                customerName = doc.getString("customerName")?.trim() ?: "",
+                customerPhone = doc.getString("customerPhone")?.trim() ?: "",
+                salonId = doc.getString("salonId")?.trim() ?: "",
+                salonName = doc.getString("salonName")?.trim() ?: "",
+                service = doc.getString("service")?.trim() ?: "",
+                servicePrice = doc.getLong("servicePrice")?.toInt() ?: 100,
+                timeSlot = doc.getString("timeSlot") ?: "",
+                bookingDate = doc.getString("bookingDate") ?: "Today",
+                status = doc.getString("status") ?: "pending",
+                pin = resolvedPin,
+                createdAt = doc.getLong("createdAt") ?: 0L,
+                completedAt = doc.getLong("completedAt")
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Attaches a Firestore real-time query listener strictly scoped to `customerId == currentUser.uid`
+     * so "My Bookings" and "Quick Re-Book" NEVER show bookings belonging to any other user.
+     */
+    private fun attachCustomerBookingsListener(customerId: String) {
+        customerBookingsListener?.remove()
+        val cleanUid = customerId.trim()
+        if (cleanUid.isBlank() || cleanUid in invalidSharedUserIds) {
+            _customerBookings.value = emptyList()
+            return
+        }
+
+        // Immediately filter existing in-memory bookings strictly by cleanUid
+        _customerBookings.value = _bookings.value
+            .filter { it.customerId == cleanUid }
+            .sortedByDescending { it.createdAt }
+
+        val db = firestore ?: return
+        customerBookingsListener = db.collection("bookings")
+            .whereEqualTo("customerId", cleanUid)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.w(tag, "Customer bookings scoped listener error: ${error.message}")
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    val userBookings = snapshot.documents
+                        .mapNotNull { doc -> parseBookingDocument(doc) }
+                        .filter { it.customerId == cleanUid && it.id != "past_demo_1" }
+                        .sortedByDescending { it.createdAt }
+                    _customerBookings.value = userBookings
+                }
+            }
     }
 
     private fun seedLiveSalonsIntoFirestore(db: FirebaseFirestore) {
@@ -567,7 +628,14 @@ class TrimTimeRepository private constructor(context: Context) {
         }
         val formattedPhone = if (tenDigits.length == 10) "+91 $tenDigits" else ""
 
-        val uid = "usr_" + trimmedEmail.replace(Regex("[^a-z0-9]"), "_")
+        val sanitizedEmail = trimmedEmail.replace(Regex("[^a-z0-9]"), "_").trim('_')
+        val uid = if (tenDigits.length == 10 && sanitizedEmail.isNotBlank()) {
+            "usr_${tenDigits}_$sanitizedEmail"
+        } else if (tenDigits.length == 10) {
+            "usr_$tenDigits"
+        } else {
+            "usr_$sanitizedEmail"
+        }
         _isLoading.value = true
         _authError.value = null
         _showSha1FallbackDialog.value = false
@@ -615,6 +683,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         .apply()
 
                     _currentUserProfile.value = userProfile
+                    attachCustomerBookingsListener(uid)
                     _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) UserRole.PARTNER else UserRole.CUSTOMER
                     _authState.value = AppAuthState.Authenticated(_currentRole.value)
                     _isLoading.value = false
@@ -646,6 +715,7 @@ class TrimTimeRepository private constructor(context: Context) {
                                 .apply()
 
                             _currentUserProfile.value = newProfile
+                            attachCustomerBookingsListener(uid)
                             _currentRole.value = if (asPartner) UserRole.PARTNER else UserRole.CUSTOMER
                             _authState.value = AppAuthState.Authenticated(_currentRole.value)
                             _isLoading.value = false
@@ -714,21 +784,21 @@ class TrimTimeRepository private constructor(context: Context) {
                 return
             }
 
-            val deterministicUid = "usr_" + cleanEmail.replace(Regex("[^a-z0-9]"), "_")
-            firestoreDb.collection("users").document(deterministicUid).get()
-                .addOnSuccessListener { doc ->
-                    if (doc != null && doc.exists()) {
-                        applyExistingUserDocument(doc, onSuccess)
+            // Query by 'email' field first so any usr_<phone>_<email> or usr_<email> document matches
+            firestoreDb.collection("users")
+                .whereEqualTo("email", cleanEmail)
+                .limit(1)
+                .get()
+                .addOnSuccessListener { querySnapshot ->
+                    val matchedDoc = querySnapshot?.documents?.firstOrNull()
+                    if (matchedDoc != null && matchedDoc.exists()) {
+                        applyExistingUserDocument(matchedDoc, onSuccess)
                     } else {
-                        // Also query by 'email' field in case account was created with Google UID
-                        firestoreDb.collection("users")
-                            .whereEqualTo("email", cleanEmail)
-                            .limit(1)
-                            .get()
-                            .addOnSuccessListener { querySnapshot ->
-                                val matchedDoc = querySnapshot?.documents?.firstOrNull()
-                                if (matchedDoc != null && matchedDoc.exists()) {
-                                    applyExistingUserDocument(matchedDoc, onSuccess)
+                        val deterministicUid = "usr_" + cleanEmail.replace(Regex("[^a-z0-9]"), "_").trim('_')
+                        firestoreDb.collection("users").document(deterministicUid).get()
+                            .addOnSuccessListener { doc ->
+                                if (doc != null && doc.exists()) {
+                                    applyExistingUserDocument(doc, onSuccess)
                                 } else {
                                     _isLoading.value = false
                                     val notFoundMsg = "Account not found. Switching to Sign Up..."
@@ -782,10 +852,24 @@ class TrimTimeRepository private constructor(context: Context) {
                     if (matchedDoc != null && matchedDoc.exists()) {
                         applyExistingUserDocument(matchedDoc, onSuccess)
                     } else {
-                        _isLoading.value = false
-                        val notFoundMsg = "Account not found. Switching to Sign Up..."
-                        _authError.value = notFoundMsg
-                        onAccountNotFound("", tenDigits)
+                        val phoneUid = "usr_$tenDigits"
+                        firestoreDb.collection("users").document(phoneUid).get()
+                            .addOnSuccessListener { doc ->
+                                if (doc != null && doc.exists()) {
+                                    applyExistingUserDocument(doc, onSuccess)
+                                } else {
+                                    _isLoading.value = false
+                                    val notFoundMsg = "Account not found. Switching to Sign Up..."
+                                    _authError.value = notFoundMsg
+                                    onAccountNotFound("", tenDigits)
+                                }
+                            }
+                            .addOnFailureListener { err ->
+                                _isLoading.value = false
+                                val errMsg = "Failed to look up mobile number in Firestore: ${err.localizedMessage}"
+                                _authError.value = errMsg
+                                onError(errMsg)
+                            }
                     }
                 }
                 .addOnFailureListener { err ->
@@ -801,12 +885,18 @@ class TrimTimeRepository private constructor(context: Context) {
         doc: com.google.firebase.firestore.DocumentSnapshot,
         onSuccess: (UserProfile) -> Unit
     ) {
-        val uid = doc.id
+        val existingEmail = doc.getString("email") ?: ""
+        val existingPhone = doc.getString("phone") ?: ""
+        val rawDocId = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id
+        val uid = if (rawDocId.isNotBlank() && rawDocId !in invalidSharedUserIds) {
+            rawDocId
+        } else {
+            val fallbackSeed = existingEmail.ifBlank { existingPhone }.replace(Regex("[^a-zA-Z0-9]"), "_").lowercase()
+            "usr_${fallbackSeed.ifBlank { System.currentTimeMillis().toString() }}"
+        }
         val existingName = doc.getString("name")?.takeIf { it.isNotBlank() }
             ?: doc.getString("displayName")?.takeIf { it.isNotBlank() }
             ?: "Customer"
-        val existingEmail = doc.getString("email") ?: ""
-        val existingPhone = doc.getString("phone") ?: ""
         val existingRole = doc.getString("role") ?: "customer"
         val existingSalonId = doc.getString("salonId")
         val existingCancellationCount = doc.getLong("cancellationCount")?.toInt() ?: 0
@@ -833,6 +923,7 @@ class TrimTimeRepository private constructor(context: Context) {
             .apply()
 
         _currentUserProfile.value = userProfile
+        attachCustomerBookingsListener(uid)
         _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) {
             UserRole.PARTNER
         } else {
@@ -848,31 +939,29 @@ class TrimTimeRepository private constructor(context: Context) {
 
     /**
      * Developer Test Login:
-     * Explicitly invoked only when user taps "Developer Test Login".
+     * Generates a device-specific unique test UID so two devices never share a hardcoded UID.
      */
     fun developerTestLogin(
-        testUid: String = "dev_test_user_001",
-        testDisplayName: String = "Dev Tester",
-        testEmail: String = "devtester@trimtime.local",
+        testUid: String = "usr_device_${System.currentTimeMillis().toString().takeLast(6)}",
+        testDisplayName: String = "Customer",
+        testEmail: String = "user_${System.currentTimeMillis().toString().takeLast(5)}@trimtime.app",
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
         _isLoading.value = true
         _authError.value = null
-        Log.d(tag, "Initiating Developer Test Login for uid: $testUid")
+        Log.d(tag, "Initiating Login for uid: $testUid")
         saveGoogleUserAndAuthenticate(
             uid = testUid,
             displayName = testDisplayName,
             email = testEmail,
             onSuccess = {
                 _isLoading.value = false
-                Log.d(tag, "Developer Test Login successfully connected to real Firestore.")
                 onSuccess()
             },
             onError = { err ->
                 _isLoading.value = false
                 _authError.value = err
-                Log.w(tag, "Developer Test Login error: $err")
                 onError(err)
             }
         )
@@ -927,6 +1016,7 @@ class TrimTimeRepository private constructor(context: Context) {
 
                     Log.d(tag, "Existing Firestore user verified: ${userProfile.name} (${userProfile.email}), Phone: '${userProfile.phone}', Strikes: ${userProfile.cancellationCount}")
                     _currentUserProfile.value = userProfile
+                    attachCustomerBookingsListener(uid)
                     _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) UserRole.PARTNER else UserRole.CUSTOMER
                     _authState.value = AppAuthState.Authenticated(_currentRole.value)
                     _isLoading.value = false
@@ -952,6 +1042,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         .addOnSuccessListener {
                             Log.d(tag, "New user document successfully written to Firestore 'users' for uid: $uid")
                             _currentUserProfile.value = newProfile
+                            attachCustomerBookingsListener(uid)
                             _currentRole.value = UserRole.CUSTOMER
                             _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                             _isLoading.value = false
@@ -1029,10 +1120,13 @@ class TrimTimeRepository private constructor(context: Context) {
         } catch (e: Exception) {
             Log.w(tag, "Sign out error: ${e.message}")
         }
+        customerBookingsListener?.remove()
+        customerBookingsListener = null
         sessionPrefs.edit().clear().apply()
         _showSha1FallbackDialog.value = false
         _currentRole.value = UserRole.CUSTOMER
         _currentUserProfile.value = null
+        _customerBookings.value = emptyList()
         _authState.value = AppAuthState.Unauthenticated
     }
 
@@ -1050,6 +1144,7 @@ class TrimTimeRepository private constructor(context: Context) {
         _currentRole.value = UserRole.CUSTOMER
         _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
         sessionPrefs.edit().putString("saved_role", "customer").apply()
+        _currentUserProfile.value?.id?.let { attachCustomerBookingsListener(it) }
     }
 
     /**
@@ -1215,6 +1310,12 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     private fun fetchUserProfile(uid: String) {
+        if (uid.isBlank() || uid in invalidSharedUserIds) {
+            _currentUserProfile.value = null
+            _customerBookings.value = emptyList()
+            _authState.value = AppAuthState.Unauthenticated
+            return
+        }
         val user = auth?.currentUser
         val firestoreDb = firestore
         if (firestoreDb == null) {
@@ -1242,6 +1343,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
                     )
                     _currentUserProfile.value = profile
+                    attachCustomerBookingsListener(uid)
                     if (roleStr.equals("partner", ignoreCase = true) || roleStr.equals("owner", ignoreCase = true)) {
                         _currentRole.value = UserRole.PARTNER
                         _authState.value = AppAuthState.Authenticated(UserRole.PARTNER)
@@ -1266,12 +1368,14 @@ class TrimTimeRepository private constructor(context: Context) {
                     firestoreDb.collection("users").document(uid).set(newProfile.toMap())
                         .addOnSuccessListener {
                             _currentUserProfile.value = newProfile
+                            attachCustomerBookingsListener(uid)
                             _currentRole.value = UserRole.CUSTOMER
                             _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                         }
                         .addOnFailureListener { err ->
                             Log.e(tag, "Failed to create initial user profile: ${err.message}")
                             _currentUserProfile.value = newProfile
+                            attachCustomerBookingsListener(uid)
                             _currentRole.value = UserRole.CUSTOMER
                             _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                         }
@@ -1299,18 +1403,22 @@ class TrimTimeRepository private constructor(context: Context) {
         timeSlot: String,
         bookingDate: String
     ): Booking {
-        // Rule 3: Enforce Strike / Auto-Block check
         val currentProfile = _currentUserProfile.value
+        val resolvedCustomerId = currentProfile?.id?.takeIf { it.isNotBlank() && it !in invalidSharedUserIds }
+            ?: customerId.trim()
+        if (resolvedCustomerId.isBlank() || resolvedCustomerId in invalidSharedUserIds) {
+            throw IllegalStateException("Please log in with your Mobile Number or Email before booking.")
+        }
+
+        // Rule 3: Enforce Strike / Auto-Block check
         if (currentProfile != null && (currentProfile.cancellationCount >= 3 || currentProfile.isSuspended)) {
             throw IllegalStateException("Your account has been suspended for too many cancellations")
         }
 
-        // Rule 2: Enforce One Active Booking Rule
-        val hasActivePending = _bookings.value.any { b ->
-            (b.status.equals("pending", ignoreCase = true) || b.status.equals("accepted", ignoreCase = true)) && (
-                b.customerId == customerId ||
-                (customerPhone.isNotBlank() && b.customerPhone == customerPhone)
-            )
+        // Rule 2: Enforce One Active Booking Rule strictly for this customerId
+        val hasActivePending = _customerBookings.value.any { b ->
+            b.customerId == resolvedCustomerId &&
+                (b.status.equals("pending", ignoreCase = true) || b.status.equals("accepted", ignoreCase = true))
         }
         if (hasActivePending) {
             throw IllegalStateException("You already have an active booking. Please complete or cancel it first.")
@@ -1319,11 +1427,14 @@ class TrimTimeRepository private constructor(context: Context) {
         val generatedPin = String.format("%04d", Random.nextInt(1000, 9999))
         val newBookingId = "bk_" + System.currentTimeMillis().toString().takeLast(6) + "_" + Random.nextInt(10, 99)
 
+        val resolvedCustomerName = customerName.trim().ifBlank { currentProfile?.name ?: "Customer" }
+        val resolvedCustomerPhone = customerPhone.trim().ifBlank { currentProfile?.phone ?: "" }
+
         val newBooking = Booking(
             id = newBookingId,
-            customerId = customerId,
-            customerName = customerName,
-            customerPhone = customerPhone,
+            customerId = resolvedCustomerId,
+            customerName = resolvedCustomerName,
+            customerPhone = resolvedCustomerPhone,
             salonId = salonId,
             salonName = salonName,
             service = service,
@@ -1335,15 +1446,16 @@ class TrimTimeRepository private constructor(context: Context) {
             createdAt = System.currentTimeMillis()
         )
 
-        // Add to local state immediately
+        // Add to local states immediately (strictly isolated for _customerBookings)
         _bookings.value = listOf(newBooking) + _bookings.value
+        _customerBookings.value = listOf(newBooking) + _customerBookings.value.filter { it.customerId == resolvedCustomerId }
 
         // Write directly to Firestore 'bookings' collection
         firestore?.let { db ->
             try {
                 db.collection("bookings").document(newBooking.id).set(newBooking.toMap())
                     .addOnSuccessListener {
-                        Log.d(tag, "Live booking synced to Firestore: ${newBooking.id}")
+                        Log.d(tag, "Live booking synced to Firestore: ${newBooking.id} for customerId: $resolvedCustomerId")
                     }
                     .addOnFailureListener { e ->
                         Log.e(tag, "Firestore booking error: ${e.message}")
@@ -1364,6 +1476,7 @@ class TrimTimeRepository private constructor(context: Context) {
         val booking = currentBookings.find { it.id == bookingId } ?: return false
         val acceptedBooking = booking.copy(status = BookingStatus.ACCEPTED.name.lowercase())
         _bookings.value = currentBookings.map { if (it.id == bookingId) acceptedBooking else it }
+        _customerBookings.value = _customerBookings.value.map { if (it.id == bookingId) acceptedBooking else it }
 
         firestore?.collection("bookings")?.document(bookingId)?.update("status", "accepted")
             ?.addOnSuccessListener {
@@ -1384,6 +1497,7 @@ class TrimTimeRepository private constructor(context: Context) {
         val booking = currentBookings.find { it.id == bookingId } ?: return false
         val rejectedBooking = booking.copy(status = BookingStatus.REJECTED.name.lowercase())
         _bookings.value = currentBookings.map { if (it.id == bookingId) rejectedBooking else it }
+        _customerBookings.value = _customerBookings.value.map { if (it.id == bookingId) rejectedBooking else it }
 
         firestore?.collection("bookings")?.document(bookingId)?.update("status", "rejected")
             ?.addOnSuccessListener {
@@ -1420,6 +1534,7 @@ class TrimTimeRepository private constructor(context: Context) {
         )
 
         _bookings.value = currentBookings.map { if (it.id == bookingId) completedBooking else it }
+        _customerBookings.value = _customerBookings.value.map { if (it.id == bookingId) completedBooking else it }
 
         // Sync update live to Firestore
         firestore?.let { db ->
@@ -1452,10 +1567,13 @@ class TrimTimeRepository private constructor(context: Context) {
      */
     fun cancelBooking(bookingId: String): Boolean {
         val currentBookings = _bookings.value
-        val booking = currentBookings.find { it.id == bookingId } ?: return false
+        val booking = currentBookings.find { it.id == bookingId }
+            ?: _customerBookings.value.find { it.id == bookingId }
+            ?: return false
 
         val cancelledBooking = booking.copy(status = BookingStatus.CANCELLED.name.lowercase())
         _bookings.value = currentBookings.map { if (it.id == bookingId) cancelledBooking else it }
+        _customerBookings.value = _customerBookings.value.map { if (it.id == bookingId) cancelledBooking else it }
 
         firestore?.collection("bookings")?.document(bookingId)?.update("status", "cancelled")
 

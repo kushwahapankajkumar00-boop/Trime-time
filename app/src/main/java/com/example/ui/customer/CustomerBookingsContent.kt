@@ -57,12 +57,19 @@ import com.example.ui.theme.RedAlert
 @Composable
 fun CustomerBookingsContent(
     bookings: List<Booking>,
+    currentUserId: String = "",
     salons: List<Salon> = emptyList(),
     cancellationCount: Int = 0,
     isSuspended: Boolean = false,
     onViewBookingDetails: (Booking) -> Unit,
     onCancelBooking: (String) -> Unit
 ) {
+    val userBookings = if (currentUserId.isNotBlank()) {
+        bookings.filter { it.customerId == currentUserId }
+    } else {
+        emptyList()
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         // Strike / Anti-Spam Policy Banner
         Card(
@@ -110,7 +117,7 @@ fun CustomerBookingsContent(
             }
         }
 
-        if (bookings.isEmpty()) {
+        if (userBookings.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -146,7 +153,7 @@ fun CustomerBookingsContent(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                items(bookings, key = { it.id }) { booking ->
+                items(userBookings, key = { it.id }) { booking ->
                     val matchedSalon = salons.find {
                         it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true)
                     }

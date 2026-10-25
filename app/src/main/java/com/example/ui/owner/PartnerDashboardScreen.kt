@@ -157,11 +157,11 @@ fun PartnerDashboardScreen(
         ?: salons.find { it.id == selectedSalonId }
         ?: salons.firstOrNull()
 
-    // Filter bookings in real time for this salon
+    // Filter bookings in real time strictly for this partner's salon (booking.salonId == currentSalon.id)
     val salonBookings = if (currentSalon != null) {
         allBookings.filter { it.salonId == currentSalon.id }
     } else {
-        allBookings
+        emptyList()
     }
 
     // Active Queue includes both "pending" (new incoming) and "accepted" (confirmed waiting for 4-digit PIN)

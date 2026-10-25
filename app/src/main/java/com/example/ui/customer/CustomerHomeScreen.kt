@@ -160,19 +160,21 @@ fun CustomerHomeScreen(
             )
         }
 
-        // 3. Quick Re-book Section (Past booking with 1-tap "Book Again")
-        item {
-            QuickRebookSection(
-                pastBooking = pastBooking,
-                salons = salons,
-                onRebookClick = { booking ->
-                    onRebook(booking)
-                    val matchingSalon = salons.find { it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true) }
-                    if (matchingSalon != null) {
-                        onSalonSelected(matchingSalon)
+        // 3. Quick Re-book Section (Only shown when the logged-in customer actually has a past booking)
+        if (pastBooking != null) {
+            item {
+                QuickRebookSection(
+                    pastBooking = pastBooking,
+                    salons = salons,
+                    onRebookClick = { booking ->
+                        onRebook(booking)
+                        val matchingSalon = salons.find { it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true) }
+                        if (matchingSalon != null) {
+                            onSalonSelected(matchingSalon)
+                        }
                     }
-                }
-            )
+                )
+            }
         }
 
         // 4. Smart Filter Chips ("Open Now", "Under ₹150", "Top Rated", "A/C Salons")
@@ -499,16 +501,7 @@ fun QuickRebookSection(
     salons: List<Salon>,
     onRebookClick: (Booking) -> Unit
 ) {
-    // If user has a real past booking, show it; otherwise show a helpful quick re-book shortcut card
-    val bookingToShow = pastBooking ?: Booking(
-        id = "past_demo_1",
-        salonName = "Express Groomers (Quick Slot)",
-        salonId = "salon_express_trim",
-        service = "Classic Haircut & Beard",
-        servicePrice = 140,
-        timeSlot = "Today, 11:30 AM",
-        status = "completed"
-    )
+    val bookingToShow = pastBooking ?: return
 
     Card(
         modifier = Modifier
