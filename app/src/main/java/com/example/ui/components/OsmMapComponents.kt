@@ -446,7 +446,12 @@ fun CustomerSalonsOsmMapSection(
                         MapView(ctx).apply {
                             setTileSource(TileSourceFactory.MAPNIK)
                             setMultiTouchControls(true)
-                            zoomController.setVisibility(CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT)
+                            zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
+                            overlays.removeAll { it is org.osmdroid.views.overlay.CopyrightOverlay }
+                            setOnTouchListener { v, _ ->
+                                v.parent?.requestDisallowInterceptTouchEvent(true)
+                                false
+                            }
                             controller.setZoom(14.5)
                             controller.setCenter(GeoPoint(userLat, userLng))
                             mapViewRef = this
@@ -799,8 +804,9 @@ fun CustomerSalonsOsmMapSection(
 
 /**
  * Partner (Salon Owner) Interactive OpenStreetMap Location Picker:
- * - Allows the salon owner to set their shop's exact coordinates either by clicking
- *   "Use Current GPS Location" or by tapping/dragging the shop pin on the interactive OpenStreetMap.
+ * - Wraps MapView inside a clean Box(modifier = Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(16.dp)))
+ * - Disables osmdroid CopyrightOverlay so it never renders vertically
+ * - Prevents parent vertical scroll from intercepting map touch gestures (requestDisallowInterceptTouchEvent(true))
  */
 @Composable
 fun PartnerLocationPickerOsmMap(
@@ -837,147 +843,141 @@ fun PartnerLocationPickerOsmMap(
 
     Column(
         modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.TouchApp,
-                    contentDescription = null,
-                    tint = AmberPrimary,
-                    modifier = Modifier.size(15.dp)
-                )
-                Text(
-                    text = "Tap map or drag pin to set exact shop location",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color(0xFFE2E8F0)
-                )
-            }
+            Icon(
+                imageVector = Icons.Default.TouchApp,
+                contentDescription = null,
+                tint = AmberPrimary,
+                modifier = Modifier.size(16.dp)
+            )
             Text(
-                text = "OpenStreetMap",
-                fontSize = 10.sp,
-                color = Color(0xFF94A3B8)
+                text = "Tap map or drag pin to set exact shop location",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFFE2E8F0),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
         }
 
-        Card(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(230.dp)
-                .testTag("partner_osm_location_picker_map"),
-            shape = RoundedCornerShape(14.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkSurface),
-            border = CardDefaults.outlinedCardBorder().copy(
-                brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF334155))
-            )
+                .height(260.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(DarkSurface)
+                .border(1.dp, Color(0xFF334155), RoundedCornerShape(16.dp))
+                .testTag("partner_osm_location_picker_map")
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        Configuration.getInstance().userAgentValue = ctx.packageName
-                        MapView(ctx).apply {
-                            setTileSource(TileSourceFactory.MAPNIK)
-                            setMultiTouchControls(true)
-                            zoomController.setVisibility(CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT)
-                            val startPoint = GeoPoint(
-                                if (latitude != 0.0) latitude else DEFAULT_PATNA_LAT,
-                                if (longitude != 0.0) longitude else DEFAULT_PATNA_LNG
-                            )
-                            controller.setZoom(16.0)
-                            controller.setCenter(startPoint)
-                            mapViewRef = this
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    Configuration.getInstance().userAgentValue = ctx.packageName
+                    MapView(ctx).apply {
+                        setTileSource(TileSourceFactory.MAPNIK)
+                        setMultiTouchControls(true)
+                        zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
+                        overlays.removeAll { it is org.osmdroid.views.overlay.CopyrightOverlay }
+                        setOnTouchListener { v, _ ->
+                            v.parent?.requestDisallowInterceptTouchEvent(true)
+                            false
                         }
-                    },
-                    update = { mapView ->
-                        Configuration.getInstance().userAgentValue = mapView.context.packageName
-                        mapView.overlays.clear()
-
-                        val currentGeoPoint = GeoPoint(
+                        val startPoint = GeoPoint(
                             if (latitude != 0.0) latitude else DEFAULT_PATNA_LAT,
                             if (longitude != 0.0) longitude else DEFAULT_PATNA_LNG
                         )
+                        controller.setZoom(16.0)
+                        controller.setCenter(startPoint)
+                        mapViewRef = this
+                    }
+                },
+                update = { mapView ->
+                    Configuration.getInstance().userAgentValue = mapView.context.packageName
+                    mapView.overlays.clear()
 
-                        // 1. Tap anywhere on map to move shop pin
-                        val mapEventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
-                            override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
-                                if (p != null) {
-                                    onLocationPicked(p.latitude, p.longitude)
-                                    mapView.controller.animateTo(p)
-                                }
-                                return true
+                    val currentGeoPoint = GeoPoint(
+                        if (latitude != 0.0) latitude else DEFAULT_PATNA_LAT,
+                        if (longitude != 0.0) longitude else DEFAULT_PATNA_LNG
+                    )
+
+                    // 1. Tap anywhere on map to move shop pin
+                    val mapEventsOverlay = MapEventsOverlay(object : MapEventsReceiver {
+                        override fun singleTapConfirmedHelper(p: GeoPoint?): Boolean {
+                            if (p != null) {
+                                onLocationPicked(p.latitude, p.longitude)
+                                mapView.controller.animateTo(p)
                             }
+                            return true
+                        }
 
-                            override fun longPressHelper(p: GeoPoint?): Boolean {
-                                if (p != null) {
-                                    onLocationPicked(p.latitude, p.longitude)
-                                    mapView.controller.animateTo(p)
+                        override fun longPressHelper(p: GeoPoint?): Boolean {
+                            if (p != null) {
+                                onLocationPicked(p.latitude, p.longitude)
+                                mapView.controller.animateTo(p)
+                            }
+                            return true
+                        }
+                    })
+                    mapView.overlays.add(mapEventsOverlay)
+
+                    // 2. Draggable Shop Pin Marker
+                    val shopMarker = Marker(mapView).apply {
+                        position = currentGeoPoint
+                        title = salonName.ifBlank { "My Salon Pin" }
+                        snippet = "Lat: ${"%.4f".format(currentGeoPoint.latitude)}, Lng: ${"%.4f".format(currentGeoPoint.longitude)}"
+                        isDraggable = true
+                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                        icon = createMapPinDrawable(
+                            context = mapView.context,
+                            fillColorInt = android.graphics.Color.parseColor("#F59E0B"),
+                            strokeColorInt = android.graphics.Color.WHITE
+                        )
+                        setOnMarkerDragListener(object : Marker.OnMarkerDragListener {
+                            override fun onMarkerDrag(marker: Marker?) {}
+                            override fun onMarkerDragStart(marker: Marker?) {}
+                            override fun onMarkerDragEnd(marker: Marker?) {
+                                marker?.position?.let { newPos ->
+                                    onLocationPicked(newPos.latitude, newPos.longitude)
                                 }
-                                return true
                             }
                         })
-                        mapView.overlays.add(mapEventsOverlay)
-
-                        // 2. Draggable Shop Pin Marker
-                        val shopMarker = Marker(mapView).apply {
-                            position = currentGeoPoint
-                            title = salonName.ifBlank { "My Salon Pin" }
-                            snippet = "Lat: ${"%.4f".format(currentGeoPoint.latitude)}, Lng: ${"%.4f".format(currentGeoPoint.longitude)}"
-                            isDraggable = true
-                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                            icon = createMapPinDrawable(
-                                context = mapView.context,
-                                fillColorInt = android.graphics.Color.parseColor("#F59E0B"),
-                                strokeColorInt = android.graphics.Color.WHITE
-                            )
-                            setOnMarkerDragListener(object : Marker.OnMarkerDragListener {
-                                override fun onMarkerDrag(marker: Marker?) {}
-                                override fun onMarkerDragStart(marker: Marker?) {}
-                                override fun onMarkerDragEnd(marker: Marker?) {
-                                    marker?.position?.let { newPos ->
-                                        onLocationPicked(newPos.latitude, newPos.longitude)
-                                    }
-                                }
-                            })
-                        }
-                        mapView.overlays.add(shopMarker)
-                        mapView.invalidate()
                     }
-                )
-
-                // Re-center on current pin button
-                FloatingActionButton(
-                    onClick = {
-                        val target = GeoPoint(
-                            if (latitude != 0.0) latitude else DEFAULT_PATNA_LAT,
-                            if (longitude != 0.0) longitude else DEFAULT_PATNA_LNG
-                        )
-                        mapViewRef?.controller?.animateTo(target)
-                        mapViewRef?.controller?.setZoom(16.5)
-                    },
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(10.dp)
-                        .size(42.dp)
-                        .testTag("partner_map_recenter_button"),
-                    containerColor = Color(0xFF0F172A),
-                    contentColor = AmberPrimary,
-                    shape = CircleShape
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.LocationOn,
-                        contentDescription = "Center on Shop Pin",
-                        modifier = Modifier.size(20.dp)
-                    )
+                    mapView.overlays.add(shopMarker)
+                    mapView.invalidate()
                 }
+            )
+
+            // Re-center on current pin button
+            FloatingActionButton(
+                onClick = {
+                    val target = GeoPoint(
+                        if (latitude != 0.0) latitude else DEFAULT_PATNA_LAT,
+                        if (longitude != 0.0) longitude else DEFAULT_PATNA_LNG
+                    )
+                    mapViewRef?.controller?.animateTo(target)
+                    mapViewRef?.controller?.setZoom(16.5)
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(10.dp)
+                    .size(44.dp)
+                    .testTag("partner_map_recenter_button"),
+                containerColor = Color(0xFF0F172A),
+                contentColor = AmberPrimary,
+                shape = CircleShape
+            ) {
+                Icon(
+                    imageVector = Icons.Default.LocationOn,
+                    contentDescription = "Center on Shop Pin",
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
     }

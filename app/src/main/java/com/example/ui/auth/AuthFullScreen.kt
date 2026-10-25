@@ -138,13 +138,15 @@ fun AuthFullScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 18.dp),
+                .padding(start = 20.dp, end = 20.dp, top = 28.dp, bottom = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Compact Brand Header
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Brand Header with generous top clearance so the Scissors circle is never cut off
             Box(
                 modifier = Modifier
-                    .size(68.dp)
+                    .size(72.dp)
                     .shadow(elevation = 14.dp, shape = CircleShape, spotColor = AmberPrimary.copy(alpha = 0.4f))
                     .clip(CircleShape)
                     .background(
@@ -185,7 +187,7 @@ fun AuthFullScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             Text(
                 text = "TrimTime",
@@ -204,7 +206,7 @@ fun AuthFullScreen(
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(18.dp))
 
             // Primary Auth Card with Top Mode Switcher ("Login" vs "Sign Up" Tabs)
             Card(
@@ -221,7 +223,7 @@ fun AuthFullScreen(
                         .padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // 1. Top Mode Switcher ("Login (Existing User)" vs "Sign Up (New Account)")
+                    // 1. Top Mode Switcher ("Login" vs "Sign Up")
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -242,27 +244,26 @@ fun AuthFullScreen(
                                     isLoginTab = true
                                     infoBannerMessage = null
                                 }
-                                .padding(horizontal = 6.dp)
+                                .padding(horizontal = 8.dp)
                                 .testTag("tab_login_existing_user"),
                             contentAlignment = Alignment.Center
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.Login,
                                     contentDescription = null,
                                     tint = if (isLoginTab) Color.Black else Color(0xFF94A3B8),
-                                    modifier = Modifier.size(15.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
                                 Text(
-                                    text = "Login (Existing User)",
-                                    fontSize = 11.sp,
+                                    text = "Login",
+                                    fontSize = 14.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = if (isLoginTab) Color.Black else Color(0xFFCBD5E1),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    maxLines = 1
                                 )
                             }
                         }
@@ -276,27 +277,26 @@ fun AuthFullScreen(
                                 .clickable {
                                     isLoginTab = false
                                 }
-                                .padding(horizontal = 6.dp)
+                                .padding(horizontal = 8.dp)
                                 .testTag("tab_signup_new_account"),
                             contentAlignment = Alignment.Center
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.PersonAdd,
                                     contentDescription = null,
                                     tint = if (!isLoginTab) Color.Black else Color(0xFF94A3B8),
-                                    modifier = Modifier.size(15.dp)
+                                    modifier = Modifier.size(16.dp)
                                 )
                                 Text(
-                                    text = "Sign Up (New Account)",
-                                    fontSize = 11.sp,
+                                    text = "Sign Up",
+                                    fontSize = 14.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = if (!isLoginTab) Color.Black else Color(0xFFCBD5E1),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    maxLines = 1
                                 )
                             }
                         }
@@ -327,6 +327,39 @@ fun AuthFullScreen(
                                     color = AmberPrimary,
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.SemiBold,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        }
+                    }
+
+                    // Inline validation message inside the Auth Card (only for form validation)
+                    AnimatedVisibility(
+                        visible = !errorMessage.isNullOrBlank(),
+                        enter = fadeIn(),
+                        exit = fadeOut()
+                    ) {
+                        errorMessage?.let { errorText ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color(0xFF2D1214))
+                                    .border(1.dp, RedAlert.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ErrorOutline,
+                                    contentDescription = "Validation Info",
+                                    tint = RedAlert,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = errorText,
+                                    color = RedAlert,
+                                    fontSize = 12.sp,
                                     lineHeight = 16.sp
                                 )
                             }
@@ -659,85 +692,6 @@ fun AuthFullScreen(
                                 )
                             }
                         }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color(0xFF334155))
-                Text(text = "OR", fontSize = 11.sp, color = Color(0xFF64748B), fontWeight = FontWeight.Bold)
-                HorizontalDivider(modifier = Modifier.weight(1f), color = Color(0xFF334155))
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Google Sign-In Button
-            Button(
-                onClick = onContinueWithGoogle,
-                enabled = !isLoading,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .testTag("continue_with_google_button"),
-                shape = RoundedCornerShape(24.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White,
-                    contentColor = Color(0xFF1F1F1F),
-                    disabledContainerColor = Color(0xFFE2E8F0),
-                    disabledContentColor = Color(0xFF64748B)
-                )
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    GoogleLogoIcon(modifier = Modifier.size(20.dp))
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = "Continue with Google",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF1F1F1F)
-                    )
-                }
-            }
-
-            // Error Message Banner
-            AnimatedVisibility(
-                visible = !errorMessage.isNullOrBlank(),
-                enter = fadeIn(),
-                exit = fadeOut()
-            ) {
-                errorMessage?.let { errorText ->
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF2D1214))
-                            .border(1.dp, RedAlert.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ErrorOutline,
-                            contentDescription = "Error",
-                            tint = RedAlert,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = errorText,
-                            color = RedAlert,
-                            fontSize = 12.sp,
-                            lineHeight = 16.sp
-                        )
                     }
                 }
             }

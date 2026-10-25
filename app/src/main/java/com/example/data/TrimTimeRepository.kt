@@ -295,8 +295,17 @@ class TrimTimeRepository private constructor(context: Context) {
                                     parsedServices
                                 }
 
+                                val imageUrl = doc.getString("imageUrl")
+                                    ?: doc.getString("photoBase64")
+                                    ?: ""
+                                val photoBase64 = doc.getString("photoBase64")
+                                    ?: doc.getString("imageUrl")
+                                    ?: ""
+
+                                val resolvedDocId = doc.getString("id")?.takeIf { it.isNotBlank() } ?: docId
+
                                 Salon(
-                                    id = doc.getString("id") ?: docId,
+                                    id = resolvedDocId,
                                     name = salonName,
                                     location = location,
                                     distance = distance,
@@ -305,6 +314,8 @@ class TrimTimeRepository private constructor(context: Context) {
                                     partnerId = partnerId,
                                     ownerId = ownerId,
                                     phone = phone,
+                                    imageUrl = imageUrl,
+                                    photoBase64 = photoBase64,
                                     services = finalServices,
                                     isOpen = isOpen,
                                     currentStatus = currentStatus,
@@ -324,8 +335,20 @@ class TrimTimeRepository private constructor(context: Context) {
                         }
 
                         if (liveSalons.isNotEmpty()) {
-                            Log.d(tag, "Successfully loaded ${liveSalons.size} real salons from Firestore!")
-                            _salons.value = liveSalons
+                            // Ensure the 4 baseline salons exist in Firestore so the customer feed always has a rich list
+                            val seedSalons = getProductionSeedSalons()
+                            val missingSeeds = seedSalons.filter { seed ->
+                                liveSalons.none { it.id == seed.id }
+                            }
+                            if (missingSeeds.isNotEmpty()) {
+                                for (missing in missingSeeds) {
+                                    db.collection("salons").document(missing.id)
+                                        .set(missing.toMap(), com.google.firebase.firestore.SetOptions.merge())
+                                }
+                            }
+                            val combinedSalons = (liveSalons + missingSeeds).distinctBy { it.id }
+                            Log.d(tag, "Successfully loaded ${combinedSalons.size} real salons from Firestore!")
+                            _salons.value = combinedSalons
                         }
                     }
                 }
@@ -1659,12 +1682,13 @@ class TrimTimeRepository private constructor(context: Context) {
         landmark: String,
         latitude: Double,
         longitude: Double,
+        availableChairs: Int? = null,
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
         val calculatedDistKm = calculateDistanceKm(25.5941, 85.1376, latitude, longitude)
         val dynamicDistance = String.format(java.util.Locale.US, "%.1f km", calculatedDistKm)
-        val shortLocation = if (landmark.isNotBlank()) "$landmark, $shopAddress".take(40) else shopAddress.take(40)
+        val shortLocation = if (landmark.isNotBlank()) "$landmark, $shopAddress".take(50) else shopAddress.take(50)
         val cleanName = name.trim().ifBlank { "TrimTime Partner Salon" }
         val cleanPhone = phone.trim()
         val cleanTagline = tagline.trim().ifBlank { "Instant grooming slots • Zero queue wait time" }
@@ -1680,6 +1704,7 @@ class TrimTimeRepository private constructor(context: Context) {
                     landmark = landmark,
                     latitude = latitude,
                     longitude = longitude,
+                    availableChairs = availableChairs ?: it.availableChairs,
                     distance = dynamicDistance,
                     location = shortLocation.ifBlank { it.location }
                 )
@@ -1692,7 +1717,7 @@ class TrimTimeRepository private constructor(context: Context) {
             "lng" to longitude
         )
 
-        val updates = mapOf(
+        val updates = mutableMapOf<String, Any>(
             "name" to cleanName,
             "phone" to cleanPhone,
             "tagline" to cleanTagline,
@@ -1704,6 +1729,9 @@ class TrimTimeRepository private constructor(context: Context) {
             "distance" to dynamicDistance,
             "location" to shortLocation
         )
+        if (availableChairs != null) {
+            updates["availableChairs"] = availableChairs.coerceIn(0, 12)
+        }
 
         firestore?.collection("salons")?.document(salonId)
             ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
@@ -1714,6 +1742,39 @@ class TrimTimeRepository private constructor(context: Context) {
             ?.addOnFailureListener { e ->
                 Log.w(tag, "Failed to update salon profile in Firestore: ${e.message}")
                 onError(e.message ?: "Failed to sync to Firestore")
+            } ?: onSuccess()
+    }
+
+    /**
+     * Saves a compressed Base64 shop cover photo directly into Firestore `salons/{salonId}`
+     * (`imageUrl` and `photoBase64`) without requiring paid Firebase Storage.
+     */
+    fun updateSalonPhoto(
+        salonId: String,
+        photoDataUrl: String,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val currentSalons = _salons.value
+        _salons.value = currentSalons.map {
+            if (it.id == salonId) {
+                it.copy(imageUrl = photoDataUrl, photoBase64 = photoDataUrl)
+            } else it
+        }
+
+        val updates = mapOf(
+            "imageUrl" to photoDataUrl,
+            "photoBase64" to photoDataUrl
+        )
+        firestore?.collection("salons")?.document(salonId)
+            ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+            ?.addOnSuccessListener {
+                Log.d(tag, "Salon photo Base64 synced to Firestore for $salonId")
+                onSuccess()
+            }
+            ?.addOnFailureListener { e ->
+                Log.w(tag, "Failed to save salon photo in Firestore: ${e.message}")
+                onError(e.message ?: "Failed to save photo")
             } ?: onSuccess()
     }
 

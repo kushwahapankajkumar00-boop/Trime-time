@@ -605,6 +605,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         landmark: String,
         latitude: Double,
         longitude: Double,
+        availableChairs: Int? = null,
         onSuccess: () -> Unit = {}
     ) {
         repository.updateSalonFullProfile(
@@ -616,8 +617,27 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             landmark = landmark,
             latitude = latitude,
             longitude = longitude,
+            availableChairs = availableChairs,
             onSuccess = {
-                _userMessage.value = "Shop Profile & GPS synced to Firestore!"
+                _userMessage.value = "Shop Details & GPS saved to Cloud Firestore!"
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun saveSalonPhoto(
+        salonId: String,
+        photoDataUrl: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.updateSalonPhoto(
+            salonId = salonId,
+            photoDataUrl = photoDataUrl,
+            onSuccess = {
+                _userMessage.value = "Shop photo uploaded & synced to Firestore!"
                 onSuccess()
             },
             onError = { err ->

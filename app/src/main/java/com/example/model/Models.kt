@@ -65,6 +65,8 @@ data class Salon(
     val partnerId: String = "",
     val ownerId: String = "",
     val phone: String = "",
+    val imageUrl: String = "",
+    val photoBase64: String = "",
     val services: List<SalonService> = emptyList(),
     val isOpen: Boolean = true,
     val currentStatus: String = "FREE", // "FREE" or "BUSY"
@@ -83,6 +85,9 @@ data class Salon(
     val isFree: Boolean
         get() = !isBusy
 
+    val resolvedPhotoData: String
+        get() = photoBase64.ifBlank { imageUrl }
+
     val hasLocationSetup: Boolean
         get() = (shopAddress.isNotBlank() || location.isNotBlank()) &&
             (latitude != null && longitude != null && latitude != 0.0 && longitude != 0.0)
@@ -97,6 +102,8 @@ data class Salon(
         "partnerId" to partnerId.ifBlank { ownerId },
         "ownerId" to ownerId.ifBlank { partnerId },
         "phone" to phone,
+        "imageUrl" to imageUrl.ifBlank { photoBase64 },
+        "photoBase64" to photoBase64.ifBlank { imageUrl },
         "services" to services.map { it.toMap() },
         "isOpen" to isOpen,
         "currentStatus" to currentStatus,

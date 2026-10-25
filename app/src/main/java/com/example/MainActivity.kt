@@ -348,8 +348,11 @@ fun TrimTimeApp(
                                 onSaveShopLocation = { id, address, landmark, lat, lng ->
                                     viewModel.saveSalonLocation(id, address, landmark, lat, lng)
                                 },
-                                onSaveFullProfile = { id, name, phone, tagline, address, landmark, lat, lng ->
-                                    viewModel.saveSalonFullProfile(id, name, phone, tagline, address, landmark, lat, lng)
+                                onSaveFullProfile = { id, name, phone, tagline, address, landmark, lat, lng, availableChairs ->
+                                    viewModel.saveSalonFullProfile(id, name, phone, tagline, address, landmark, lat, lng, availableChairs)
+                                },
+                                onSaveShopPhoto = { id, photoDataUrl ->
+                                    viewModel.saveSalonPhoto(id, photoDataUrl)
                                 },
                                 onExitPartnerMode = { viewModel.switchToCustomerRole() },
                                 modifier = Modifier.padding(innerPadding)

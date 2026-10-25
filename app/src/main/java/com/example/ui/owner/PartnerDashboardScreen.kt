@@ -3,9 +3,9 @@ package com.example.ui.owner
 import android.Manifest
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -83,6 +83,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -104,6 +105,7 @@ import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
+import com.example.util.SalonImageUtils
 
 enum class PartnerTab(val title: String) {
     LIVE_QUEUE("Live Queue"),
@@ -137,21 +139,22 @@ fun PartnerDashboardScreen(
     onEditService: (String, SalonService) -> Unit = { _, _ -> },
     onDeleteService: (String, String, String) -> Unit = { _, _, _ -> },
     onSaveShopLocation: (String, String, String, Double, Double) -> Unit = { _, _, _, _, _ -> },
-    onSaveFullProfile: (String, String, String, String, String, String, Double, Double) -> Unit = { salonId, _, _, _, addr, lm, lat, lng ->
+    onSaveFullProfile: (String, String, String, String, String, String, Double, Double, Int) -> Unit = { salonId, _, _, _, addr, lm, lat, lng, _ ->
         onSaveShopLocation(salonId, addr, lm, lat, lng)
     },
+    onSaveShopPhoto: (String, String) -> Unit = { _, _ -> },
     onExitPartnerMode: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Current managed salon: prioritize selectedSalonId, then partner's own salon by ownerId / partnerId / salonId
-    val currentSalon = salons.find { it.id == selectedSalonId }
+    // Logged-in Partner manages only their own salon: match by ownerId / partnerId / profile.salonId first
+    val currentSalon = salons.find {
+        !partnerProfile?.id.isNullOrBlank() &&
+            (it.ownerId == partnerProfile?.id || it.partnerId == partnerProfile?.id || it.id == "salon_${partnerProfile?.id}")
+    }
         ?: salons.find {
             !partnerProfile?.salonId.isNullOrBlank() && it.id == partnerProfile?.salonId
         }
-        ?: salons.find {
-            !partnerProfile?.id.isNullOrBlank() &&
-                (it.ownerId == partnerProfile?.id || it.partnerId == partnerProfile?.id || it.id == "salon_${partnerProfile?.id}")
-        }
+        ?: salons.find { it.id == selectedSalonId }
         ?: salons.firstOrNull()
 
     // Filter bookings in real time for this salon
@@ -182,21 +185,12 @@ fun PartnerDashboardScreen(
             .fillMaxSize()
             .background(DarkBackground)
     ) {
-        // Partner Top Bar
+        // Partner Top Bar (manages only the logged-in Partner's own salon)
         PartnerTopBar(
             partnerName = partnerProfile?.name ?: "Salon Partner",
             salonName = currentSalon?.name ?: "My Salon",
             onExitPartnerMode = onExitPartnerMode
         )
-
-        // Salon Selector if multiple registered salons exist in testing
-        if (salons.size > 1 && currentSalon != null) {
-            PartnerSalonSelectorBar(
-                salons = salons,
-                selectedSalonId = currentSalon.id,
-                onSelect = onSelectSalonId
-            )
-        }
 
         // Navigation Tabs (Live Queue / Services & Pricing / Shop Profile)
         PartnerDashboardTabs(
@@ -239,7 +233,8 @@ fun PartnerDashboardScreen(
                     salon = currentSalon,
                     partnerProfile = partnerProfile,
                     onSaveLocation = onSaveShopLocation,
-                    onSaveFullProfile = onSaveFullProfile
+                    onSaveFullProfile = onSaveFullProfile,
+                    onSaveShopPhoto = onSaveShopPhoto
                 )
             }
         }
@@ -2061,24 +2056,27 @@ fun PredefinedServicePriceField(
 }
 
 /**
- * 5. REAL-TIME SHOP PROFILE, ADDRESS & GPS MANAGER:
- * Updates Shop Name, Contact Phone, Tagline, Full Shop Address, Landmark, and
- * OpenStreetMap GPS coordinates (`latitude`, `longitude`) directly in Firestore `salons/{salonId}`
- * so Customers see the changes in real time on their Salons list and Map.
+ * 5. CLEAN, USER-FRIENDLY SHOP DETAILS, PHOTO UPLOAD & GPS MANAGER:
+ * - Allows the Partner to edit Shop Name, Address/Location, Available Chairs, Phone Number, and Tagline
+ *   with a clear "Save Changes" button.
+ * - Real "+ Add Shop Image" gallery picker using `ActivityResultContracts.GetContent()` that compresses
+ *   and encodes the selected photo to a Base64 JPEG data URL stored directly in Firestore `salons/{salonId}`
+ *   (plus 4 preset 1-tap salon cover photos), immediately visible in Shop Profile and on Customer Salon Cards.
+ * - Fixed OpenStreetMap container (`height(260.dp)`) with no vertical attribution bug.
  */
 @Composable
 fun PartnerShopProfileTabContent(
     salon: Salon?,
     partnerProfile: UserProfile?,
     onSaveLocation: (String, String, String, Double, Double) -> Unit = { _, _, _, _, _ -> },
-    onSaveFullProfile: (String, String, String, String, String, String, Double, Double) -> Unit = { salonId, _, _, _, addr, lm, lat, lng ->
+    onSaveFullProfile: (String, String, String, String, String, String, Double, Double, Int) -> Unit = { salonId, _, _, _, addr, lm, lat, lng, _ ->
         onSaveLocation(salonId, addr, lm, lat, lng)
-    }
+    },
+    onSaveShopPhoto: (String, String) -> Unit = { _, _ -> }
 ) {
-    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
-    var uploadStatusMessage by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
 
-    // Editable Shop Identity & GPS Location States
+    // Editable Shop Details States
     var shopName by remember(salon?.id, salon?.name) {
         mutableStateOf(salon?.name ?: "My Grooming Studio")
     }
@@ -2089,10 +2087,13 @@ fun PartnerShopProfileTabContent(
                 ?: "+91 98765 43210"
         )
     }
+    var availableChairs by remember(salon?.id, salon?.availableChairs) {
+        mutableStateOf(salon?.availableChairs ?: 2)
+    }
     var shopTagline by remember(salon?.id, salon?.tagline) {
         mutableStateOf(salon?.tagline ?: "Instant grooming slots • Zero queue wait time")
     }
-    var fullAddress by remember(salon?.id, salon?.shopAddress) {
+    var fullAddress by remember(salon?.id, salon?.shopAddress, salon?.location) {
         mutableStateOf(salon?.shopAddress?.takeIf { it.isNotBlank() } ?: salon?.location ?: "")
     }
     var landmark by remember(salon?.id, salon?.landmark) {
@@ -2110,13 +2111,34 @@ fun PartnerShopProfileTabContent(
     var locationSaveSuccess by remember { mutableStateOf(false) }
     var isFetchingGps by remember { mutableStateOf(false) }
 
-    // Zero-permission Android Photo Picker contract (Google Play compliant)
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
+    // Shop Cover Photo State (synced with Firestore `salon.resolvedPhotoData`)
+    var localPhotoDataUrl by remember(salon?.id, salon?.resolvedPhotoData) {
+        mutableStateOf(salon?.resolvedPhotoData ?: "")
+    }
+    var uploadStatusMessage by remember { mutableStateOf<String?>(null) }
+
+    val decodedShopBitmap = remember(localPhotoDataUrl) {
+        SalonImageUtils.decodeBase64ToImageBitmap(localPhotoDataUrl)
+    }
+
+    // Real Gallery Image Picker (`ActivityResultContracts.GetContent()`) -> Base64 JPEG in Firestore
+    val galleryImageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        if (uri != null) {
-            selectedImageUri = uri
-            uploadStatusMessage = "Shop image selected! Ready to sync to Firebase Storage."
+        if (uri != null && salon != null) {
+            val base64Jpeg = SalonImageUtils.encodeUriToBase64Jpeg(
+                context = context,
+                uri = uri,
+                maxWidth = 600,
+                quality = 60
+            )
+            if (!base64Jpeg.isNullOrBlank()) {
+                localPhotoDataUrl = base64Jpeg
+                onSaveShopPhoto(salon.id, base64Jpeg)
+                uploadStatusMessage = "Shop photo uploaded & live on Customer Salon Card!"
+            } else {
+                uploadStatusMessage = "Could not process selected photo. Try another image."
+            }
         }
     }
 
@@ -2125,9 +2147,236 @@ fun PartnerShopProfileTabContent(
             .fillMaxSize()
             .testTag("partner_shop_profile_content"),
         contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // MANDATORY SHOP REGISTRATION, PROFILE & GPS ADDRESS SECTION
+        // 1. SHOP COVER PHOTO CARD ("+ Add Shop Image" + 1-Tap Preset Covers)
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
+                border = CardDefaults.outlinedCardBorder().copy(
+                    brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary.copy(alpha = 0.4f))
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Image,
+                                contentDescription = null,
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "SHOP COVER PHOTO",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White,
+                                letterSpacing = 0.5.sp
+                            )
+                        }
+
+                        Text(
+                            text = if (decodedShopBitmap != null) "Live on Customer Card" else "No Photo Yet",
+                            fontSize = 10.sp,
+                            color = if (decodedShopBitmap != null) GreenSuccess else Color(0xFF94A3B8),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // Clickable Image Preview / Upload Box
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(165.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xFF0F172A))
+                            .border(
+                                width = 1.dp,
+                                color = if (decodedShopBitmap != null) AmberPrimary else Color(0xFF334155),
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .clickable {
+                                galleryImageLauncher.launch("image/*")
+                            }
+                            .testTag("add_shop_image_box"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (decodedShopBitmap != null) {
+                            Image(
+                                bitmap = decodedShopBitmap,
+                                contentDescription = "Uploaded Shop Cover Photo",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(Color(0x33000000), Color(0xCC090D16))
+                                        )
+                                    )
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(10.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Color(0xE60F172A))
+                                    .border(1.dp, AmberPrimary, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AddPhotoAlternate,
+                                    contentDescription = "Change Photo",
+                                    tint = AmberPrimary,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Text(
+                                    text = "Change Gallery Photo",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        } else {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.padding(16.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0x33F59E0B)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AddPhotoAlternate,
+                                        contentDescription = "Add Photo",
+                                        tint = AmberPrimary,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                                Text(
+                                    text = "+ Add Shop Image",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "Pick a photo from your phone gallery (syncs directly to Firestore)",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF94A3B8),
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    }
+
+                    // 1-Tap Preset Salon Cover Photos
+                    Text(
+                        text = "Or choose a preset studio cover in 1 tap:",
+                        fontSize = 11.sp,
+                        color = Color(0xFF94A3B8),
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(SalonImageUtils.PRESET_COVERS, key = { it.id }) { preset ->
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(
+                                        Brush.horizontalGradient(
+                                            listOf(
+                                                Color(preset.primaryColorHex),
+                                                Color(preset.secondaryColorHex)
+                                            )
+                                        )
+                                    )
+                                    .border(
+                                        1.dp,
+                                        Color(preset.accentColorHex).copy(alpha = 0.7f),
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable {
+                                        if (salon != null) {
+                                            val generatedDataUrl = SalonImageUtils.generatePresetCoverBase64(preset)
+                                            localPhotoDataUrl = generatedDataUrl
+                                            onSaveShopPhoto(salon.id, generatedDataUrl)
+                                            uploadStatusMessage = "Applied '${preset.title}' cover & synced to Firestore!"
+                                        }
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .testTag("preset_cover_${preset.id}")
+                            ) {
+                                Column {
+                                    Text(
+                                        text = preset.title,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        text = preset.subtitle,
+                                        fontSize = 9.sp,
+                                        color = Color(0xFFCBD5E1)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (!uploadStatusMessage.isNullOrBlank()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF064E3B))
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = GreenSuccess,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = uploadStatusMessage ?: "",
+                                fontSize = 11.sp,
+                                color = Color(0xFFA7F3D0),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. CLEAN "SHOP DETAILS" FORM (Shop Name, Address/Location, Available Chairs, Phone Number, Save Changes)
         item {
             Card(
                 modifier = Modifier
@@ -2157,75 +2406,51 @@ fun PartnerShopProfileTabContent(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.LocationOn,
+                                imageVector = Icons.Default.Storefront,
                                 contentDescription = null,
                                 tint = AmberPrimary,
                                 modifier = Modifier.size(20.dp)
                             )
                             Text(
-                                text = "SHOP PROFILE, ADDRESS & GPS",
-                                fontSize = 12.sp,
+                                text = "SHOP DETAILS",
+                                fontSize = 13.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = Color.White,
                                 letterSpacing = 0.5.sp
                             )
                         }
 
-                        if (salon?.hasLocationSetup == true) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(Color(0xFF064E3B))
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    tint = GreenSuccess,
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Text(
-                                    text = "LIVE IN CLOUD",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFA7F3D0)
-                                )
-                            }
-                        } else {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(Color(0x33EF4444))
-                                    .padding(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Warning,
-                                    contentDescription = null,
-                                    tint = RedAlert,
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Text(
-                                    text = "SETUP REQUIRED",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = RedAlert
-                                )
-                            }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xFF064E3B))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = GreenSuccess,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = "LIVE SYNC",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFA7F3D0)
+                            )
                         }
                     }
 
                     Text(
-                        text = "Changes to your Shop Name, Phone, Address, and OpenStreetMap Pin sync immediately to Cloud Firestore so nearby customers see them in real time.",
+                        text = "Edit your Shop Name, Phone Number, Available Chairs, and Address. Changes appear immediately for nearby customers.",
                         fontSize = 11.sp,
                         color = Color(0xFF94A3B8),
                         lineHeight = 16.sp
                     )
 
-                    // 0a. Shop Name Text Field
+                    // Shop Name Input
                     OutlinedTextField(
                         value = shopName,
                         onValueChange = {
@@ -2235,7 +2460,7 @@ fun PartnerShopProfileTabContent(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("shop_name_input"),
-                        label = { Text("Shop / Salon Name *", color = Color(0xFF94A3B8)) },
+                        label = { Text("Shop Name *", color = Color(0xFF94A3B8)) },
                         placeholder = { Text("e.g. Royal Cuts Grooming Studio", color = Color(0xFF64748B)) },
                         singleLine = true,
                         colors = OutlinedTextFieldDefaults.colors(
@@ -2249,7 +2474,7 @@ fun PartnerShopProfileTabContent(
                         shape = RoundedCornerShape(10.dp)
                     )
 
-                    // 0b. Shop Phone Number Text Field
+                    // Phone Number Input
                     OutlinedTextField(
                         value = shopPhone,
                         onValueChange = {
@@ -2259,7 +2484,7 @@ fun PartnerShopProfileTabContent(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("shop_phone_input"),
-                        label = { Text("Shop Contact Phone *", color = Color(0xFF94A3B8)) },
+                        label = { Text("Phone Number *", color = Color(0xFF94A3B8)) },
                         placeholder = { Text("e.g. +91 98765 43210", color = Color(0xFF64748B)) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
@@ -2274,7 +2499,50 @@ fun PartnerShopProfileTabContent(
                         shape = RoundedCornerShape(10.dp)
                     )
 
-                    // 0c. Shop Tagline Text Field
+                    // Available Chairs Selector
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "Available Chairs: $availableChairs",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFE2E8F0)
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf(1, 2, 3, 4, 5, 6).forEach { count ->
+                                val isSelected = availableChairs == count
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(40.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(if (isSelected) AmberPrimary else DarkSurface)
+                                        .border(
+                                            1.dp,
+                                            if (isSelected) AmberPrimary else Color(0xFF334155),
+                                            RoundedCornerShape(10.dp)
+                                        )
+                                        .clickable {
+                                            availableChairs = count
+                                            locationSaveSuccess = false
+                                        }
+                                        .testTag("profile_chair_count_$count"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "$count",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (isSelected) DarkBackground else Color.White
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Shop Tagline Input
                     OutlinedTextField(
                         value = shopTagline,
                         onValueChange = {
@@ -2298,7 +2566,58 @@ fun PartnerShopProfileTabContent(
                         shape = RoundedCornerShape(10.dp)
                     )
 
-                    val context = LocalContext.current
+                    // Address / Location Input
+                    OutlinedTextField(
+                        value = fullAddress,
+                        onValueChange = {
+                            fullAddress = it
+                            locationSaveSuccess = false
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shop_full_address_input"),
+                        label = { Text("Address / Location *", color = Color(0xFF94A3B8)) },
+                        placeholder = { Text("e.g. Shop #12, Boring Road, Near Pantaloons", color = Color(0xFF64748B)) },
+                        singleLine = false,
+                        maxLines = 3,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF475569),
+                            focusedContainerColor = DarkSurface,
+                            unfocusedContainerColor = DarkSurface,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    // Nearby Landmark Input
+                    OutlinedTextField(
+                        value = landmark,
+                        onValueChange = {
+                            landmark = it
+                            locationSaveSuccess = false
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("shop_landmark_input"),
+                        label = { Text("Nearby Landmark", color = Color(0xFF94A3B8)) },
+                        placeholder = { Text("e.g. Opposite Shiv Temple / Metro Pillar 42", color = Color(0xFF64748B)) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF475569),
+                            focusedContainerColor = DarkSurface,
+                            unfocusedContainerColor = DarkSurface,
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+
+                    HorizontalDivider(color = Color(0xFF1E293B))
+
+                    // GPS Auto-Fetch + OpenStreetMap Pin Picker
                     val gpsPermissionLauncher = rememberLauncherForActivityResult(
                         contract = ActivityResultContracts.RequestMultiplePermissions()
                     ) { permissions ->
@@ -2323,7 +2642,6 @@ fun PartnerShopProfileTabContent(
                         }
                     }
 
-                    // 1. GPS Auto-Fetch Button (Real GPS + Runtime Permission)
                     Button(
                         onClick = {
                             isFetchingGps = true
@@ -2378,7 +2696,7 @@ fun PartnerShopProfileTabContent(
                         }
                     }
 
-                    // 1b. Interactive OpenStreetMap Shop Pin Picker (Tap or Drag Pin)
+                    // Interactive OpenStreetMap Shop Pin Picker (inside clean 260.dp Box)
                     PartnerLocationPickerOsmMap(
                         latitude = currentLatitude,
                         longitude = currentLongitude,
@@ -2391,7 +2709,6 @@ fun PartnerShopProfileTabContent(
                         }
                     )
 
-                    // GPS Coordinates preview pill
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2415,56 +2732,7 @@ fun PartnerShopProfileTabContent(
                         )
                     }
 
-                    // 2. Full Shop Address Text Field
-                    OutlinedTextField(
-                        value = fullAddress,
-                        onValueChange = {
-                            fullAddress = it
-                            locationSaveSuccess = false
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("shop_full_address_input"),
-                        label = { Text("Full Shop Address *", color = Color(0xFF94A3B8)) },
-                        placeholder = { Text("e.g. Shop #12, Boring Road, Near Pantaloons", color = Color(0xFF64748B)) },
-                        singleLine = false,
-                        maxLines = 3,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = AmberPrimary,
-                            unfocusedBorderColor = Color(0xFF475569),
-                            focusedContainerColor = DarkSurface,
-                            unfocusedContainerColor = DarkSurface,
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-
-                    // 3. Nearby Landmark Text Field
-                    OutlinedTextField(
-                        value = landmark,
-                        onValueChange = {
-                            landmark = it
-                            locationSaveSuccess = false
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("shop_landmark_input"),
-                        label = { Text("Nearby Landmark", color = Color(0xFF94A3B8)) },
-                        placeholder = { Text("e.g. Opposite Shiv Temple / Metro Pillar 42", color = Color(0xFF64748B)) },
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = AmberPrimary,
-                            unfocusedBorderColor = Color(0xFF475569),
-                            focusedContainerColor = DarkSurface,
-                            unfocusedContainerColor = DarkSurface,
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-
-                    // 4. Save Full Shop Profile & Location to Firestore Action Button
+                    // Save Changes Action Button
                     Button(
                         onClick = {
                             if (salon != null && fullAddress.isNotBlank()) {
@@ -2476,7 +2744,8 @@ fun PartnerShopProfileTabContent(
                                     fullAddress.trim(),
                                     landmark.trim(),
                                     currentLatitude,
-                                    currentLongitude
+                                    currentLongitude,
+                                    availableChairs
                                 )
                                 locationSaveSuccess = true
                             }
@@ -2484,13 +2753,13 @@ fun PartnerShopProfileTabContent(
                         enabled = fullAddress.isNotBlank() && shopName.isNotBlank(),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
+                            .height(50.dp)
                             .testTag("save_shop_location_button"),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = AmberPrimary,
                             disabledContainerColor = Color(0xFF475569)
                         ),
-                        shape = RoundedCornerShape(10.dp)
+                        shape = RoundedCornerShape(12.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -2498,14 +2767,14 @@ fun PartnerShopProfileTabContent(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Save,
-                                contentDescription = "Save",
+                                contentDescription = "Save Changes",
                                 tint = DarkBackground,
                                 modifier = Modifier.size(18.dp)
                             )
                             Text(
-                                text = "Save Shop Profile & GPS to Firestore",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
+                                text = "Save Changes",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.ExtraBold,
                                 color = DarkBackground
                             )
                         }
@@ -2528,7 +2797,7 @@ fun PartnerShopProfileTabContent(
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "Shop Profile & GPS synced to Cloud Firestore!",
+                                text = "Shop Details & GPS saved to Cloud Firestore!",
                                 fontSize = 11.sp,
                                 color = Color(0xFFA7F3D0),
                                 fontWeight = FontWeight.SemiBold
@@ -2536,201 +2805,6 @@ fun PartnerShopProfileTabContent(
                         }
                     }
                 }
-            }
-        }
-
-        // 5. Photo Upload Section: "+ Add Shop Image"
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
-                border = CardDefaults.outlinedCardBorder().copy(
-                    brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary.copy(alpha = 0.4f))
-                )
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "SHOP PHOTOS",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF94A3B8),
-                            letterSpacing = 1.sp
-                        )
-
-                        Text(
-                            text = "Firebase Storage Ready",
-                            fontSize = 10.sp,
-                            color = GreenSuccess,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-
-                    // Clickable Image Upload Box
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(140.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color(0xFF0F172A))
-                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(14.dp))
-                            .clickable {
-                                photoPickerLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
-                            }
-                            .testTag("add_shop_image_box"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(46.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0x33F59E0B)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.AddPhotoAlternate,
-                                    contentDescription = "Add Photo",
-                                    tint = AmberPrimary,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                            }
-                            Text(
-                                text = "+ Add Shop Image",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
-                            )
-                            Text(
-                                text = "Show customers your clean chairs and modern setup",
-                                fontSize = 11.sp,
-                                color = Color(0xFF94A3B8)
-                            )
-                        }
-                    }
-
-                    if (selectedImageUri != null) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF064E3B))
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = null,
-                                tint = GreenSuccess,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = uploadStatusMessage ?: "Photo staged for upload",
-                                fontSize = 11.sp,
-                                color = Color(0xFFA7F3D0)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Live Firestore Document Summary
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = DarkCardSurface)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = "LIVE FIRESTORE SALON DOCUMENT",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF94A3B8),
-                        letterSpacing = 1.sp
-                    )
-
-                    ShopDetailRow(label = "Firestore Doc ID", value = salon?.id ?: "Not Linked")
-                    ShopDetailRow(label = "Salon Name", value = salon?.name ?: "TrimTime Partner Salon")
-                    ShopDetailRow(label = "Location", value = salon?.location ?: "Hyper-local Street")
-                    ShopDetailRow(label = "Available Chairs", value = "${salon?.availableChairs ?: 2} Chairs (${salon?.waitingTimeMinutes ?: 0}m wait)")
-                    ShopDetailRow(label = "Rating", value = "${salon?.rating ?: 4.8} ★ (${salon?.reviewCount ?: 120} reviews)")
-                    ShopDetailRow(label = "Owner Account", value = partnerProfile?.email ?: "Registered Partner")
-                    ShopDetailRow(label = "Shop Phone", value = salon?.phone?.ifBlank { partnerProfile?.phone ?: "" } ?: "+91 98765 43210")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun ShopDetailRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(text = label, fontSize = 12.sp, color = Color(0xFF94A3B8))
-        Text(text = value, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
-    }
-}
-
-@Composable
-fun PartnerSalonSelectorBar(
-    salons: List<Salon>,
-    selectedSalonId: String,
-    onSelect: (String) -> Unit
-) {
-    LazyRow(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color(0xFF0F172A))
-            .padding(vertical = 6.dp),
-        contentPadding = PaddingValues(horizontal = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        items(salons) { salon ->
-            val isSelected = salon.id == selectedSalonId
-            val bg = if (isSelected) Color(0xFF2563EB) else DarkSurface
-            val txt = if (isSelected) Color.White else Color(0xFF94A3B8)
-
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(bg)
-                    .clickable { onSelect(salon.id) }
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
-                    .testTag("select_salon_${salon.id}"),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = salon.name,
-                    fontSize = 11.sp,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                    color = txt
-                )
             }
         }
     }

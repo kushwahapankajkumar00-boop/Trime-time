@@ -1,8 +1,10 @@
 package com.example.ui.customer
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,9 +17,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -45,6 +49,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -63,6 +68,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +86,7 @@ import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
+import com.example.util.SalonImageUtils
 
 /**
  * Frictionless, Blinkit-style Customer Home Screen in Jetpack Compose:
@@ -111,7 +118,7 @@ fun CustomerHomeScreen(
 
     // Filter salons according to selected Smart Filter
     val displayedSalons = remember(salons, selectedFilter) {
-        when (selectedFilter) {
+        val baseList = when (selectedFilter) {
             "Open Now" -> salons.filter { it.isOpen }
             "Under ₹150" -> salons.filter { salon ->
                 val minPrice = salon.services.minOfOrNull { it.price } ?: 100
@@ -126,6 +133,7 @@ fun CustomerHomeScreen(
             }
             else -> salons
         }
+        baseList.distinctBy { it.id.ifBlank { it.name } }
     }
 
     LazyColumn(
@@ -133,7 +141,7 @@ fun CustomerHomeScreen(
             .fillMaxSize()
             .background(DarkBackground)
             .testTag("salons_list"),
-        contentPadding = PaddingValues(bottom = 32.dp)
+        contentPadding = PaddingValues(bottom = 16.dp)
     ) {
         // 1. Auto-Location Header: "Patna, Bihar 📍" with Profile Icon
         item {
@@ -312,7 +320,10 @@ fun CustomerHomeScreen(
                 )
             }
         } else {
-            items(displayedSalons, key = { it.id }) { salon ->
+            items(
+                items = displayedSalons,
+                key = { salon -> salon.id.ifBlank { salon.name } }
+            ) { salon ->
                 BlinkitSalonCard(
                     salon = salon,
                     onBookClick = { onSalonSelected(salon) }
@@ -699,24 +710,31 @@ fun BlinkitSalonCard(
 ) {
     val minPrice = salon.services.minOfOrNull { it.price } ?: 80
     val isBusy = salon.isBusy
-    val isNoWait = salon.isFree && salon.nextSlotMinutes <= 5
+    val salonCoverBitmap = remember(salon.resolvedPhotoData) {
+        SalonImageUtils.decodeBase64ToImageBitmap(salon.resolvedPhotoData)
+    }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 7.dp)
+            .wrapContentHeight()
+            .padding(horizontal = 16.dp, vertical = 6.dp)
             .clickable { onBookClick() }
             .testTag("salon_card_${salon.id}"),
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            // Top Salon Visual Banner with Live Wait Time Badge
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .wrapContentHeight()
+        ) {
+            // Top Salon Visual Banner with Compact Flexible Height & Uploaded Shop Photo
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(96.dp)
+                    .wrapContentHeight()
                     .background(
                         Brush.horizontalGradient(
                             listOf(
@@ -727,21 +745,54 @@ fun BlinkitSalonCard(
                         )
                     )
             ) {
+                if (salonCoverBitmap != null) {
+                    Image(
+                        bitmap = salonCoverBitmap,
+                        contentDescription = "${salon.name} Cover Photo",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.matchParentSize()
+                    )
+                    // Dark gradient overlay so text & badges stay sharp over any photo
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color(0xB3090D16),
+                                        Color(0xE60F172A)
+                                    )
+                                )
+                            )
+                    )
+                }
+
                 Row(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .fillMaxWidth()
+                        .wrapContentHeight()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .wrapContentHeight()
+                            .padding(end = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
                         // Highly Visible Live Wait Time & Real-time Busy/Free Badge
                         Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .wrapContentHeight(),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Box(
                                 modifier = Modifier
+                                    .weight(1f, fill = false)
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(
                                         if (isBusy) Color(0xFF451A03) else Color(0xFF064E3B)
@@ -760,7 +811,8 @@ fun BlinkitSalonCard(
                                 ) {
                                     Text(
                                         text = if (isBusy) "🔴" else "🟢",
-                                        fontSize = 9.sp
+                                        fontSize = 9.sp,
+                                        maxLines = 1
                                     )
                                     val waitLabel = if (salon.waitingTimeMinutes > 0) {
                                         "~${salon.waitingTimeMinutes}m Wait"
@@ -775,7 +827,9 @@ fun BlinkitSalonCard(
                                         },
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.ExtraBold,
-                                        color = if (isBusy) Color(0xFFFDBA74) else GreenSuccess
+                                        color = if (isBusy) Color(0xFFFDBA74) else GreenSuccess,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
@@ -791,7 +845,8 @@ fun BlinkitSalonCard(
                                         text = "OPEN NOW",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF34D399)
+                                        color = Color(0xFF34D399),
+                                        maxLines = 1
                                     )
                                 }
                             } else {
@@ -805,17 +860,20 @@ fun BlinkitSalonCard(
                                         text = "CLOSED",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = RedAlert
+                                        color = RedAlert,
+                                        maxLines = 1
                                     )
                                 }
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(6.dp))
-
                         Text(
                             text = salon.name,
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 16.sp,
+                                lineHeight = 20.sp
+                            ),
                             color = Color.White,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -824,6 +882,7 @@ fun BlinkitSalonCard(
                         Text(
                             text = if (salon.tagline.isNotBlank()) salon.tagline else "Verified Grooming Partner",
                             fontSize = 11.sp,
+                            lineHeight = 14.sp,
                             color = Color(0xFFCBD5E1),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -833,7 +892,7 @@ fun BlinkitSalonCard(
                     // Salon Scissors Badge Icon
                     Box(
                         modifier = Modifier
-                            .size(50.dp)
+                            .size(44.dp)
                             .clip(CircleShape)
                             .background(Color(0x33F59E0B))
                             .border(1.dp, AmberPrimary.copy(alpha = 0.4f), CircleShape),
@@ -843,21 +902,23 @@ fun BlinkitSalonCard(
                             imageVector = Icons.Default.ContentCut,
                             contentDescription = "Salon",
                             tint = AmberPrimary,
-                            modifier = Modifier.size(26.dp)
+                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }
             }
 
-            // Card Body: Distance, Rating, Price & View & Book Button
+            // Card Body: Distance, Rating, Price, Service Pills & View & Book Button (Compact & Tight)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .wrapContentHeight()
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .wrapContentHeight(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -885,7 +946,8 @@ fun BlinkitSalonCard(
                                 text = "${salon.rating}",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color.White
+                                color = Color.White,
+                                maxLines = 1
                             )
                         }
 
@@ -908,7 +970,8 @@ fun BlinkitSalonCard(
                                 text = salon.distance,
                                 fontSize = 12.sp,
                                 color = Color(0xFFE2E8F0),
-                                fontWeight = FontWeight.Medium
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1
                             )
                         }
                     }
@@ -919,15 +982,19 @@ fun BlinkitSalonCard(
                             text = "Starts at ₹$minPrice",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = AmberPrimary
+                            color = AmberPrimary,
+                            maxLines = 1
                         )
                         Text(
                             text = "Pay at salon",
                             fontSize = 10.sp,
-                            color = Color(0xFF94A3B8)
+                            color = Color(0xFF94A3B8),
+                            maxLines = 1
                         )
                     }
                 }
+
+                Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
                     text = salon.location,
@@ -937,35 +1004,55 @@ fun BlinkitSalonCard(
                     overflow = TextOverflow.Ellipsis
                 )
 
-                // Top services preview chips
+                // Top services preview chips — single-line horizontal row with wrapContentHeight()
+                // so a 2nd/3rd chip NEVER squeezes into a tall vertical column of characters!
                 if (salon.services.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .wrapContentHeight()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         salon.services.take(3).forEach { service ->
                             Box(
                                 modifier = Modifier
+                                    .wrapContentHeight()
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(DarkSurface)
+                                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(6.dp))
                                     .padding(horizontal = 8.dp, vertical = 4.dp)
                             ) {
                                 Text(
                                     text = "${service.name} • ₹${service.price}",
                                     fontSize = 10.sp,
-                                    color = Color(0xFFE2E8F0)
+                                    color = Color(0xFFE2E8F0),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(2.dp))
+                // Strictly 10.dp spacing between service chips and bottom divider / "View & Book" row
+                Spacer(modifier = Modifier.height(10.dp))
+
+                HorizontalDivider(
+                    thickness = 1.dp,
+                    color = Color(0xFF1E293B)
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
 
                 // Bottom Action: Pay at Salon Guarantee + Directions + "View & Book" / "Join Waitlist"
                 val context = LocalContext.current
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .wrapContentHeight(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1035,7 +1122,8 @@ fun BlinkitSalonCard(
                                 Text(
                                     text = if (isBusy) "Join Waitlist" else "View & Book",
                                     fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
                                 )
                             }
                         }
