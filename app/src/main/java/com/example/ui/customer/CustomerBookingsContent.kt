@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Directions
@@ -47,7 +48,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Booking
 import com.example.model.Salon
+import com.example.ui.components.TRIMTIME_SUPPORT_PHONE
 import com.example.ui.components.launchGeoDirections
+import com.example.ui.components.launchPhoneDialer
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.DarkSurface
@@ -397,8 +400,28 @@ fun CustomerBookingCard(
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    OutlinedButton(
+                        onClick = {
+                            val salonPhone = salon?.phone?.ifBlank { TRIMTIME_SUPPORT_PHONE } ?: TRIMTIME_SUPPORT_PHONE
+                            launchPhoneDialer(context, salonPhone)
+                        },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenSuccess),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp),
+                        modifier = Modifier.testTag("booking_call_salon_${booking.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Call,
+                            contentDescription = "Call Salon Directly",
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(text = "Call Salon", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+
                     OutlinedButton(
                         onClick = {
                             launchGeoDirections(
@@ -412,7 +435,7 @@ fun CustomerBookingCard(
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
                         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
                         shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp),
                         modifier = Modifier.testTag("booking_get_directions_${booking.id}")
                     ) {
                         Icon(
@@ -421,7 +444,7 @@ fun CustomerBookingCard(
                             modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = "Get Directions", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(text = "Directions", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
 
                     if (isActiveSlot) {
@@ -429,10 +452,10 @@ fun CustomerBookingCard(
                             onClick = onCancel,
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
                             shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             modifier = Modifier.testTag("cancel_booking_${booking.id}")
                         ) {
-                            Text(text = "Cancel Slot", fontSize = 11.sp)
+                            Text(text = "Cancel", fontSize = 11.sp)
                         }
                     }
                 }

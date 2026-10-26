@@ -7,11 +7,17 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.PinVerificationResult
 import com.example.data.TrimTimeRepository
 import com.example.model.AppAuthState
+import com.example.model.AppLanguage
+import com.example.model.AppPreferences
+import com.example.model.AppThemeMode
 import com.example.model.Booking
 import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.model.UserProfile
 import com.example.model.UserRole
+import com.example.util.SecurityValidator
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -44,10 +50,26 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val isLoading: StateFlow<Boolean> = repository.isLoading
     val authError: StateFlow<String?> = repository.authError
     val showSha1FallbackDialog: StateFlow<Boolean> = repository.showSha1FallbackDialog
+    val showPartnerOnboarding: StateFlow<Boolean> = repository.showPartnerOnboarding
+    val appPreferences: StateFlow<AppPreferences> = repository.appPreferences
 
     // Real-Time Salons & Bookings from Firestore
     val allSalons = repository.salons
     val allBookings = repository.bookings
+
+    // Whether the currently logged-in user already owns a registered salon in Firestore
+    val hasRegisteredPartnerSalon: StateFlow<Boolean> = combine(
+        allSalons,
+        currentUserProfile
+    ) { salons, profile ->
+        val uid = profile?.id?.trim().orEmpty()
+        if (uid.isBlank()) {
+            false
+        } else {
+            profile?.hasRegisteredSalon == true ||
+                salons.any { it.ownerId == uid || it.partnerId == uid }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     // Customer-isolated bookings: strictly filtered where booking.customerId == currentUser.uid
     val customerBookings: StateFlow<List<Booking>> = combine(
@@ -126,6 +148,10 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     private val _pinErrorMessage = MutableStateFlow<String?>(null)
     val pinErrorMessage: StateFlow<String?> = _pinErrorMessage.asStateFlow()
 
+    private val _pinLockoutSeconds = MutableStateFlow(0)
+    val pinLockoutSeconds: StateFlow<Int> = _pinLockoutSeconds.asStateFlow()
+    private var pinLockoutTimerJob: Job? = null
+
     private val _verificationSuccess = MutableStateFlow(false)
     val verificationSuccess: StateFlow<Boolean> = _verificationSuccess.asStateFlow()
 
@@ -174,23 +200,20 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
-    // Rule 2: One Active Booking Rule (strictly scoped to currentUser.uid)
+    // Rule 2: One Active Booking Rule (strictly scoped to currentUser.uid; status in PENDING, ACCEPTED, IN_PROGRESS)
     val hasActivePendingBooking: StateFlow<Boolean> = combine(
         customerBookings,
         currentUserProfile
     ) { bookings, profile ->
         val currentUid = profile?.id?.trim().orEmpty()
         currentUid.isNotBlank() && bookings.any { booking ->
-            booking.customerId == currentUid && (
-                booking.status.equals("pending", ignoreCase = true) ||
-                    booking.status.equals("accepted", ignoreCase = true)
-                )
+            booking.customerId == currentUid && SecurityValidator.isBookingActiveStatus(booking.status)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
-    // Rule 3: Strike / Auto-Block System (3 cancellations = blocked)
+    // Rule 3: 3-Strike Anti-Spam Rule (cancellationStrikes >= 3 = blocked)
     val isUserSuspended: StateFlow<Boolean> = currentUserProfile.combine(customerBookings) { profile, _ ->
-        (profile?.cancellationCount ?: 0) >= 3 || (profile?.isSuspended == true)
+        (profile?.effectiveCancellationStrikes ?: 0) >= 3 || (profile?.isSuspended == true)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     fun confirmBooking(customerName: String, customerPhone: String) {
@@ -201,15 +224,15 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        // Rule 3 Auto-Block check
-        if (profile != null && (profile.cancellationCount >= 3 || profile.isSuspended)) {
-            _userMessage.value = "Your account has been suspended for too many cancellations"
+        // Rule 3 Auto-Block check (3-Strike Anti-Spam Rule)
+        if (profile != null && (profile.effectiveCancellationStrikes >= 3 || profile.isSuspended)) {
+            _userMessage.value = "Security Lockout: Your account is blocked from new bookings due to 3 cancellation strikes."
             return
         }
 
-        // Rule 2 One Active Booking check
+        // Rule 2 One Active Booking check (PENDING, ACCEPTED, IN_PROGRESS)
         if (hasActivePendingBooking.value) {
-            _userMessage.value = "You already have an active booking. Please complete or cancel it first."
+            _userMessage.value = "You already have an active booking (Pending/Accepted/In Progress). Please complete or cancel it first."
             return
         }
 
@@ -347,18 +370,128 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         _authMode.value = AuthMode.NONE
     }
 
+    fun dismissPartnerOnboarding() {
+        repository.dismissPartnerOnboarding()
+    }
+
     fun switchToPartnerRole() {
-        repository.switchToPartnerRole { salonId ->
-            _partnerSelectedSalonId.value = salonId
-        }
         _authMode.value = AuthMode.NONE
-        _userMessage.value = "Switched to Partner / Salon Owner Mode"
+        repository.switchToPartnerRole(
+            onSalonReady = { salonId ->
+                _partnerSelectedSalonId.value = salonId
+                _userMessage.value = "Switched to Partner / Salon Owner Mode"
+            },
+            onRequireRegistration = {
+                _userMessage.value = "Please register your salon details to unlock Partner Dashboard."
+            }
+        )
+    }
+
+    fun registerPartnerSalon(
+        salonName: String,
+        ownerName: String,
+        businessPhone: String,
+        shopAddress: String,
+        cityArea: String,
+        pincode: String,
+        landmark: String,
+        shopCategory: String,
+        availableChairs: Int,
+        openingTime: String,
+        closingTime: String,
+        initialServices: List<SalonService>,
+        latitude: Double,
+        longitude: Double,
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.registerPartnerSalon(
+            salonName = salonName,
+            ownerName = ownerName,
+            businessPhone = businessPhone,
+            shopAddress = shopAddress,
+            cityArea = cityArea,
+            pincode = pincode,
+            landmark = landmark,
+            shopCategory = shopCategory,
+            availableChairs = availableChairs,
+            openingTime = openingTime,
+            closingTime = closingTime,
+            initialServices = initialServices,
+            latitude = latitude,
+            longitude = longitude,
+            onSuccess = { salonId ->
+                _partnerSelectedSalonId.value = salonId
+                _userMessage.value = "🎉 '$salonName' registered in Firestore! Welcome to Partner Mode."
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
     }
 
     fun switchToCustomerRole() {
         repository.switchToCustomerRole()
         _currentNavTab.value = CustomerNavTab.SALONS
         _userMessage.value = "Switched to Customer Mode"
+    }
+
+    // ==========================================
+    // Customer App Settings & Personal Profile Actions
+    // ==========================================
+
+    fun setThemeMode(mode: AppThemeMode) {
+        repository.setThemeMode(mode)
+        _userMessage.value = "Appearance set to ${mode.label}"
+    }
+
+    fun setLanguage(language: AppLanguage) {
+        repository.setLanguage(language)
+        _userMessage.value = if (language == AppLanguage.HINDI_HINGLISH) {
+            "Language switched to Hindi / Hinglish"
+        } else {
+            "Language switched to English"
+        }
+    }
+
+    fun setNotificationPreferences(
+        bookingStatusAlerts: Boolean,
+        queueTurnReminders: Boolean,
+        salonOffersDiscounts: Boolean
+    ) {
+        repository.setNotificationPreferences(
+            bookingStatusAlerts = bookingStatusAlerts,
+            queueTurnReminders = queueTurnReminders,
+            salonOffersDiscounts = salonOffersDiscounts
+        )
+    }
+
+    fun updatePersonalProfile(
+        name: String,
+        phone: String,
+        defaultCity: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.updatePersonalProfile(
+            name = name,
+            phone = phone,
+            defaultCity = defaultCity,
+            onSuccess = {
+                _userMessage.value = "Personal profile & location updated in Firestore!"
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun clearAppCache() {
+        _searchQuery.value = ""
+        _selectedCategory.value = "All"
+        repository.clearAppCache { msg ->
+            _userMessage.value = msg
+        }
     }
 
     fun logout() {
@@ -394,14 +527,41 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private fun startPinLockoutCountdown(bookingId: String, initialSeconds: Int) {
+        pinLockoutTimerJob?.cancel()
+        _pinLockoutSeconds.value = initialSeconds
+        if (initialSeconds <= 0) return
+        pinLockoutTimerJob = viewModelScope.launch {
+            while (true) {
+                val remaining = repository.getPinLockoutRemainingSeconds(bookingId)
+                _pinLockoutSeconds.value = remaining
+                if (remaining <= 0) {
+                    _pinErrorMessage.value = null
+                    break
+                } else {
+                    _pinErrorMessage.value = "Security Lockout: Too many wrong PIN attempts (5/5). Please wait ${remaining}s before trying again."
+                }
+                delay(1000L)
+            }
+        }
+    }
+
     fun openPinVerificationDialog(booking: Booking) {
         _bookingToVerify.value = booking
         _enteredPin.value = ""
-        _pinErrorMessage.value = null
         _verificationSuccess.value = false
+        val remainingLockout = repository.getPinLockoutRemainingSeconds(booking.id)
+        if (remainingLockout > 0) {
+            startPinLockoutCountdown(booking.id, remainingLockout)
+        } else {
+            pinLockoutTimerJob?.cancel()
+            _pinLockoutSeconds.value = 0
+            _pinErrorMessage.value = null
+        }
     }
 
     fun setEnteredPin(pin: String) {
+        if (_pinLockoutSeconds.value > 0) return
         if (pin.length <= 4 && pin.all { it.isDigit() }) {
             _enteredPin.value = pin
             _pinErrorMessage.value = null
@@ -410,6 +570,10 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
 
     fun verifyAndCompleteService() {
         val booking = _bookingToVerify.value ?: return
+        if (_pinLockoutSeconds.value > 0) {
+            _pinErrorMessage.value = "Security Lockout: Please wait ${_pinLockoutSeconds.value}s before trying again."
+            return
+        }
         val pin = _enteredPin.value
 
         if (pin.length != 4) {
@@ -419,15 +583,22 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
 
         when (val result = repository.verifyAndCompleteBooking(booking.id, pin)) {
             is PinVerificationResult.Success -> {
+                pinLockoutTimerJob?.cancel()
+                _pinLockoutSeconds.value = 0
                 _verificationSuccess.value = true
                 _pinErrorMessage.value = null
                 _userMessage.value = "Service verified & completed! ₹${booking.servicePrice} collected."
                 viewModelScope.launch {
-                    kotlinx.coroutines.delay(1200)
+                    delay(1200)
                     _bookingToVerify.value = null
                     _verificationSuccess.value = false
                     _enteredPin.value = ""
                 }
+            }
+            is PinVerificationResult.LockedOut -> {
+                _enteredPin.value = ""
+                _pinErrorMessage.value = result.message
+                startPinLockoutCountdown(booking.id, result.remainingSeconds)
             }
             is PinVerificationResult.IncorrectPin -> {
                 _pinErrorMessage.value = result.message
@@ -442,6 +613,8 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun dismissPinVerificationDialog() {
+        pinLockoutTimerJob?.cancel()
+        _pinLockoutSeconds.value = 0
         _bookingToVerify.value = null
         _enteredPin.value = ""
         _pinErrorMessage.value = null
@@ -452,9 +625,9 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         val success = repository.cancelBooking(bookingId)
         if (success) {
             val profile = currentUserProfile.value
-            val strikes = profile?.cancellationCount ?: 0
+            val strikes = profile?.effectiveCancellationStrikes ?: 0
             if (strikes >= 3 || profile?.isSuspended == true) {
-                _userMessage.value = "Your account has been suspended for too many cancellations"
+                _userMessage.value = "Security Lockout: Your account has been suspended for 3 cancellation strikes."
             } else {
                 _userMessage.value = "Booking cancelled. (Cancellation $strikes/3 strikes)"
             }
@@ -510,7 +683,10 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             durationMinutes = durationMinutes,
             description = description,
             onSuccess = {
-                _userMessage.value = "Added '$name' (₹$price • ${durationMinutes}m) to Firestore!"
+                _userMessage.value = "Added '${SecurityValidator.sanitizeName(name)}' (₹$price • ${durationMinutes}m) to Firestore!"
+            },
+            onError = { err ->
+                _userMessage.value = err
             }
         )
     }
@@ -523,7 +699,10 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             salonId = salonId,
             updatedService = updatedService,
             onSuccess = {
-                _userMessage.value = "Updated '${updatedService.name}' (₹${updatedService.price} • ${updatedService.durationMinutes}m) in Firestore!"
+                _userMessage.value = "Updated '${SecurityValidator.sanitizeName(updatedService.name)}' (₹${updatedService.price} • ${updatedService.durationMinutes}m) in Firestore!"
+            },
+            onError = { err ->
+                _userMessage.value = err
             }
         )
     }
@@ -550,6 +729,13 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         headMassagePrice: Int,
         onSuccess: () -> Unit = {}
     ) {
+        val allPrices = listOf(haircutPrice, shavingPrice, facialPrice, headMassagePrice)
+        val invalidPrice = allPrices.firstOrNull { !SecurityValidator.isValidServicePrice(it) }
+        if (invalidPrice != null) {
+            _userMessage.value = SecurityValidator.validateServicePriceError(invalidPrice)
+                ?: "Service prices must be between ₹10 and ₹25,000."
+            return
+        }
         val currentSalon = allSalons.value.find { it.id == salonId } ?: return
         val customServices = currentSalon.services.filterNot {
             it.id == "${salonId}_s1" ||
@@ -606,6 +792,9 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             onSuccess = {
                 _userMessage.value = "Menu prices saved to profile & Firestore!"
                 onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
             }
         )
     }
@@ -680,6 +869,28 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             },
             onError = { err ->
                 _userMessage.value = err
+            }
+        )
+    }
+
+    fun submitFeedback(
+        rating: Int,
+        category: String,
+        message: String,
+        onDone: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        repository.submitFeedback(
+            rating = rating,
+            category = category,
+            message = message,
+            onSuccess = {
+                val msg = "Thank you! Your $rating-star feedback ($category) has been saved to Firestore."
+                _userMessage.value = msg
+                onDone(true, msg)
+            },
+            onError = { err ->
+                _userMessage.value = err
+                onDone(false, err)
             }
         )
     }

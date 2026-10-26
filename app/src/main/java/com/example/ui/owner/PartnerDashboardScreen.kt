@@ -96,9 +96,15 @@ import com.example.model.Booking
 import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.model.UserProfile
+import com.example.ui.components.HelpAndSupportCenterDialog
+import com.example.ui.components.LegalPoliciesViewerDialog
+import com.example.ui.components.LegalPolicyTab
 import com.example.ui.components.PartnerLocationPickerOsmMap
+import com.example.ui.components.SendFeedbackDialog
+import com.example.ui.components.SupportFeedbackLegalSectionCard
 import com.example.ui.components.fetchDeviceGpsLocation
 import com.example.ui.components.hasLocationPermission
+import com.example.ui.components.launchPhoneDialer
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
@@ -106,6 +112,8 @@ import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
 import com.example.util.SalonImageUtils
+import com.example.util.SecurityValidator
+import androidx.compose.material.icons.filled.SupportAgent
 
 enum class PartnerTab(val title: String) {
     LIVE_QUEUE("Live Queue"),
@@ -143,6 +151,9 @@ fun PartnerDashboardScreen(
         onSaveShopLocation(salonId, addr, lm, lat, lng)
     },
     onSaveShopPhoto: (String, String) -> Unit = { _, _ -> },
+    onSubmitFeedback: (rating: Int, category: String, message: String, onDone: (Boolean, String) -> Unit) -> Unit = { _, _, _, onDone ->
+        onDone(true, "Saved")
+    },
     onExitPartnerMode: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -164,21 +175,29 @@ fun PartnerDashboardScreen(
         emptyList()
     }
 
-    // Active Queue includes both "pending" (new incoming) and "accepted" (confirmed waiting for 4-digit PIN)
+    // Active Queue includes "pending", "accepted", and "in_progress" bookings
     val pendingBookings = salonBookings.filter {
-        it.status.equals("pending", ignoreCase = true) || it.status.equals("accepted", ignoreCase = true)
+        SecurityValidator.isBookingActiveStatus(it.status)
     }
-    val completedBookings = salonBookings.filter { it.status.equals("completed", ignoreCase = true) }
+    val completedBookings = salonBookings.filter {
+        it.status.equals("completed", ignoreCase = true) ||
+            it.status.equals("cancelled", ignoreCase = true) ||
+            it.status.equals("rejected", ignoreCase = true)
+    }
+    val strictlyCompletedBookings = salonBookings.filter { it.status.equals("completed", ignoreCase = true) }
 
     // Today's Summary calculations
     val todayAppointmentsCount = salonBookings.count {
         !it.status.equals("rejected", ignoreCase = true) && !it.status.equals("cancelled", ignoreCase = true)
     }
-    val todayEarnings = completedBookings.sumOf { it.servicePrice }
+    val todayEarnings = strictlyCompletedBookings.sumOf { it.servicePrice }
     val pendingCashToCollect = pendingBookings.sumOf { it.servicePrice }
 
     // Active Tab in Partner Dashboard
     var currentTab by remember { mutableStateOf(PartnerTab.LIVE_QUEUE) }
+    var showSupportDialog by remember { mutableStateOf(false) }
+    var showFeedbackDialog by remember { mutableStateOf(false) }
+    var activeLegalTab by remember { mutableStateOf<LegalPolicyTab?>(null) }
 
     Column(
         modifier = modifier
@@ -189,6 +208,7 @@ fun PartnerDashboardScreen(
         PartnerTopBar(
             partnerName = partnerProfile?.name ?: "Salon Partner",
             salonName = currentSalon?.name ?: "My Salon",
+            onOpenSupportCenter = { showSupportDialog = true },
             onExitPartnerMode = onExitPartnerMode
         )
 
@@ -234,10 +254,48 @@ fun PartnerDashboardScreen(
                     partnerProfile = partnerProfile,
                     onSaveLocation = onSaveShopLocation,
                     onSaveFullProfile = onSaveFullProfile,
-                    onSaveShopPhoto = onSaveShopPhoto
+                    onSaveShopPhoto = onSaveShopPhoto,
+                    onOpenSupportCenter = { showSupportDialog = true },
+                    onOpenFeedbackForm = { showFeedbackDialog = true },
+                    onOpenTerms = { activeLegalTab = LegalPolicyTab.TERMS },
+                    onOpenPrivacyPolicy = { activeLegalTab = LegalPolicyTab.PRIVACY }
                 )
             }
         }
+    }
+
+    if (showSupportDialog) {
+        HelpAndSupportCenterDialog(
+            onDismiss = { showSupportDialog = false },
+            onOpenFeedbackForm = {
+                showSupportDialog = false
+                showFeedbackDialog = true
+            },
+            onOpenTerms = {
+                showSupportDialog = false
+                activeLegalTab = LegalPolicyTab.TERMS
+            },
+            onOpenPrivacy = {
+                showSupportDialog = false
+                activeLegalTab = LegalPolicyTab.PRIVACY
+            }
+        )
+    }
+
+    if (showFeedbackDialog) {
+        SendFeedbackDialog(
+            userName = partnerProfile?.name ?: (currentSalon?.name ?: "Salon Partner"),
+            userRole = "partner",
+            onDismiss = { showFeedbackDialog = false },
+            onSubmitFeedback = onSubmitFeedback
+        )
+    }
+
+    activeLegalTab?.let { tab ->
+        LegalPoliciesViewerDialog(
+            initialTab = tab,
+            onDismiss = { activeLegalTab = null }
+        )
     }
 }
 
@@ -248,6 +306,7 @@ fun PartnerDashboardScreen(
 fun PartnerTopBar(
     partnerName: String,
     salonName: String,
+    onOpenSupportCenter: () -> Unit = {},
     onExitPartnerMode: () -> Unit
 ) {
     Surface(
@@ -306,33 +365,54 @@ fun PartnerTopBar(
                 }
             }
 
-            // 1-Tap Switch back to Customer Mode button
-            OutlinedButton(
-                onClick = onExitPartnerMode,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                shape = RoundedCornerShape(10.dp),
-                border = ButtonDefaults.outlinedButtonBorder.copy(
-                    brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
-                ),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = Color(0xFF2E2210)
-                ),
-                modifier = Modifier.testTag("exit_partner_mode_btn")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.Person,
-                    contentDescription = "Switch to Customer Mode",
-                    tint = AmberPrimary,
-                    modifier = Modifier.size(14.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "Customer Mode",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = AmberPrimary,
-                    maxLines = 1
-                )
+                IconButton(
+                    onClick = onOpenSupportCenter,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF1E293B))
+                        .testTag("partner_topbar_support_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SupportAgent,
+                        contentDescription = "Partner Help & Support",
+                        tint = Color(0xFF38BDF8),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                // 1-Tap Switch back to Customer Mode button
+                OutlinedButton(
+                    onClick = onExitPartnerMode,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    border = ButtonDefaults.outlinedButtonBorder.copy(
+                        brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
+                    ),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color(0xFF2E2210)
+                    ),
+                    modifier = Modifier.testTag("exit_partner_mode_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Person,
+                        contentDescription = "Switch to Customer Mode",
+                        tint = AmberPrimary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Customer Mode",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AmberPrimary,
+                        maxLines = 1
+                    )
+                }
             }
         }
     }
@@ -1094,7 +1174,11 @@ fun LiveQueueBookingCard(
     onRejectClick: () -> Unit = {},
     onVerifyPinClick: () -> Unit
 ) {
-    val isAccepted = booking.status.equals("accepted", ignoreCase = true)
+    val context = LocalContext.current
+    val isAccepted = booking.status.equals("accepted", ignoreCase = true) ||
+        booking.status.equals("in_progress", ignoreCase = true)
+    val isActiveBooking = SecurityValidator.isBookingActiveStatus(booking.status)
+    val displayPhone = SecurityValidator.maskCustomerPhoneForStatus(booking.customerPhone, booking.status)
 
     Card(
         modifier = Modifier
@@ -1121,7 +1205,7 @@ fun LiveQueueBookingCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1152,39 +1236,93 @@ fun LiveQueueBookingCard(
                             )
                         }
                     }
-                    if (booking.customerPhone.isNotBlank()) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(top = 2.dp)
+                    ) {
+                        if (booking.customerPhone.isNotBlank()) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Phone,
+                                    contentDescription = null,
+                                    tint = Color(0xFF94A3B8),
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Text(
+                                    text = displayPhone,
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+                        // Masked 4-Digit PIN indicator (NEVER exposes plain-text servicePin on Partner UI)
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFF1E293B))
+                                .padding(horizontal = 6.dp, vertical = 1.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Phone,
-                                contentDescription = null,
-                                tint = Color(0xFF94A3B8),
-                                modifier = Modifier.size(11.dp)
-                            )
                             Text(
-                                text = booking.customerPhone,
-                                fontSize = 11.sp,
-                                color = Color(0xFF94A3B8)
+                                text = "PIN: ••••",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFA5B4FC)
                             )
                         }
                     }
                 }
 
-                // Slot Badge
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF451A03))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                // Slot Badge & Call Customer Button (ONLY allowed while booking is actively pending/accepted/in_progress)
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        text = "⏱ ${booking.timeSlot}",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = AmberPrimary
-                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF451A03))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "⏱ ${booking.timeSlot}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = AmberPrimary
+                        )
+                    }
+
+                    if (isActiveBooking && booking.customerPhone.isNotBlank()) {
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF064E3B))
+                                .border(1.dp, GreenSuccess.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                                .clickable {
+                                    launchPhoneDialer(context, booking.customerPhone)
+                                }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("call_customer_btn_${booking.id}"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Phone,
+                                contentDescription = "Call Customer",
+                                tint = GreenSuccess,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = "Call Customer",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFA7F3D0)
+                            )
+                        }
+                    }
                 }
             }
 
@@ -1313,6 +1451,10 @@ fun LiveQueueBookingCard(
 
 @Composable
 fun CompletedBookingCard(booking: Booking) {
+    val isCompleted = booking.status.equals("completed", ignoreCase = true)
+    // Mask customer phone once booking is COMPLETED, CANCELLED, or REJECTED (+91 ••••••1234)
+    val maskedPhone = SecurityValidator.maskCustomerPhoneForStatus(booking.customerPhone, booking.status)
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1329,12 +1471,13 @@ fun CompletedBookingCard(booking: Booking) {
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f)
             ) {
                 Icon(
-                    imageVector = Icons.Default.CheckCircle,
-                    contentDescription = "Completed",
-                    tint = GreenSuccess,
+                    imageVector = if (isCompleted) Icons.Default.CheckCircle else Icons.Default.Close,
+                    contentDescription = booking.status,
+                    tint = if (isCompleted) GreenSuccess else RedAlert,
                     modifier = Modifier.size(18.dp)
                 )
                 Column {
@@ -1345,18 +1488,22 @@ fun CompletedBookingCard(booking: Booking) {
                         color = Color.White
                     )
                     Text(
-                        text = "PIN [${booking.pin}] Verified",
+                        text = if (isCompleted) {
+                            "PIN [••••] Verified • $maskedPhone"
+                        } else {
+                            "${booking.status.uppercase()} • $maskedPhone (Phone Masked)"
+                        },
                         fontSize = 11.sp,
-                        color = Color(0xFFA7F3D0)
+                        color = if (isCompleted) Color(0xFFA7F3D0) else Color(0xFF94A3B8)
                     )
                 }
             }
 
             Text(
-                text = "+₹${booking.servicePrice}",
+                text = if (isCompleted) "+₹${booking.servicePrice}" else "₹0",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.ExtraBold,
-                color = GreenSuccess
+                color = if (isCompleted) GreenSuccess else Color(0xFF64748B)
             )
         }
     }
@@ -1522,11 +1669,11 @@ fun PartnerMenuManagerTabContent(
 
                     OutlinedTextField(
                         value = newServiceName,
-                        onValueChange = { newServiceName = it },
+                        onValueChange = { newServiceName = SecurityValidator.sanitizeName(it, trimEdges = false) },
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("new_service_name_input"),
-                        label = { Text("Service Name *", color = Color(0xFF94A3B8)) },
+                        label = { Text("Service Name * (Max 60 chars)", color = Color(0xFF94A3B8)) },
                         placeholder = { Text("e.g. Fade Haircut, Detan Facial, Royal Beard", color = Color(0xFF64748B)) },
                         singleLine = true,
                         colors = OutlinedTextFieldDefaults.colors(
@@ -1572,11 +1719,11 @@ fun PartnerMenuManagerTabContent(
                     ) {
                         OutlinedTextField(
                             value = newServicePrice,
-                            onValueChange = { newServicePrice = it.filter { c -> c.isDigit() } },
+                            onValueChange = { newServicePrice = it.filter { c -> c.isDigit() }.take(5) },
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("new_service_price_input"),
-                            label = { Text("Price (₹) *", color = Color(0xFF94A3B8)) },
+                            label = { Text("Price (₹10–₹25k) *", color = Color(0xFF94A3B8)) },
                             leadingIcon = {
                                 Text("₹", color = AmberPrimary, fontWeight = FontWeight.Bold)
                             },
@@ -1595,7 +1742,7 @@ fun PartnerMenuManagerTabContent(
 
                         OutlinedTextField(
                             value = newServiceDuration,
-                            onValueChange = { newServiceDuration = it.filter { c -> c.isDigit() } },
+                            onValueChange = { newServiceDuration = it.filter { c -> c.isDigit() }.take(3) },
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("new_service_duration_input"),
@@ -1614,24 +1761,39 @@ fun PartnerMenuManagerTabContent(
                         )
                     }
 
+                    val parsedNewPrice = newServicePrice.toIntOrNull()
+                    val priceErrorText = if (newServicePrice.isNotBlank()) {
+                        SecurityValidator.validateServicePriceError(parsedNewPrice)
+                    } else null
+
+                    if (priceErrorText != null) {
+                        Text(
+                            text = priceErrorText,
+                            fontSize = 11.sp,
+                            color = RedAlert,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
                     Button(
                         onClick = {
-                            if (salon != null && newServiceName.isNotBlank()) {
-                                val priceVal = newServicePrice.toIntOrNull() ?: 100
-                                val durationVal = newServiceDuration.toIntOrNull() ?: 20
+                            val cleanName = SecurityValidator.sanitizeName(newServiceName)
+                            val priceVal = newServicePrice.toIntOrNull() ?: 0
+                            val durationVal = (newServiceDuration.toIntOrNull() ?: 20).coerceIn(5, 300)
+                            if (salon != null && cleanName.isNotBlank() && SecurityValidator.isValidServicePrice(priceVal)) {
                                 onAddService(
                                     salon.id,
-                                    newServiceName.trim(),
+                                    cleanName,
                                     newServiceCategory,
                                     priceVal,
                                     durationVal,
-                                    newServiceDesc.trim()
+                                    SecurityValidator.sanitizeTagline(newServiceDesc)
                                 )
                                 newServiceName = ""
                                 newServiceDesc = ""
                             }
                         },
-                        enabled = newServiceName.isNotBlank() && newServicePrice.isNotBlank(),
+                        enabled = newServiceName.isNotBlank() && parsedNewPrice != null && SecurityValidator.isValidServicePrice(parsedNewPrice),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(46.dp)
@@ -1775,9 +1937,9 @@ fun PartnerMenuManagerTabContent(
                             HorizontalDivider(color = Color(0xFF334155))
                             OutlinedTextField(
                                 value = editName,
-                                onValueChange = { editName = it },
+                                onValueChange = { editName = SecurityValidator.sanitizeName(it, trimEdges = false) },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Service Name", color = Color(0xFF94A3B8)) },
+                                label = { Text("Service Name (Max 60 chars)", color = Color(0xFF94A3B8)) },
                                 singleLine = true,
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedBorderColor = AmberPrimary,
@@ -1794,9 +1956,9 @@ fun PartnerMenuManagerTabContent(
                             ) {
                                 OutlinedTextField(
                                     value = editPrice,
-                                    onValueChange = { editPrice = it.filter { c -> c.isDigit() } },
+                                    onValueChange = { editPrice = it.filter { c -> c.isDigit() }.take(5) },
                                     modifier = Modifier.weight(1f),
-                                    label = { Text("Price (₹)", color = Color(0xFF94A3B8)) },
+                                    label = { Text("Price (₹10–₹25k)", color = Color(0xFF94A3B8)) },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                     singleLine = true,
                                     colors = OutlinedTextFieldDefaults.colors(
@@ -1810,7 +1972,7 @@ fun PartnerMenuManagerTabContent(
                                 )
                                 OutlinedTextField(
                                     value = editDuration,
-                                    onValueChange = { editDuration = it.filter { c -> c.isDigit() } },
+                                    onValueChange = { editDuration = it.filter { c -> c.isDigit() }.take(3) },
                                     modifier = Modifier.weight(1f),
                                     label = { Text("Duration (mins)", color = Color(0xFF94A3B8)) },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -1825,16 +1987,30 @@ fun PartnerMenuManagerTabContent(
                                     )
                                 )
                             }
+                            val editPriceInt = editPrice.toIntOrNull()
+                            val editPriceError = SecurityValidator.validateServicePriceError(editPriceInt)
+                            if (editPriceError != null) {
+                                Text(
+                                    text = editPriceError,
+                                    fontSize = 11.sp,
+                                    color = RedAlert,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                             Button(
                                 onClick = {
-                                    val updated = service.copy(
-                                        name = editName.trim().ifBlank { service.name },
-                                        price = editPrice.toIntOrNull() ?: service.price,
-                                        durationMinutes = editDuration.toIntOrNull() ?: service.durationMinutes
-                                    )
-                                    onEditService(salon.id, updated)
-                                    editingServiceId = null
+                                    val validPrice = editPriceInt ?: service.price
+                                    if (SecurityValidator.isValidServicePrice(validPrice)) {
+                                        val updated = service.copy(
+                                            name = SecurityValidator.sanitizeName(editName).ifBlank { service.name },
+                                            price = validPrice,
+                                            durationMinutes = (editDuration.toIntOrNull() ?: service.durationMinutes).coerceIn(5, 300)
+                                        )
+                                        onEditService(salon.id, updated)
+                                        editingServiceId = null
+                                    }
                                 },
+                                enabled = editPriceInt != null && SecurityValidator.isValidServicePrice(editPriceInt),
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = AmberPrimary,
@@ -2072,7 +2248,11 @@ fun PartnerShopProfileTabContent(
     onSaveFullProfile: (String, String, String, String, String, String, Double, Double, Int) -> Unit = { salonId, _, _, _, addr, lm, lat, lng, _ ->
         onSaveLocation(salonId, addr, lm, lat, lng)
     },
-    onSaveShopPhoto: (String, String) -> Unit = { _, _ -> }
+    onSaveShopPhoto: (String, String) -> Unit = { _, _ -> },
+    onOpenSupportCenter: () -> Unit = {},
+    onOpenFeedbackForm: () -> Unit = {},
+    onOpenTerms: () -> Unit = {},
+    onOpenPrivacyPolicy: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -2450,17 +2630,17 @@ fun PartnerShopProfileTabContent(
                         lineHeight = 16.sp
                     )
 
-                    // Shop Name Input
+                    // Shop Name Input (Sanitized, max 60 chars)
                     OutlinedTextField(
                         value = shopName,
                         onValueChange = {
-                            shopName = it
+                            shopName = SecurityValidator.sanitizeName(it, trimEdges = false)
                             locationSaveSuccess = false
                         },
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("shop_name_input"),
-                        label = { Text("Shop Name *", color = Color(0xFF94A3B8)) },
+                        label = { Text("Shop Name * (Max 60 chars)", color = Color(0xFF94A3B8)) },
                         placeholder = { Text("e.g. Royal Cuts Grooming Studio", color = Color(0xFF64748B)) },
                         singleLine = true,
                         colors = OutlinedTextFieldDefaults.colors(
@@ -2474,17 +2654,17 @@ fun PartnerShopProfileTabContent(
                         shape = RoundedCornerShape(10.dp)
                     )
 
-                    // Phone Number Input
+                    // Phone Number Input (Validated against Indian 10-digit regex ^[6-9][0-9]{9}$)
                     OutlinedTextField(
                         value = shopPhone,
                         onValueChange = {
-                            shopPhone = it
+                            shopPhone = it.take(16)
                             locationSaveSuccess = false
                         },
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("shop_phone_input"),
-                        label = { Text("Phone Number *", color = Color(0xFF94A3B8)) },
+                        label = { Text("Phone Number * (10-Digit Indian Mobile)", color = Color(0xFF94A3B8)) },
                         placeholder = { Text("e.g. +91 98765 43210", color = Color(0xFF64748B)) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
@@ -2498,6 +2678,17 @@ fun PartnerShopProfileTabContent(
                         ),
                         shape = RoundedCornerShape(10.dp)
                     )
+                    val shopPhoneError = if (shopPhone.isNotBlank()) {
+                        SecurityValidator.validateIndianMobileError(shopPhone)
+                    } else null
+                    if (shopPhoneError != null) {
+                        Text(
+                            text = shopPhoneError,
+                            fontSize = 11.sp,
+                            color = RedAlert,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
 
                     // Available Chairs Selector
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2542,11 +2733,11 @@ fun PartnerShopProfileTabContent(
                         }
                     }
 
-                    // Shop Tagline Input
+                    // Shop Tagline Input (Sanitized, max 140 chars)
                     OutlinedTextField(
                         value = shopTagline,
                         onValueChange = {
-                            shopTagline = it
+                            shopTagline = SecurityValidator.sanitizeTagline(it, trimEdges = false)
                             locationSaveSuccess = false
                         },
                         modifier = Modifier
@@ -2566,17 +2757,17 @@ fun PartnerShopProfileTabContent(
                         shape = RoundedCornerShape(10.dp)
                     )
 
-                    // Address / Location Input
+                    // Address / Location Input (Sanitized, max 250 chars)
                     OutlinedTextField(
                         value = fullAddress,
                         onValueChange = {
-                            fullAddress = it
+                            fullAddress = SecurityValidator.sanitizeAddress(it, trimEdges = false)
                             locationSaveSuccess = false
                         },
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("shop_full_address_input"),
-                        label = { Text("Address / Location *", color = Color(0xFF94A3B8)) },
+                        label = { Text("Address / Location * (Max 250 chars)", color = Color(0xFF94A3B8)) },
                         placeholder = { Text("e.g. Shop #12, Boring Road, Near Pantaloons", color = Color(0xFF64748B)) },
                         singleLine = false,
                         maxLines = 3,
@@ -2591,11 +2782,11 @@ fun PartnerShopProfileTabContent(
                         shape = RoundedCornerShape(10.dp)
                     )
 
-                    // Nearby Landmark Input
+                    // Nearby Landmark Input (Sanitized, max 60 chars)
                     OutlinedTextField(
                         value = landmark,
                         onValueChange = {
-                            landmark = it
+                            landmark = SecurityValidator.sanitizeName(it, trimEdges = false)
                             locationSaveSuccess = false
                         },
                         modifier = Modifier
@@ -2806,6 +2997,20 @@ fun PartnerShopProfileTabContent(
                     }
                 }
             }
+        }
+
+        // 3. Partner Help, Support, Feedback & Legal Policies Card
+        item {
+            SupportFeedbackLegalSectionCard(
+                isHinglish = false,
+                cardBackgroundColor = DarkCardSurface,
+                primaryTextColor = Color.White,
+                secondaryTextColor = Color(0xFF94A3B8),
+                onOpenSupportCenter = onOpenSupportCenter,
+                onOpenFeedbackForm = onOpenFeedbackForm,
+                onOpenTerms = onOpenTerms,
+                onOpenPrivacyPolicy = onOpenPrivacyPolicy
+            )
         }
     }
 }

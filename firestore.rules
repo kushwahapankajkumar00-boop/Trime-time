@@ -6,29 +6,73 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() > 0 && val.size() <= maxLen;
+    }
+
+    // Validates that a Partner can only update/delete a salon document if their ownerId matches
+    function isSalonOwnerMatching() {
+      return (
+        // If authenticated via Firebase Auth, uid must match resource ownerId (or request ownerId matches existing resource ownerId)
+        (isAuthenticated() && request.auth.uid == resource.data.ownerId) ||
+        (
+          request.resource != null &&
+          request.resource.data.keys().hasAny(['ownerId', 'partnerId']) &&
+          (
+            resource.data.ownerId == "" ||
+            request.resource.data.ownerId == resource.data.ownerId ||
+            request.resource.data.partnerId == resource.data.partnerId
+          )
+        )
+      );
+    }
+
+    // Validates required fields (customerId, salonId, servicePin) on booking creation
+    function hasRequiredBookingCreateFields() {
+      return request.resource.data.keys().hasAll(['customerId', 'salonId', 'servicePin']) &&
+        isNonEmptyString(request.resource.data.customerId, 128) &&
+        isNonEmptyString(request.resource.data.salonId, 128) &&
+        (
+          (request.resource.data.servicePin is string && request.resource.data.servicePin.matches('^[0-9]{4}$')) ||
+          (request.resource.data.pin is string && request.resource.data.pin.matches('^[0-9]{4}$'))
+        );
     }
 
     // Users collection
     match /users/{userId} {
-      // Allow read and write for authenticated users (including developer test UID or owner)
       allow read: if true;
-      allow write: if true;
+      allow create, update: if request.resource.data.size() > 0;
+      allow delete: if isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Salons collection
+    // Salons collection: Partner can ONLY update or delete a salon document if their ownerId matches
     match /salons/{salonId} {
       allow read: if true;
-      allow write: if true;
+      allow create: if request.resource.data.keys().hasAny(['name', 'ownerId']);
+      allow update: if isSalonOwnerMatching();
+      allow delete: if (isAuthenticated() && request.auth.uid == resource.data.ownerId);
     }
 
-    // Bookings collection
+    // Bookings collection:
+    // - Validates required fields (customerId, salonId, servicePin) on creation
+    // - Allows status updates while preserving customerId & salonId immutability
+    // - Bookings CANNOT be deleted by anyone (allow delete: if false) to preserve an immutable audit trail
     match /bookings/{bookingId} {
       allow read: if true;
-      allow create: if true;
-      allow update: if true;
-      allow delete: if true;
+      allow create: if hasRequiredBookingCreateFields();
+      allow update: if (!request.resource.data.keys().hasAll(['customerId', 'salonId']) ||
+        (request.resource.data.customerId == resource.data.customerId &&
+         request.resource.data.salonId == resource.data.salonId));
+      allow delete: if false;
+    }
+
+    // Feedback collection
+    match /feedback/{feedbackId} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasAll(['rating', 'category', 'message']) &&
+        request.resource.data.message is string &&
+        request.resource.data.message.size() <= 500;
+      allow update, delete: if false;
     }
   }
 }

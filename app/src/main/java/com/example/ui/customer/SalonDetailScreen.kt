@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Directions
@@ -56,7 +57,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Salon
 import com.example.model.SalonService
+import com.example.ui.components.TRIMTIME_SUPPORT_PHONE
 import com.example.ui.components.launchGeoDirections
+import com.example.ui.components.launchPhoneDialer
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
@@ -385,28 +388,53 @@ fun SalonHeaderBanner(salon: Salon) {
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
+                    Icon(
+                        imageVector = Icons.Default.LocationOn,
+                        contentDescription = "Location",
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = salon.shopAddress.ifBlank { salon.location },
+                        fontSize = 12.sp,
+                        color = Color(0xFFCBD5E1),
                         modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val salonPhone = salon.phone.ifBlank { TRIMTIME_SUPPORT_PHONE }
+                            launchPhoneDialer(context, salonPhone)
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenSuccess),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("salon_detail_call_salon_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.LocationOn,
-                            contentDescription = "Location",
-                            tint = Color(0xFF94A3B8),
+                            imageVector = Icons.Default.Call,
+                            contentDescription = "Call Salon Directly",
                             modifier = Modifier.size(16.dp)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Text(
-                            text = salon.shopAddress.ifBlank { salon.location },
+                            text = "Call Salon Directly",
                             fontSize = 12.sp,
-                            color = Color(0xFFCBD5E1)
+                            fontWeight = FontWeight.Bold
                         )
                     }
-
-                    Spacer(modifier = Modifier.width(8.dp))
 
                     OutlinedButton(
                         onClick = {
@@ -422,7 +450,9 @@ fun SalonHeaderBanner(salon: Salon) {
                         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier.testTag("salon_detail_get_directions_button")
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("salon_detail_get_directions_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Directions,

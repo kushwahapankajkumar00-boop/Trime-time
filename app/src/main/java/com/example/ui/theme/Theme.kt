@@ -45,7 +45,12 @@ private val LightColorScheme = lightColorScheme(
 
 @Composable
 fun TrimTimeTheme(
-    darkTheme: Boolean = true, // Default to sleek dark barber styling
+    themeMode: com.example.model.AppThemeMode = com.example.model.AppThemeMode.DARK,
+    darkTheme: Boolean = when (themeMode) {
+        com.example.model.AppThemeMode.DARK -> true
+        com.example.model.AppThemeMode.LIGHT -> false
+        com.example.model.AppThemeMode.SYSTEM -> isSystemInDarkTheme()
+    },
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme

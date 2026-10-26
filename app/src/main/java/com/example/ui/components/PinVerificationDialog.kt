@@ -57,6 +57,7 @@ import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
+import com.example.util.SecurityValidator
 
 @Composable
 fun PinVerificationDialog(
@@ -65,9 +66,13 @@ fun PinVerificationDialog(
     onPinChanged: (String) -> Unit,
     errorMessage: String?,
     isSuccess: Boolean,
+    lockoutRemainingSeconds: Int = 0,
     onVerifyClick: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val isLockedOut = lockoutRemainingSeconds > 0
+    val displayPhone = SecurityValidator.maskCustomerPhoneForStatus(booking.customerPhone, booking.status)
+
     Dialog(onDismissRequest = { if (!isSuccess) onDismiss() }) {
         Card(
             modifier = Modifier
@@ -131,13 +136,13 @@ fun PinVerificationDialog(
                         modifier = Modifier
                             .size(56.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF312E81)),
+                            .background(if (isLockedOut) Color(0xFF450A0A) else Color(0xFF312E81)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.LockOpen,
                             contentDescription = "Verify PIN",
-                            tint = Color(0xFFA5B4FC),
+                            tint = if (isLockedOut) RedAlert else Color(0xFFA5B4FC),
                             modifier = Modifier.size(30.dp)
                         )
                     }
@@ -145,13 +150,13 @@ fun PinVerificationDialog(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
-                        text = "Enter Customer Service PIN",
+                        text = if (isLockedOut) "PIN Verification Locked (${lockoutRemainingSeconds}s)" else "Enter Customer Service PIN",
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
-                        color = Color.White
+                        color = if (isLockedOut) RedAlert else Color.White
                     )
 
                     Text(
-                        text = "Anti-Fake Cancellation Protection",
+                        text = "Anti-Fake PIN & Brute-Force Protection",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF818CF8),
                         fontWeight = FontWeight.SemiBold
@@ -180,7 +185,7 @@ fun PinVerificationDialog(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "${booking.customerName} (${booking.customerPhone})",
+                                    text = "${booking.customerName} ($displayPhone)",
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = Color.White
@@ -226,6 +231,7 @@ fun PinVerificationDialog(
                     OutlinedTextField(
                         value = enteredPin,
                         onValueChange = onPinChanged,
+                        enabled = !isLockedOut,
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("pin_input_field"),
@@ -233,11 +239,11 @@ fun PinVerificationDialog(
                             keyboardType = KeyboardType.NumberPassword,
                             imeAction = ImeAction.Done
                         ),
-                        keyboardActions = KeyboardActions(onDone = { onVerifyClick() }),
+                        keyboardActions = KeyboardActions(onDone = { if (!isLockedOut) onVerifyClick() }),
                         singleLine = true,
                         placeholder = {
                             Text(
-                                text = "e.g. 4821",
+                                text = if (isLockedOut) "LOCKED (${lockoutRemainingSeconds}s)" else "••••",
                                 color = Color(0xFF64748B),
                                 textAlign = TextAlign.Center,
                                 modifier = Modifier.fillMaxWidth()
@@ -259,7 +265,7 @@ fun PinVerificationDialog(
                         shape = RoundedCornerShape(12.dp)
                     )
 
-                    // Error Message
+                    // Error / Brute-Force Lockout Message
                     AnimatedVisibility(
                         visible = errorMessage != null,
                         enter = fadeIn(),
@@ -296,7 +302,7 @@ fun PinVerificationDialog(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Tip hint
+                    // Masked Security Note (NEVER displays plain-text servicePin on Partner UI)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -313,7 +319,7 @@ fun PinVerificationDialog(
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = "Testing Hint: Customer's PIN for this booking is [ ${booking.pin} ]. Try entering a wrong PIN first to test anti-fake rejection!",
+                            text = "Security Policy: Customer's 4-digit PIN [ •••• ] is encrypted & hidden on Partner screens. Ask the customer in person; 5 wrong attempts trigger a 60s lockout.",
                             fontSize = 10.sp,
                             color = Color(0xFF94A3B8),
                             lineHeight = 14.sp
@@ -325,7 +331,7 @@ fun PinVerificationDialog(
                     // Action buttons
                     Button(
                         onClick = onVerifyClick,
-                        enabled = enteredPin.length == 4,
+                        enabled = enteredPin.length == 4 && !isLockedOut,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(48.dp)
@@ -337,7 +343,7 @@ fun PinVerificationDialog(
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Text(
-                            text = "Verify PIN & Complete",
+                            text = if (isLockedOut) "Locked • Wait ${lockoutRemainingSeconds}s" else "Verify PIN & Complete",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp

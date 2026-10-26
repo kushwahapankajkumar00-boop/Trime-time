@@ -5,6 +5,36 @@ enum class UserRole(val roleKey: String, val title: String) {
     PARTNER("partner", "Partner")
 }
 
+enum class AppThemeMode(val key: String, val label: String) {
+    DARK("dark", "Dark Mode"),
+    LIGHT("light", "Light Mode"),
+    SYSTEM("system", "System Default");
+
+    companion object {
+        fun fromKey(key: String?): AppThemeMode =
+            entries.find { it.key.equals(key, ignoreCase = true) } ?: DARK
+    }
+}
+
+enum class AppLanguage(val key: String, val label: String) {
+    ENGLISH("en", "English"),
+    HINDI_HINGLISH("hi", "Hindi / Hinglish");
+
+    companion object {
+        fun fromKey(key: String?): AppLanguage =
+            entries.find { it.key.equals(key, ignoreCase = true) } ?: ENGLISH
+    }
+}
+
+data class AppPreferences(
+    val themeMode: AppThemeMode = AppThemeMode.DARK,
+    val language: AppLanguage = AppLanguage.ENGLISH,
+    val bookingStatusAlerts: Boolean = true,
+    val queueTurnReminders: Boolean = true,
+    val salonOffersDiscounts: Boolean = false,
+    val defaultCity: String = "Patna, Bihar"
+)
+
 sealed class AppAuthState {
     data object Loading : AppAuthState()
     data object Unauthenticated : AppAuthState()
@@ -18,10 +48,16 @@ data class UserProfile(
     val phone: String = "",
     val role: String = "customer", // "customer" or "partner"
     val salonId: String? = null,
+    val hasRegisteredSalon: Boolean = false,
+    val defaultCity: String = "Patna, Bihar",
     val cancellationCount: Int = 0,
+    val cancellationStrikes: Int = cancellationCount,
     val isSuspended: Boolean = false,
     val createdAt: Long = System.currentTimeMillis()
 ) {
+    val effectiveCancellationStrikes: Int
+        get() = maxOf(cancellationCount, cancellationStrikes)
+
     fun toMap(): Map<String, Any?> = mapOf(
         "id" to id,
         "name" to name,
@@ -29,8 +65,11 @@ data class UserProfile(
         "phone" to phone,
         "role" to role,
         "salonId" to salonId,
-        "cancellationCount" to cancellationCount,
-        "isSuspended" to isSuspended,
+        "hasRegisteredSalon" to hasRegisteredSalon,
+        "defaultCity" to defaultCity,
+        "cancellationCount" to effectiveCancellationStrikes,
+        "cancellationStrikes" to effectiveCancellationStrikes,
+        "isSuspended" to (isSuspended || effectiveCancellationStrikes >= 3),
         "createdAt" to createdAt
     )
 }
@@ -64,6 +103,7 @@ data class Salon(
     val reviewCount: Int = 0,
     val partnerId: String = "",
     val ownerId: String = "",
+    val ownerName: String = "",
     val phone: String = "",
     val imageUrl: String = "",
     val photoBase64: String = "",
@@ -76,6 +116,10 @@ data class Salon(
     val nextSlotMinutes: Int = 15,
     val shopAddress: String = "",
     val landmark: String = "",
+    val pincode: String = "",
+    val shopCategory: String = "Men's Salon",
+    val openingTime: String = "9:00 AM",
+    val closingTime: String = "9:00 PM",
     val latitude: Double? = null,
     val longitude: Double? = null
 ) {
@@ -101,6 +145,7 @@ data class Salon(
         "reviewCount" to reviewCount,
         "partnerId" to partnerId.ifBlank { ownerId },
         "ownerId" to ownerId.ifBlank { partnerId },
+        "ownerName" to ownerName,
         "phone" to phone,
         "imageUrl" to imageUrl.ifBlank { photoBase64 },
         "photoBase64" to photoBase64.ifBlank { imageUrl },
@@ -113,6 +158,10 @@ data class Salon(
         "nextSlotMinutes" to nextSlotMinutes,
         "shopAddress" to shopAddress,
         "landmark" to landmark,
+        "pincode" to pincode,
+        "shopCategory" to shopCategory,
+        "openingTime" to openingTime,
+        "closingTime" to closingTime,
         "latitude" to latitude,
         "longitude" to longitude,
         "coordinates" to if (latitude != null && longitude != null) mapOf(
@@ -168,3 +217,26 @@ data class Booking(
         "completedAt" to completedAt
     )
 }
+
+data class FeedbackSubmission(
+    val id: String = "",
+    val userId: String = "",
+    val userName: String = "",
+    val userRole: String = "customer",
+    val rating: Int = 5,
+    val category: String = "Bug Report",
+    val message: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+) {
+    fun toMap(): Map<String, Any> = mapOf(
+        "id" to id,
+        "userId" to userId,
+        "userName" to userName,
+        "userRole" to userRole,
+        "rating" to rating,
+        "category" to category,
+        "message" to message,
+        "timestamp" to timestamp
+    )
+}
+

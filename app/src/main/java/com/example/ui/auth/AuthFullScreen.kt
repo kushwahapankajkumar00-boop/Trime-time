@@ -80,6 +80,7 @@ import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
+import com.example.util.SecurityValidator
 
 /**
  * Physical-Device Compatible Authentication Screen with separated "Login" and "Sign Up" tabs:
@@ -386,7 +387,7 @@ fun AuthFullScreen(
                         OutlinedTextField(
                             value = loginIdentifier,
                             onValueChange = {
-                                loginIdentifier = it
+                                loginIdentifier = SecurityValidator.sanitizeInput(it, maxLength = 80, trimEdges = false)
                                 infoBannerMessage = null
                             },
                             modifier = Modifier
@@ -555,14 +556,14 @@ fun AuthFullScreen(
                             }
                         }
 
-                        // Full Name Input
+                        // Full Name Input (Sanitized, max 60 chars)
                         OutlinedTextField(
                             value = fullName,
-                            onValueChange = { fullName = it },
+                            onValueChange = { fullName = SecurityValidator.sanitizeName(it, trimEdges = false) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("auth_name_input"),
-                            label = { Text("Full Name", fontSize = 12.sp) },
+                            label = { Text("Full Name (Max 60 chars)", fontSize = 12.sp) },
                             placeholder = { Text("e.g. Pankaj Kumar", fontSize = 13.sp, color = Color(0xFF64748B)) },
                             leadingIcon = {
                                 Icon(
@@ -588,10 +589,10 @@ fun AuthFullScreen(
                             )
                         )
 
-                        // Email Address Input
+                        // Email Address Input (Sanitized)
                         OutlinedTextField(
                             value = emailAddress,
-                            onValueChange = { emailAddress = it },
+                            onValueChange = { emailAddress = SecurityValidator.sanitizeInput(it, maxLength = 80, trimEdges = false) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("auth_email_input"),
@@ -621,16 +622,16 @@ fun AuthFullScreen(
                             )
                         )
 
-                        // 10-Digit Phone Input
+                        // 10-Digit Phone Input (Strict Indian mobile regex ^[6-9][0-9]{9}$)
                         OutlinedTextField(
                             value = phoneDigits,
                             onValueChange = { input ->
-                                phoneDigits = input.filter { it.isDigit() }.take(10)
+                                phoneDigits = SecurityValidator.extractTenDigitMobile(input).take(10)
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("auth_phone_input"),
-                            label = { Text("10-Digit Mobile Number", fontSize = 12.sp) },
+                            label = { Text("10-Digit Mobile Number (Starts 6–9)", fontSize = 12.sp) },
                             placeholder = { Text("9876543210", fontSize = 13.sp, color = Color(0xFF64748B)) },
                             leadingIcon = {
                                 Icon(
@@ -655,6 +656,18 @@ fun AuthFullScreen(
                                 unfocusedLabelColor = Color(0xFF94A3B8)
                             )
                         )
+
+                        val phoneWarning = if (phoneDigits.length == 10) {
+                            SecurityValidator.validateIndianMobileError(phoneDigits)
+                        } else null
+                        if (phoneWarning != null) {
+                            Text(
+                                text = phoneWarning,
+                                fontSize = 11.sp,
+                                color = RedAlert,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
 
                         Button(
                             onClick = {
@@ -846,7 +859,7 @@ fun Sha1RealAccountLoginDialog(
                     OutlinedTextField(
                         value = dialogIdentifier,
                         onValueChange = {
-                            dialogIdentifier = it
+                            dialogIdentifier = SecurityValidator.sanitizeInput(it, maxLength = 80, trimEdges = false)
                             localError = null
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -899,11 +912,11 @@ fun Sha1RealAccountLoginDialog(
                     OutlinedTextField(
                         value = name,
                         onValueChange = {
-                            name = it
+                            name = SecurityValidator.sanitizeName(it, trimEdges = false)
                             localError = null
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Your Full Name", fontSize = 12.sp) },
+                        label = { Text("Your Full Name (Max 60 chars)", fontSize = 12.sp) },
                         placeholder = { Text("e.g. Pankaj Kumar", fontSize = 13.sp) },
                         singleLine = true,
                         shape = RoundedCornerShape(10.dp),
@@ -918,7 +931,7 @@ fun Sha1RealAccountLoginDialog(
                     OutlinedTextField(
                         value = email,
                         onValueChange = {
-                            email = it
+                            email = SecurityValidator.sanitizeInput(it, maxLength = 80, trimEdges = false)
                             localError = null
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -938,7 +951,7 @@ fun Sha1RealAccountLoginDialog(
                     OutlinedTextField(
                         value = phone,
                         onValueChange = { input ->
-                            phone = input.filter { it.isDigit() }.take(10)
+                            phone = SecurityValidator.extractTenDigitMobile(input).take(10)
                             localError = null
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -995,12 +1008,16 @@ fun Sha1RealAccountLoginDialog(
 
                     Button(
                         onClick = {
-                            if (name.trim().length < 2) {
-                                localError = "Please enter your full name."
+                            val cleanName = SecurityValidator.sanitizeName(name)
+                            val phoneError = SecurityValidator.validateIndianMobileError(phone)
+                            if (cleanName.length < 2) {
+                                localError = "Please enter your full name (2–60 characters)."
                             } else if (!email.contains("@") || !email.contains(".")) {
                                 localError = "Please enter a valid email address."
+                            } else if (phoneError != null) {
+                                localError = phoneError
                             } else {
-                                onConfirmSignIn(name.trim(), email.trim(), phone.trim(), asPartner)
+                                onConfirmSignIn(cleanName, email.trim(), phone.trim(), asPartner)
                             }
                         },
                         enabled = !isLoading,

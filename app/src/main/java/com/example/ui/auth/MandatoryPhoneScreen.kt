@@ -60,6 +60,7 @@ import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
+import com.example.util.SecurityValidator
 
 /**
  * Rule 1: Mandatory Phone Collection Screen (No OTP)
@@ -80,15 +81,12 @@ fun MandatoryPhoneScreen(
     var rawPhone by remember { mutableStateOf("") }
     var isSavingLocally by remember { mutableStateOf(false) }
 
-    // Strip out all non-digits. If user pastes or types "+91" prefix, strip country code '91' if length > 10
-    val allDigits = rawPhone.filter { it.isDigit() }
-    val cleanDigits = if (allDigits.length > 10 && allDigits.startsWith("91")) {
-        allDigits.drop(2).take(10)
-    } else {
-        allDigits.take(10)
-    }
-
-    val isValid = cleanDigits.length == 10
+    val cleanDigits = SecurityValidator.extractTenDigitMobile(rawPhone).take(10)
+    val isValid = SecurityValidator.isValidIndianMobile(cleanDigits)
+    val localValidationWarning = if (cleanDigits.length == 10 && !isValid) {
+        SecurityValidator.validateIndianMobileError(cleanDigits)
+    } else null
+    val activeErrorMessage = errorMessage ?: localValidationWarning
     val showLoading = isLoading || isSavingLocally
 
     Box(
@@ -285,11 +283,11 @@ fun MandatoryPhoneScreen(
 
                 // Error message banner
                 AnimatedVisibility(
-                    visible = !errorMessage.isNullOrBlank(),
+                    visible = !activeErrorMessage.isNullOrBlank(),
                     enter = fadeIn(),
                     exit = fadeOut()
                 ) {
-                    errorMessage?.let { err ->
+                    activeErrorMessage?.let { err ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()

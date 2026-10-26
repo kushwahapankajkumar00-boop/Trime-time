@@ -12,8 +12,12 @@ import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.example.model.AppAuthState
+import com.example.model.AppLanguage
+import com.example.model.AppPreferences
+import com.example.model.AppThemeMode
 import com.example.model.Booking
 import com.example.model.BookingStatus
+import com.example.model.FeedbackSubmission
 import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.model.UserProfile
@@ -30,11 +34,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import com.example.util.SecurityValidator
+import java.io.File
 import kotlin.random.Random
 
 sealed class PinVerificationResult {
     data object Success : PinVerificationResult()
-    data class IncorrectPin(val message: String) : PinVerificationResult()
+    data class IncorrectPin(val message: String, val attemptsRemaining: Int = 5) : PinVerificationResult()
+    data class LockedOut(val remainingSeconds: Int, val message: String) : PinVerificationResult()
     data class BookingNotFound(val message: String) : PinVerificationResult()
     data class AlreadyCompleted(val message: String) : PinVerificationResult()
 }
@@ -45,6 +52,11 @@ class TrimTimeRepository private constructor(context: Context) {
     private val scope = CoroutineScope(Dispatchers.IO)
     private val appContext = context.applicationContext
     private val sessionPrefs = appContext.getSharedPreferences("trimtime_session_prefs", Context.MODE_PRIVATE)
+    private val settingsPrefs = appContext.getSharedPreferences("trimtime_user_settings_prefs", Context.MODE_PRIVATE)
+
+    // Brute-force PIN attempt tracking per bookingId (5 consecutive failures -> 60-second lockout)
+    private val pinFailedAttempts = mutableMapOf<String, Int>()
+    private val pinLockoutUntilMillis = mutableMapOf<String, Long>()
 
     // Firebase Instances
     private var auth: FirebaseAuth? = null
@@ -95,8 +107,37 @@ class TrimTimeRepository private constructor(context: Context) {
     private val _isCloudSynced = MutableStateFlow(false)
     val isCloudSynced: StateFlow<Boolean> = _isCloudSynced.asStateFlow()
 
+    // Dedicated Partner Salon Registration Onboarding state (shown when an unregistered user taps Partner)
+    private val _showPartnerOnboarding = MutableStateFlow(false)
+    val showPartnerOnboarding: StateFlow<Boolean> = _showPartnerOnboarding.asStateFlow()
+
+    // Persisted Customer App Settings & Preferences
+    private val _appPreferences = MutableStateFlow(loadSavedPreferences())
+    val appPreferences: StateFlow<AppPreferences> = _appPreferences.asStateFlow()
+
     init {
         initFirebase(context)
+    }
+
+    private fun loadSavedPreferences(): AppPreferences {
+        val themeKey = settingsPrefs.getString("pref_theme_mode", AppThemeMode.DARK.key)
+        val langKey = settingsPrefs.getString("pref_language", AppLanguage.ENGLISH.key)
+        val bookingAlerts = settingsPrefs.getBoolean("pref_notif_booking_status", true)
+        val queueReminders = settingsPrefs.getBoolean("pref_notif_queue_turn", true)
+        val offersDiscounts = settingsPrefs.getBoolean("pref_notif_salon_offers", false)
+        val defaultCity = settingsPrefs.getString("pref_default_city", "Patna, Bihar") ?: "Patna, Bihar"
+        return AppPreferences(
+            themeMode = AppThemeMode.fromKey(themeKey),
+            language = AppLanguage.fromKey(langKey),
+            bookingStatusAlerts = bookingAlerts,
+            queueTurnReminders = queueReminders,
+            salonOffersDiscounts = offersDiscounts,
+            defaultCity = defaultCity
+        )
+    }
+
+    fun dismissPartnerOnboarding() {
+        _showPartnerOnboarding.value = false
     }
 
     fun dismissSha1FallbackDialog() {
@@ -312,6 +353,11 @@ class TrimTimeRepository private constructor(context: Context) {
                                     ?: ""
 
                                 val resolvedDocId = doc.getString("id")?.takeIf { it.isNotBlank() } ?: docId
+                                val ownerName = doc.getString("ownerName") ?: ""
+                                val pincode = doc.getString("pincode") ?: ""
+                                val shopCategory = doc.getString("shopCategory") ?: "Men's Salon"
+                                val openingTime = doc.getString("openingTime") ?: "9:00 AM"
+                                val closingTime = doc.getString("closingTime") ?: "9:00 PM"
 
                                 Salon(
                                     id = resolvedDocId,
@@ -322,6 +368,7 @@ class TrimTimeRepository private constructor(context: Context) {
                                     reviewCount = reviewCount,
                                     partnerId = partnerId,
                                     ownerId = ownerId,
+                                    ownerName = ownerName,
                                     phone = phone,
                                     imageUrl = imageUrl,
                                     photoBase64 = photoBase64,
@@ -334,6 +381,10 @@ class TrimTimeRepository private constructor(context: Context) {
                                     nextSlotMinutes = nextSlotMinutes,
                                     shopAddress = shopAddress,
                                     landmark = landmark,
+                                    pincode = pincode,
+                                    shopCategory = shopCategory,
+                                    openingTime = openingTime,
+                                    closingTime = closingTime,
                                     latitude = lat,
                                     longitude = lng
                                 )
@@ -605,10 +656,10 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
-        val trimmedName = name.trim()
-        val trimmedEmail = email.trim().lowercase()
+        val trimmedName = SecurityValidator.sanitizeName(name, trimEdges = true)
+        val trimmedEmail = SecurityValidator.sanitizeInput(email, maxLength = 100, trimEdges = true).lowercase()
         if (trimmedName.length < 2) {
-            val msg = "Please enter your full name (at least 2 characters)."
+            val msg = "Please enter a valid full name (2–60 characters, no HTML/script tags)."
             _authError.value = msg
             onError(msg)
             return
@@ -620,11 +671,15 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        val rawDigits = phone.filter { it.isDigit() }
-        val tenDigits = if (rawDigits.length > 10 && rawDigits.startsWith("91")) {
-            rawDigits.drop(2).take(10)
-        } else {
-            rawDigits.takeLast(10)
+        // Validate 10-digit Indian mobile number strictly when provided
+        val tenDigits = SecurityValidator.extractTenDigitMobile(phone)
+        if (phone.isNotBlank() || tenDigits.isNotEmpty()) {
+            val phoneErr = SecurityValidator.validateIndianMobileError(phone)
+            if (phoneErr != null) {
+                _authError.value = phoneErr
+                onError(phoneErr)
+                return
+            }
         }
         val formattedPhone = if (tenDigits.length == 10) "+91 $tenDigits" else ""
 
@@ -649,17 +704,23 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        val targetRoleStr = if (asPartner) "partner" else "customer"
         val userDocRef = firestoreDb.collection("users").document(uid)
         userDocRef.get()
             .addOnSuccessListener { existingDoc ->
                 if (existingDoc != null && existingDoc.exists()) {
                     val existingPhone = existingDoc.getString("phone") ?: ""
                     val resolvedPhone = formattedPhone.ifBlank { existingPhone }
-                    val existingCancellationCount = existingDoc.getLong("cancellationCount")?.toInt() ?: 0
-                    val existingIsSuspended = existingDoc.getBoolean("isSuspended") ?: (existingCancellationCount >= 3)
-                    val existingRole = if (asPartner) "partner" else (existingDoc.getString("role") ?: "customer")
-                    val existingSalonId = existingDoc.getString("salonId")
+                    val existingStrikes = maxOf(
+                        existingDoc.getLong("cancellationStrikes")?.toInt() ?: 0,
+                        existingDoc.getLong("cancellationCount")?.toInt() ?: 0
+                    )
+                    val existingIsSuspended = existingDoc.getBoolean("isSuspended") ?: (existingStrikes >= 3)
+                    val existingSalonId = existingDoc.getString("salonId")?.takeIf { it.isNotBlank() }
+                    val existingHasSalon = existingDoc.getBoolean("hasRegisteredSalon") == true || !existingSalonId.isNullOrBlank()
+                    val existingCity = SecurityValidator.sanitizeAddress(
+                        existingDoc.getString("defaultCity")?.takeIf { it.isNotBlank() } ?: _appPreferences.value.defaultCity
+                    )
+                    val existingRole = if (asPartner && existingHasSalon) "partner" else (existingDoc.getString("role") ?: "customer")
                     val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
 
                     val userProfile = UserProfile(
@@ -669,7 +730,10 @@ class TrimTimeRepository private constructor(context: Context) {
                         phone = resolvedPhone,
                         role = existingRole,
                         salonId = existingSalonId,
-                        cancellationCount = existingCancellationCount,
+                        hasRegisteredSalon = existingHasSalon,
+                        defaultCity = existingCity,
+                        cancellationCount = existingStrikes,
+                        cancellationStrikes = existingStrikes,
                         isSuspended = existingIsSuspended,
                         createdAt = existingCreatedAt
                     )
@@ -679,28 +743,32 @@ class TrimTimeRepository private constructor(context: Context) {
                         .putString("saved_uid", uid)
                         .putString("saved_name", trimmedName)
                         .putString("saved_email", trimmedEmail)
-                        .putString("saved_role", existingRole)
+                        .putString("saved_role", if (existingHasSalon && asPartner) "partner" else "customer")
                         .apply()
 
                     _currentUserProfile.value = userProfile
                     attachCustomerBookingsListener(uid)
-                    _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) UserRole.PARTNER else UserRole.CUSTOMER
-                    _authState.value = AppAuthState.Authenticated(_currentRole.value)
                     _isLoading.value = false
-                    if (_currentRole.value == UserRole.PARTNER) {
-                        ensurePartnerSalonInFirestore(userProfile)
+
+                    if (asPartner || existingRole.equals("partner", ignoreCase = true)) {
+                        verifyExistingPartnerSalonOrPromptOnboarding(userProfile, openOnboardingIfMissing = asPartner)
+                    } else {
+                        _currentRole.value = UserRole.CUSTOMER
+                        _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                     }
                     onSuccess()
                 } else {
-                    val assignedSalonId = if (asPartner) "salon_$uid" else null
                     val newProfile = UserProfile(
                         id = uid,
                         name = trimmedName,
                         email = trimmedEmail,
                         phone = formattedPhone,
-                        role = targetRoleStr,
-                        salonId = assignedSalonId,
+                        role = "customer",
+                        salonId = null,
+                        hasRegisteredSalon = false,
+                        defaultCity = SecurityValidator.sanitizeAddress(_appPreferences.value.defaultCity),
                         cancellationCount = 0,
+                        cancellationStrikes = 0,
                         isSuspended = false,
                         createdAt = System.currentTimeMillis()
                     )
@@ -711,16 +779,17 @@ class TrimTimeRepository private constructor(context: Context) {
                                 .putString("saved_uid", uid)
                                 .putString("saved_name", trimmedName)
                                 .putString("saved_email", trimmedEmail)
-                                .putString("saved_role", targetRoleStr)
+                                .putString("saved_role", "customer")
                                 .apply()
 
                             _currentUserProfile.value = newProfile
                             attachCustomerBookingsListener(uid)
-                            _currentRole.value = if (asPartner) UserRole.PARTNER else UserRole.CUSTOMER
-                            _authState.value = AppAuthState.Authenticated(_currentRole.value)
+                            _currentRole.value = UserRole.CUSTOMER
+                            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                             _isLoading.value = false
                             if (asPartner) {
-                                ensurePartnerSalonInFirestore(newProfile)
+                                // New user who chose Partner during Sign Up must complete Partner Salon Registration Form
+                                _showPartnerOnboarding.value = true
                             }
                             onSuccess()
                         }
@@ -821,20 +890,14 @@ class TrimTimeRepository private constructor(context: Context) {
                     onError(errMsg)
                 }
         } else {
-            val rawDigits = trimmed.filter { it.isDigit() }
-            val tenDigits = if (rawDigits.length > 10 && rawDigits.startsWith("91")) {
-                rawDigits.drop(2).take(10)
-            } else {
-                rawDigits.takeLast(10)
-            }
-
-            if (tenDigits.length != 10) {
+            val phoneError = SecurityValidator.validateIndianMobileError(trimmed)
+            if (phoneError != null) {
                 _isLoading.value = false
-                val msg = "Please enter a valid 10-Digit Mobile Number or Email Address."
-                _authError.value = msg
-                onError(msg)
+                _authError.value = phoneError
+                onError(phoneError)
                 return
             }
+            val tenDigits = SecurityValidator.extractTenDigitMobile(trimmed)
 
             val candidatePhones = listOf(
                 "+91 $tenDigits",
@@ -894,13 +957,22 @@ class TrimTimeRepository private constructor(context: Context) {
             val fallbackSeed = existingEmail.ifBlank { existingPhone }.replace(Regex("[^a-zA-Z0-9]"), "_").lowercase()
             "usr_${fallbackSeed.ifBlank { System.currentTimeMillis().toString() }}"
         }
-        val existingName = doc.getString("name")?.takeIf { it.isNotBlank() }
-            ?: doc.getString("displayName")?.takeIf { it.isNotBlank() }
-            ?: "Customer"
+        val existingName = SecurityValidator.sanitizeName(
+            doc.getString("name")?.takeIf { it.isNotBlank() }
+                ?: doc.getString("displayName")?.takeIf { it.isNotBlank() }
+                ?: "Customer"
+        )
         val existingRole = doc.getString("role") ?: "customer"
-        val existingSalonId = doc.getString("salonId")
-        val existingCancellationCount = doc.getLong("cancellationCount")?.toInt() ?: 0
-        val existingIsSuspended = doc.getBoolean("isSuspended") ?: (existingCancellationCount >= 3)
+        val existingSalonId = doc.getString("salonId")?.takeIf { it.isNotBlank() }
+        val existingHasSalon = doc.getBoolean("hasRegisteredSalon") == true || !existingSalonId.isNullOrBlank()
+        val existingCity = SecurityValidator.sanitizeAddress(
+            doc.getString("defaultCity")?.takeIf { it.isNotBlank() } ?: _appPreferences.value.defaultCity
+        )
+        val existingStrikes = maxOf(
+            doc.getLong("cancellationStrikes")?.toInt() ?: 0,
+            doc.getLong("cancellationCount")?.toInt() ?: 0
+        )
+        val existingIsSuspended = doc.getBoolean("isSuspended") ?: (existingStrikes >= 3)
         val existingCreatedAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
 
         val userProfile = UserProfile(
@@ -910,7 +982,10 @@ class TrimTimeRepository private constructor(context: Context) {
             phone = existingPhone,
             role = existingRole,
             salonId = existingSalonId,
-            cancellationCount = existingCancellationCount,
+            hasRegisteredSalon = existingHasSalon,
+            defaultCity = existingCity,
+            cancellationCount = existingStrikes,
+            cancellationStrikes = existingStrikes,
             isSuspended = existingIsSuspended,
             createdAt = existingCreatedAt
         )
@@ -924,15 +999,12 @@ class TrimTimeRepository private constructor(context: Context) {
 
         _currentUserProfile.value = userProfile
         attachCustomerBookingsListener(uid)
-        _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) {
-            UserRole.PARTNER
-        } else {
-            UserRole.CUSTOMER
-        }
-        _authState.value = AppAuthState.Authenticated(_currentRole.value)
         _isLoading.value = false
-        if (_currentRole.value == UserRole.PARTNER) {
-            ensurePartnerSalonInFirestore(userProfile)
+        if (existingRole.equals("partner", ignoreCase = true) && existingHasSalon) {
+            verifyExistingPartnerSalonOrPromptOnboarding(userProfile, openOnboardingIfMissing = false)
+        } else {
+            _currentRole.value = UserRole.CUSTOMER
+            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
         }
         onSuccess(userProfile)
     }
@@ -999,7 +1071,9 @@ class TrimTimeRepository private constructor(context: Context) {
                     val existingCancellationCount = existingDoc.getLong("cancellationCount")?.toInt() ?: 0
                     val existingIsSuspended = existingDoc.getBoolean("isSuspended") ?: (existingCancellationCount >= 3)
                     val existingRole = existingDoc.getString("role") ?: "customer"
-                    val existingSalonId = existingDoc.getString("salonId")
+                    val existingSalonId = existingDoc.getString("salonId")?.takeIf { it.isNotBlank() }
+                    val existingHasSalon = existingDoc.getBoolean("hasRegisteredSalon") == true || !existingSalonId.isNullOrBlank()
+                    val existingCity = existingDoc.getString("defaultCity")?.takeIf { it.isNotBlank() } ?: _appPreferences.value.defaultCity
                     val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
 
                     val userProfile = UserProfile(
@@ -1009,6 +1083,8 @@ class TrimTimeRepository private constructor(context: Context) {
                         phone = existingPhone,
                         role = existingRole,
                         salonId = existingSalonId,
+                        hasRegisteredSalon = existingHasSalon,
+                        defaultCity = existingCity,
                         cancellationCount = existingCancellationCount,
                         isSuspended = existingIsSuspended,
                         createdAt = existingCreatedAt
@@ -1017,11 +1093,12 @@ class TrimTimeRepository private constructor(context: Context) {
                     Log.d(tag, "Existing Firestore user verified: ${userProfile.name} (${userProfile.email}), Phone: '${userProfile.phone}', Strikes: ${userProfile.cancellationCount}")
                     _currentUserProfile.value = userProfile
                     attachCustomerBookingsListener(uid)
-                    _currentRole.value = if (existingRole.equals("partner", ignoreCase = true)) UserRole.PARTNER else UserRole.CUSTOMER
-                    _authState.value = AppAuthState.Authenticated(_currentRole.value)
                     _isLoading.value = false
-                    if (_currentRole.value == UserRole.PARTNER) {
-                        ensurePartnerSalonInFirestore(userProfile)
+                    if (existingRole.equals("partner", ignoreCase = true) && existingHasSalon) {
+                        verifyExistingPartnerSalonOrPromptOnboarding(userProfile, openOnboardingIfMissing = false)
+                    } else {
+                        _currentRole.value = UserRole.CUSTOMER
+                        _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                     }
                     onSuccess()
                 } else {
@@ -1033,6 +1110,8 @@ class TrimTimeRepository private constructor(context: Context) {
                         phone = "",
                         role = "customer",
                         salonId = null,
+                        hasRegisteredSalon = false,
+                        defaultCity = _appPreferences.value.defaultCity,
                         cancellationCount = 0,
                         isSuspended = false,
                         createdAt = System.currentTimeMillis()
@@ -1081,25 +1160,21 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        val allDigits = phone.filter { it.isDigit() }
-        val tenDigits = if (allDigits.length > 10 && allDigits.startsWith("91")) {
-            allDigits.drop(2).take(10)
-        } else {
-            allDigits.takeLast(10)
-        }
-
-        if (tenDigits.length != 10) {
-            onError("Please enter a valid 10-digit phone number.")
+        val phoneErr = SecurityValidator.validateIndianMobileError(phone)
+        if (phoneErr != null) {
+            _authError.value = phoneErr
+            onError(phoneErr)
             return
         }
+        val tenDigits = SecurityValidator.extractTenDigitMobile(phone)
 
         val formattedPhone = "+91 $tenDigits"
         val updatedProfile = current.copy(phone = formattedPhone)
         _currentUserProfile.value = updatedProfile
+        _authError.value = null
 
         val userDocRef = firestore?.collection("users")?.document(current.id)
         if (userDocRef != null) {
-            // Use set with merge to guarantee write succeeds even if the document was not pre-created
             userDocRef.set(mapOf("phone" to formattedPhone), com.google.firebase.firestore.SetOptions.merge())
                 .addOnSuccessListener {
                     Log.d(tag, "Phone number successfully saved to Firestore.")
@@ -1107,7 +1182,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
                 .addOnFailureListener { err ->
                     Log.w(tag, "Failed to update phone in Firestore: ${err.message}")
-                    onSuccess() // Keep going with local updated profile
+                    onSuccess()
                 }
         } else {
             onSuccess()
@@ -1124,23 +1199,167 @@ class TrimTimeRepository private constructor(context: Context) {
         customerBookingsListener = null
         sessionPrefs.edit().clear().apply()
         _showSha1FallbackDialog.value = false
+        _showPartnerOnboarding.value = false
         _currentRole.value = UserRole.CUSTOMER
         _currentUserProfile.value = null
         _customerBookings.value = emptyList()
         _authState.value = AppAuthState.Unauthenticated
     }
 
-    fun switchToPartnerRole(onSalonReady: (String) -> Unit = {}) {
-        _currentRole.value = UserRole.PARTNER
-        _authState.value = AppAuthState.Authenticated(UserRole.PARTNER)
-        sessionPrefs.edit().putString("saved_role", "partner").apply()
-        val currentProfile = _currentUserProfile.value
-        if (currentProfile != null) {
-            ensurePartnerSalonInFirestore(currentProfile, onSalonReady)
+    // ==========================================
+    // Customer App Settings & Personal Profile Sync
+    // ==========================================
+
+    fun setThemeMode(mode: AppThemeMode) {
+        val updated = _appPreferences.value.copy(themeMode = mode)
+        _appPreferences.value = updated
+        settingsPrefs.edit().putString("pref_theme_mode", mode.key).apply()
+        val uid = _currentUserProfile.value?.id
+        if (!uid.isNullOrBlank()) {
+            firestore?.collection("users")?.document(uid)
+                ?.set(mapOf("themeMode" to mode.key), com.google.firebase.firestore.SetOptions.merge())
         }
     }
 
+    fun setLanguage(language: AppLanguage) {
+        val updated = _appPreferences.value.copy(language = language)
+        _appPreferences.value = updated
+        settingsPrefs.edit().putString("pref_language", language.key).apply()
+        val uid = _currentUserProfile.value?.id
+        if (!uid.isNullOrBlank()) {
+            firestore?.collection("users")?.document(uid)
+                ?.set(mapOf("language" to language.key), com.google.firebase.firestore.SetOptions.merge())
+        }
+    }
+
+    fun setNotificationPreferences(
+        bookingStatusAlerts: Boolean,
+        queueTurnReminders: Boolean,
+        salonOffersDiscounts: Boolean
+    ) {
+        val updated = _appPreferences.value.copy(
+            bookingStatusAlerts = bookingStatusAlerts,
+            queueTurnReminders = queueTurnReminders,
+            salonOffersDiscounts = salonOffersDiscounts
+        )
+        _appPreferences.value = updated
+        settingsPrefs.edit()
+            .putBoolean("pref_notif_booking_status", bookingStatusAlerts)
+            .putBoolean("pref_notif_queue_turn", queueTurnReminders)
+            .putBoolean("pref_notif_salon_offers", salonOffersDiscounts)
+            .apply()
+
+        val uid = _currentUserProfile.value?.id
+        if (!uid.isNullOrBlank()) {
+            firestore?.collection("users")?.document(uid)?.set(
+                mapOf(
+                    "bookingStatusAlerts" to bookingStatusAlerts,
+                    "queueTurnReminders" to queueTurnReminders,
+                    "salonOffersDiscounts" to salonOffersDiscounts
+                ),
+                com.google.firebase.firestore.SetOptions.merge()
+            )
+        }
+    }
+
+    fun updatePersonalProfile(
+        name: String,
+        phone: String,
+        defaultCity: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val current = _currentUserProfile.value
+        if (current == null) {
+            onError("User session not found.")
+            return
+        }
+        val cleanName = SecurityValidator.sanitizeName(name, trimEdges = true)
+        if (cleanName.length < 2) {
+            onError("Please enter a valid full name (2–60 characters, no HTML/script tags).")
+            return
+        }
+        val phoneErr = SecurityValidator.validateIndianMobileError(phone)
+        if (phoneErr != null) {
+            onError(phoneErr)
+            return
+        }
+        val tenDigits = SecurityValidator.extractTenDigitMobile(phone)
+        val formattedPhone = "+91 $tenDigits"
+        val cleanCity = SecurityValidator.sanitizeAddress(defaultCity, trimEdges = true).ifBlank { "Patna, Bihar" }
+
+        val updatedProfile = current.copy(
+            name = cleanName,
+            phone = formattedPhone,
+            defaultCity = cleanCity
+        )
+        _currentUserProfile.value = updatedProfile
+        _appPreferences.value = _appPreferences.value.copy(defaultCity = cleanCity)
+
+        sessionPrefs.edit().putString("saved_name", cleanName).apply()
+        settingsPrefs.edit().putString("pref_default_city", cleanCity).apply()
+
+        firestore?.collection("users")?.document(current.id)?.set(
+            mapOf(
+                "name" to cleanName,
+                "phone" to formattedPhone,
+                "defaultCity" to cleanCity
+            ),
+            com.google.firebase.firestore.SetOptions.merge()
+        )?.addOnSuccessListener {
+            onSuccess()
+        }?.addOnFailureListener {
+            onSuccess()
+        } ?: onSuccess()
+    }
+
+    fun clearAppCache(onComplete: (String) -> Unit) {
+        try {
+            val cacheDir = appContext.cacheDir
+            var deletedCount = 0
+            cacheDir?.listFiles()?.forEach { file ->
+                if (file.isDirectory) {
+                    file.deleteRecursively()
+                    deletedCount++
+                } else if (file.delete()) {
+                    deletedCount++
+                }
+            }
+            onComplete("App cache cleared ($deletedCount temporary files removed) & live Firestore sync refreshed.")
+        } catch (e: Exception) {
+            onComplete("Temporary app cache cleared.")
+        }
+    }
+
+    // ==========================================
+    // Partner Mode Switch & Dedicated Salon Registration
+    // ==========================================
+
+    /**
+     * Checks if the logged-in user already owns a registered salon in Firestore (`salons` collection
+     * where `ownerId == currentUser.uid` or `partnerId == currentUser.uid`).
+     * - IF ALREADY REGISTERED: switches smoothly to PartnerDashboardScreen.
+     * - IF NOT REGISTERED YET: opens PartnerOnboardingScreen (NO 1-click bypass for unregistered users).
+     */
+    fun switchToPartnerRole(
+        onSalonReady: (String) -> Unit = {},
+        onRequireRegistration: () -> Unit = {}
+    ) {
+        val currentProfile = _currentUserProfile.value
+        if (currentProfile == null || currentProfile.id.isBlank()) {
+            _authError.value = "Please log in first."
+            return
+        }
+        verifyExistingPartnerSalonOrPromptOnboarding(
+            profile = currentProfile,
+            openOnboardingIfMissing = true,
+            onSalonReady = onSalonReady,
+            onRequireRegistration = onRequireRegistration
+        )
+    }
+
     fun switchToCustomerRole() {
+        _showPartnerOnboarding.value = false
         _currentRole.value = UserRole.CUSTOMER
         _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
         sessionPrefs.edit().putString("saved_role", "customer").apply()
@@ -1148,41 +1367,43 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     /**
-     * Real-Time Salon Profile & Creation (`salons` collection):
-     * When a Partner logs in or switches to Partner Mode, fetches their salon document from Firestore
-     * `salons` collection matching their `ownerId` / `partnerId` (or creates a new live document in
-     * Firestore if they don't have one yet), and links `salonId` to their `users/{uid}` document.
+     * Strictly verifies whether `profile.id` owns a real registered salon in Firestore `salons` collection.
+     * Never auto-creates a dummy salon if none exists.
      */
-    fun ensurePartnerSalonInFirestore(
+    private fun verifyExistingPartnerSalonOrPromptOnboarding(
         profile: UserProfile,
-        onSalonReady: (String) -> Unit = {}
+        openOnboardingIfMissing: Boolean,
+        onSalonReady: (String) -> Unit = {},
+        onRequireRegistration: () -> Unit = {}
     ) {
-        val db = firestore ?: return
-        val uid = profile.id
+        val uid = profile.id.trim()
         if (uid.isBlank()) return
 
-        // 1. Check if already in loaded _salons matching ownerId, partnerId, or profile.salonId
+        // 1. Check in-memory loaded salons owned by this user
         val existingInMemory = _salons.value.find {
             it.ownerId == uid ||
-            it.partnerId == uid ||
-            (!profile.salonId.isNullOrBlank() && it.id == profile.salonId) ||
-            it.id == "salon_$uid"
+                it.partnerId == uid ||
+                (!profile.salonId.isNullOrBlank() && it.id == profile.salonId && (it.ownerId == uid || it.partnerId == uid))
         }
 
         if (existingInMemory != null) {
-            if (profile.salonId != existingInMemory.id || !profile.role.equals("partner", ignoreCase = true)) {
-                val updatedProfile = profile.copy(role = "partner", salonId = existingInMemory.id)
-                _currentUserProfile.value = updatedProfile
-                db.collection("users").document(uid).set(
-                    mapOf("role" to "partner", "salonId" to existingInMemory.id),
-                    com.google.firebase.firestore.SetOptions.merge()
-                )
-            }
-            onSalonReady(existingInMemory.id)
+            activatePartnerModeWithSalon(profile, existingInMemory.id, onSalonReady)
             return
         }
 
-        // 2. Query Firestore 'salons' collection for ownerId == uid
+        val db = firestore
+        if (db == null) {
+            if (openOnboardingIfMissing) {
+                _showPartnerOnboarding.value = true
+                onRequireRegistration()
+            } else {
+                _currentRole.value = UserRole.CUSTOMER
+                _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+            }
+            return
+        }
+
+        // 2. Query Firestore 'salons' collection where ownerId == uid
         db.collection("salons")
             .whereEqualTo("ownerId", uid)
             .limit(1)
@@ -1190,123 +1411,248 @@ class TrimTimeRepository private constructor(context: Context) {
             .addOnSuccessListener { ownerQuery ->
                 val matchedDoc = ownerQuery?.documents?.firstOrNull()
                 if (matchedDoc != null && matchedDoc.exists()) {
-                    val foundSalonId = matchedDoc.id
-                    val updatedProfile = profile.copy(role = "partner", salonId = foundSalonId)
-                    _currentUserProfile.value = updatedProfile
-                    db.collection("users").document(uid).set(
-                        mapOf("role" to "partner", "salonId" to foundSalonId),
-                        com.google.firebase.firestore.SetOptions.merge()
-                    )
-                    onSalonReady(foundSalonId)
+                    activatePartnerModeWithSalon(profile, matchedDoc.id, onSalonReady)
                 } else {
-                    // Check deterministic document ID 'salon_$uid' or profile.salonId
-                    val targetSalonId = profile.salonId?.takeIf { it.isNotBlank() } ?: "salon_$uid"
-                    db.collection("salons").document(targetSalonId).get()
-                        .addOnSuccessListener { doc ->
-                            if (doc != null && doc.exists()) {
-                                val updatedProfile = profile.copy(role = "partner", salonId = targetSalonId)
-                                _currentUserProfile.value = updatedProfile
-                                db.collection("users").document(uid).set(
-                                    mapOf("role" to "partner", "salonId" to targetSalonId),
-                                    com.google.firebase.firestore.SetOptions.merge()
-                                )
-                                onSalonReady(targetSalonId)
+                    // Also check partnerId == uid
+                    db.collection("salons")
+                        .whereEqualTo("partnerId", uid)
+                        .limit(1)
+                        .get()
+                        .addOnSuccessListener { partnerQuery ->
+                            val partnerDoc = partnerQuery?.documents?.firstOrNull()
+                            if (partnerDoc != null && partnerDoc.exists()) {
+                                activatePartnerModeWithSalon(profile, partnerDoc.id, onSalonReady)
                             } else {
-                                // Create a new live Salon document in Firestore for this Partner
-                                val cleanOwnerName = profile.name.takeIf { it.isNotBlank() } ?: "Partner"
-                                val defaultShopName = if (cleanOwnerName.contains("Salon", ignoreCase = true) ||
-                                    cleanOwnerName.contains("Studio", ignoreCase = true)
-                                ) {
-                                    cleanOwnerName
-                                } else {
-                                    "$cleanOwnerName's Grooming Studio"
-                                }
-
-                                val newSalon = Salon(
-                                    id = targetSalonId,
-                                    name = defaultShopName,
-                                    location = "Kankarbagh Main Road, Patna",
-                                    distance = "0.4 km",
-                                    rating = 4.9,
-                                    reviewCount = 1,
-                                    partnerId = uid,
-                                    ownerId = uid,
-                                    phone = profile.phone.ifBlank { "+91 98765 43210" },
-                                    isOpen = true,
-                                    currentStatus = "FREE",
-                                    availableChairs = 2,
-                                    waitingTimeMinutes = 0,
-                                    tagline = "Instant grooming slots • Zero queue wait time",
-                                    nextSlotMinutes = 15,
-                                    shopAddress = "Kankarbagh Main Road, Near Central Park, Patna",
-                                    landmark = "Near Central Park",
-                                    latitude = 25.5941,
-                                    longitude = 85.1376,
-                                    services = listOf(
-                                        SalonService(
-                                            id = "${targetSalonId}_s1",
-                                            name = "Haircut",
-                                            category = "Haircut",
-                                            price = 120,
-                                            durationMinutes = 20,
-                                            description = "Precision scissor & clipper cut with styling",
-                                            isPopular = true
-                                        ),
-                                        SalonService(
-                                            id = "${targetSalonId}_s2",
-                                            name = "Beard Trim & Shave",
-                                            category = "Beard",
-                                            price = 80,
-                                            durationMinutes = 15,
-                                            description = "Clean foam shave & razor edge lineup",
-                                            isPopular = true
-                                        ),
-                                        SalonService(
-                                            id = "${targetSalonId}_s3",
-                                            name = "Facial & Detan",
-                                            category = "Facial",
-                                            price = 250,
-                                            durationMinutes = 25,
-                                            description = "Deep cleanse & charcoal glow facial",
-                                            isPopular = false
-                                        ),
-                                        SalonService(
-                                            id = "${targetSalonId}_s4",
-                                            name = "Head Massage",
-                                            category = "Massage",
-                                            price = 100,
-                                            durationMinutes = 15,
-                                            description = "Relaxing herbal oil head massage",
-                                            isPopular = false
-                                        )
-                                    )
+                                // User does NOT have a registered salon yet!
+                                val resetProfile = profile.copy(
+                                    hasRegisteredSalon = false,
+                                    salonId = null,
+                                    role = "customer"
                                 )
+                                _currentUserProfile.value = resetProfile
+                                _currentRole.value = UserRole.CUSTOMER
+                                _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+                                sessionPrefs.edit().putString("saved_role", "customer").apply()
 
-                                // Update local state immediately and write to Firestore
-                                _salons.value = listOf(newSalon) + _salons.value.filterNot { it.id == targetSalonId }
-                                val updatedProfile = profile.copy(role = "partner", salonId = targetSalonId)
-                                _currentUserProfile.value = updatedProfile
-
-                                db.collection("salons").document(targetSalonId).set(newSalon.toMap())
-                                    .addOnSuccessListener {
-                                        Log.d(tag, "Created new live Partner salon in Firestore: $targetSalonId")
-                                        db.collection("users").document(uid).set(
-                                            mapOf("role" to "partner", "salonId" to targetSalonId),
-                                            com.google.firebase.firestore.SetOptions.merge()
-                                        )
-                                        onSalonReady(targetSalonId)
-                                    }
-                                    .addOnFailureListener { err ->
-                                        Log.e(tag, "Failed to create Partner salon in Firestore: ${err.message}")
-                                        onSalonReady(targetSalonId)
-                                    }
+                                if (openOnboardingIfMissing) {
+                                    _showPartnerOnboarding.value = true
+                                    onRequireRegistration()
+                                }
+                            }
+                        }
+                        .addOnFailureListener {
+                            if (openOnboardingIfMissing) {
+                                _showPartnerOnboarding.value = true
+                                onRequireRegistration()
                             }
                         }
                 }
             }
-            .addOnFailureListener { err ->
-                Log.w(tag, "Error querying Partner salon by ownerId: ${err.message}")
+            .addOnFailureListener {
+                if (openOnboardingIfMissing) {
+                    _showPartnerOnboarding.value = true
+                    onRequireRegistration()
+                }
             }
+    }
+
+    private fun activatePartnerModeWithSalon(
+        profile: UserProfile,
+        salonId: String,
+        onSalonReady: (String) -> Unit
+    ) {
+        val updatedProfile = profile.copy(
+            role = "partner",
+            salonId = salonId,
+            hasRegisteredSalon = true
+        )
+        _currentUserProfile.value = updatedProfile
+        _showPartnerOnboarding.value = false
+        _currentRole.value = UserRole.PARTNER
+        _authState.value = AppAuthState.Authenticated(UserRole.PARTNER)
+        sessionPrefs.edit().putString("saved_role", "partner").apply()
+
+        firestore?.collection("users")?.document(profile.id)?.set(
+            mapOf(
+                "role" to "partner",
+                "salonId" to salonId,
+                "hasRegisteredSalon" to true
+            ),
+            com.google.firebase.firestore.SetOptions.merge()
+        )
+        onSalonReady(salonId)
+    }
+
+    /**
+     * Dedicated Partner Salon Registration Submission:
+     * Saves the new salon document to Firestore (`salons` collection), marks the user's
+     * `hasRegisteredSalon = true` and `salonId`, and transitions into PartnerDashboardScreen.
+     */
+    fun registerPartnerSalon(
+        salonName: String,
+        ownerName: String,
+        businessPhone: String,
+        shopAddress: String,
+        cityArea: String,
+        pincode: String,
+        landmark: String,
+        shopCategory: String,
+        availableChairs: Int,
+        openingTime: String,
+        closingTime: String,
+        initialServices: List<SalonService>,
+        latitude: Double,
+        longitude: Double,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val currentProfile = _currentUserProfile.value
+        val uid = currentProfile?.id?.trim().orEmpty()
+        if (uid.isBlank() || currentProfile == null) {
+            onError("User session not found. Please log in again.")
+            return
+        }
+
+        val cleanSalonName = SecurityValidator.sanitizeName(salonName, trimEdges = true)
+        val cleanOwnerName = SecurityValidator.sanitizeName(ownerName, trimEdges = true)
+        if (cleanSalonName.length < 3) {
+            onError("Salon name must be between 3 and 60 characters.")
+            return
+        }
+        if (cleanOwnerName.length < 2) {
+            onError("Owner name must be between 2 and 60 characters.")
+            return
+        }
+
+        val phoneError = SecurityValidator.validateIndianMobileError(businessPhone)
+        if (phoneError != null) {
+            onError(phoneError)
+            return
+        }
+        val tenDigits = SecurityValidator.extractTenDigitMobile(businessPhone)
+        val formattedPhone = "+91 $tenDigits"
+
+        val cleanAddress = SecurityValidator.sanitizeAddress(shopAddress, trimEdges = true)
+        if (cleanAddress.length < 5) {
+            onError("Shop address must be between 5 and 250 characters.")
+            return
+        }
+        val cleanCity = SecurityValidator.sanitizeName(cityArea, trimEdges = true)
+        val cleanPincode = pincode.filter { it.isDigit() }.take(6)
+        val cleanLandmark = SecurityValidator.sanitizeName(landmark, trimEdges = true)
+        val cleanCategory = SecurityValidator.sanitizeName(shopCategory, trimEdges = true).ifBlank { "Men's Salon" }
+
+        // Validate all service prices strictly between ₹10 and ₹25,000
+        val invalidService = initialServices.firstOrNull { !SecurityValidator.isValidServicePrice(it.price) }
+        if (invalidService != null) {
+            onError("Service '${invalidService.name}' price (₹${invalidService.price}) must be between ₹10 and ₹25,000.")
+            return
+        }
+
+        val targetSalonId = "salon_$uid"
+        val fullDisplayLocation = buildString {
+            append(cleanAddress)
+            if (cleanCity.isNotBlank()) append(", $cleanCity")
+            if (cleanPincode.isNotBlank()) append(" - $cleanPincode")
+        }.take(SecurityValidator.MAX_ADDRESS_LENGTH)
+
+        val distKm = calculateDistanceKm(25.5941, 85.1376, latitude, longitude)
+        val formattedDist = String.format(java.util.Locale.US, "%.1f km", distKm)
+
+        val finalServices = initialServices.mapIndexed { idx, srv ->
+            val sanitizedSrvName = SecurityValidator.sanitizeName(srv.name, trimEdges = true).ifBlank { "Grooming Service" }
+            val sanitizedSrvCat = SecurityValidator.sanitizeName(srv.category, trimEdges = true).ifBlank { "Haircut" }
+            val clampedPrice = srv.price.coerceIn(SecurityValidator.MIN_SERVICE_PRICE, SecurityValidator.MAX_SERVICE_PRICE)
+            val clampedDuration = srv.durationMinutes.coerceIn(SecurityValidator.MIN_SERVICE_DURATION, SecurityValidator.MAX_SERVICE_DURATION)
+            val sanitizedDesc = SecurityValidator.sanitizeTagline(
+                srv.description.ifBlank { "$sanitizedSrvName ($clampedDuration mins)" }
+            )
+            srv.copy(
+                id = "${targetSalonId}_s${idx + 1}",
+                name = sanitizedSrvName,
+                category = sanitizedSrvCat,
+                price = clampedPrice,
+                durationMinutes = clampedDuration,
+                description = sanitizedDesc,
+                isPopular = true
+            )
+        }
+
+        val newSalon = Salon(
+            id = targetSalonId,
+            name = cleanSalonName,
+            location = fullDisplayLocation,
+            distance = formattedDist,
+            rating = 4.9,
+            reviewCount = 1,
+            partnerId = uid,
+            ownerId = uid,
+            ownerName = cleanOwnerName,
+            phone = formattedPhone,
+            imageUrl = "",
+            photoBase64 = "",
+            services = finalServices,
+            isOpen = true,
+            currentStatus = "FREE",
+            availableChairs = availableChairs.coerceIn(1, 20),
+            waitingTimeMinutes = 0,
+            tagline = "$cleanCategory • Open $openingTime - $closingTime",
+            nextSlotMinutes = 15,
+            shopAddress = fullDisplayLocation,
+            landmark = cleanLandmark,
+            pincode = cleanPincode,
+            shopCategory = cleanCategory,
+            openingTime = openingTime,
+            closingTime = closingTime,
+            latitude = latitude,
+            longitude = longitude
+        )
+
+        _isLoading.value = true
+
+        // Update in-memory list immediately
+        _salons.value = listOf(newSalon) + _salons.value.filterNot { it.id == targetSalonId }
+
+        val updatedProfile = currentProfile.copy(
+            name = cleanOwnerName.ifBlank { currentProfile.name },
+            phone = formattedPhone,
+            role = "partner",
+            salonId = targetSalonId,
+            hasRegisteredSalon = true,
+            defaultCity = cleanCity.ifBlank { currentProfile.defaultCity }
+        )
+        _currentUserProfile.value = updatedProfile
+
+        val db = firestore
+        if (db != null) {
+            db.collection("salons").document(targetSalonId).set(newSalon.toMap())
+                .addOnSuccessListener {
+                    db.collection("users").document(uid).set(
+                        updatedProfile.toMap(),
+                        com.google.firebase.firestore.SetOptions.merge()
+                    )
+                    sessionPrefs.edit()
+                        .putString("saved_name", updatedProfile.name)
+                        .putString("saved_role", "partner")
+                        .apply()
+
+                    _isLoading.value = false
+                    _showPartnerOnboarding.value = false
+                    _currentRole.value = UserRole.PARTNER
+                    _authState.value = AppAuthState.Authenticated(UserRole.PARTNER)
+                    onSuccess(targetSalonId)
+                }
+                .addOnFailureListener { err ->
+                    _isLoading.value = false
+                    onError("Failed to register salon in Firestore: ${err.localizedMessage}")
+                }
+        } else {
+            _isLoading.value = false
+            _showPartnerOnboarding.value = false
+            _currentRole.value = UserRole.PARTNER
+            _authState.value = AppAuthState.Authenticated(UserRole.PARTNER)
+            onSuccess(targetSalonId)
+        }
     }
 
     private fun fetchUserProfile(uid: String) {
@@ -1329,25 +1675,35 @@ class TrimTimeRepository private constructor(context: Context) {
                 if (doc != null && doc.exists()) {
                     val savedRolePref = sessionPrefs.getString("saved_role", null)
                     val roleStr = savedRolePref ?: doc.getString("role") ?: "customer"
-                    val cancelCount = doc.getLong("cancellationCount")?.toInt() ?: 0
+                    val cancelCount = maxOf(
+                        doc.getLong("cancellationStrikes")?.toInt() ?: 0,
+                        doc.getLong("cancellationCount")?.toInt() ?: 0
+                    )
                     val suspended = doc.getBoolean("isSuspended") ?: (cancelCount >= 3)
+                    val salonIdVal = doc.getString("salonId")?.takeIf { it.isNotBlank() }
+                    val hasRegisteredVal = doc.getBoolean("hasRegisteredSalon") == true || !salonIdVal.isNullOrBlank()
+                    val defaultCityVal = SecurityValidator.sanitizeAddress(
+                        doc.getString("defaultCity")?.takeIf { it.isNotBlank() } ?: _appPreferences.value.defaultCity
+                    )
+
                     val profile = UserProfile(
                         id = uid,
-                        name = doc.getString("name") ?: user?.displayName ?: "Customer",
+                        name = SecurityValidator.sanitizeName(doc.getString("name") ?: user?.displayName ?: "Customer"),
                         email = doc.getString("email") ?: user?.email ?: "",
                         phone = doc.getString("phone") ?: user?.phoneNumber ?: "",
                         role = roleStr,
-                        salonId = doc.getString("salonId"),
+                        salonId = salonIdVal,
+                        hasRegisteredSalon = hasRegisteredVal,
+                        defaultCity = defaultCityVal,
                         cancellationCount = cancelCount,
+                        cancellationStrikes = cancelCount,
                         isSuspended = suspended,
                         createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
                     )
                     _currentUserProfile.value = profile
                     attachCustomerBookingsListener(uid)
-                    if (roleStr.equals("partner", ignoreCase = true) || roleStr.equals("owner", ignoreCase = true)) {
-                        _currentRole.value = UserRole.PARTNER
-                        _authState.value = AppAuthState.Authenticated(UserRole.PARTNER)
-                        ensurePartnerSalonInFirestore(profile)
+                    if ((roleStr.equals("partner", ignoreCase = true) || roleStr.equals("owner", ignoreCase = true)) && hasRegisteredVal) {
+                        verifyExistingPartnerSalonOrPromptOnboarding(profile, openOnboardingIfMissing = false)
                     } else {
                         _currentRole.value = UserRole.CUSTOMER
                         _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
@@ -1361,6 +1717,8 @@ class TrimTimeRepository private constructor(context: Context) {
                         phone = user?.phoneNumber ?: "",
                         role = "customer",
                         salonId = null,
+                        hasRegisteredSalon = false,
+                        defaultCity = _appPreferences.value.defaultCity,
                         cancellationCount = 0,
                         isSuspended = false,
                         createdAt = System.currentTimeMillis()
@@ -1410,37 +1768,51 @@ class TrimTimeRepository private constructor(context: Context) {
             throw IllegalStateException("Please log in with your Mobile Number or Email before booking.")
         }
 
-        // Rule 3: Enforce Strike / Auto-Block check
-        if (currentProfile != null && (currentProfile.cancellationCount >= 3 || currentProfile.isSuspended)) {
-            throw IllegalStateException("Your account has been suspended for too many cancellations")
+        // Rule 3: Strictly enforce the 3-Strike Anti-Spam Rule (cancellationStrikes >= 3)
+        if (currentProfile != null && (currentProfile.effectiveCancellationStrikes >= 3 || currentProfile.isSuspended)) {
+            throw IllegalStateException("Security Lockout: Your account is suspended due to 3 or more booking cancellations.")
         }
 
-        // Rule 2: Enforce One Active Booking Rule strictly for this customerId
-        val hasActivePending = _customerBookings.value.any { b ->
-            b.customerId == resolvedCustomerId &&
-                (b.status.equals("pending", ignoreCase = true) || b.status.equals("accepted", ignoreCase = true))
+        // Rule 2: Strictly block Customer if they already have an active booking (status in ["PENDING", "ACCEPTED", "IN_PROGRESS"])
+        val hasActiveBooking = (_customerBookings.value + _bookings.value).any { b ->
+            b.customerId == resolvedCustomerId && SecurityValidator.isBookingActiveStatus(b.status)
         }
-        if (hasActivePending) {
-            throw IllegalStateException("You already have an active booking. Please complete or cancel it first.")
+        if (hasActiveBooking) {
+            throw IllegalStateException("You already have an active booking (Pending/Accepted/In-Progress). Please complete or cancel it first.")
+        }
+
+        // Validate customer phone & sanitize customer name
+        val rawName = customerName.ifBlank { currentProfile?.name ?: "Customer" }
+        val resolvedCustomerName = SecurityValidator.sanitizeName(rawName, trimEdges = true)
+        if (resolvedCustomerName.length < 2) {
+            throw IllegalArgumentException("Please enter a valid customer name (2–60 characters).")
+        }
+
+        val rawPhone = customerPhone.ifBlank { currentProfile?.phone ?: "" }
+        val phoneErr = SecurityValidator.validateIndianMobileError(rawPhone)
+        if (phoneErr != null) {
+            throw IllegalArgumentException(phoneErr)
+        }
+        val resolvedCustomerPhone = SecurityValidator.formatIndianMobile(rawPhone)
+
+        if (!SecurityValidator.isValidServicePrice(servicePrice)) {
+            throw IllegalArgumentException("Service price must be between ₹10 and ₹25,000.")
         }
 
         val generatedPin = String.format("%04d", Random.nextInt(1000, 9999))
         val newBookingId = "bk_" + System.currentTimeMillis().toString().takeLast(6) + "_" + Random.nextInt(10, 99)
-
-        val resolvedCustomerName = customerName.trim().ifBlank { currentProfile?.name ?: "Customer" }
-        val resolvedCustomerPhone = customerPhone.trim().ifBlank { currentProfile?.phone ?: "" }
 
         val newBooking = Booking(
             id = newBookingId,
             customerId = resolvedCustomerId,
             customerName = resolvedCustomerName,
             customerPhone = resolvedCustomerPhone,
-            salonId = salonId,
-            salonName = salonName,
-            service = service,
-            servicePrice = servicePrice,
-            timeSlot = timeSlot,
-            bookingDate = bookingDate,
+            salonId = salonId.trim(),
+            salonName = SecurityValidator.sanitizeName(salonName, trimEdges = true),
+            service = SecurityValidator.sanitizeName(service, trimEdges = true),
+            servicePrice = servicePrice.coerceIn(SecurityValidator.MIN_SERVICE_PRICE, SecurityValidator.MAX_SERVICE_PRICE),
+            timeSlot = SecurityValidator.sanitizeName(timeSlot, trimEdges = true),
+            bookingDate = SecurityValidator.sanitizeName(bookingDate, trimEdges = true),
             status = BookingStatus.PENDING.name.lowercase(),
             pin = generatedPin,
             createdAt = System.currentTimeMillis()
@@ -1509,6 +1881,25 @@ class TrimTimeRepository private constructor(context: Context) {
         return true
     }
 
+    /**
+     * Returns remaining lockout seconds for a booking if 5 wrong PIN attempts occurred within the last 60s.
+     */
+    fun getPinLockoutRemainingSeconds(bookingId: String): Int {
+        val lockoutUntil = pinLockoutUntilMillis[bookingId] ?: return 0
+        val now = System.currentTimeMillis()
+        if (now >= lockoutUntil) {
+            pinLockoutUntilMillis.remove(bookingId)
+            pinFailedAttempts.remove(bookingId)
+            return 0
+        }
+        return ((lockoutUntil - now + 999L) / 1000L).toInt().coerceAtLeast(1)
+    }
+
+    fun getFailedPinAttempts(bookingId: String): Int {
+        getPinLockoutRemainingSeconds(bookingId) // clears expired lockout if any
+        return pinFailedAttempts[bookingId] ?: 0
+    }
+
     fun verifyAndCompleteBooking(bookingId: String, enteredPin: String): PinVerificationResult {
         val currentBookings = _bookings.value
         val booking = currentBookings.find { it.id == bookingId }
@@ -1518,16 +1909,41 @@ class TrimTimeRepository private constructor(context: Context) {
             return PinVerificationResult.AlreadyCompleted("This booking has already been verified and completed.")
         }
 
+        // Brute-Force Lockout Check (60 seconds after 5 consecutive wrong PIN attempts)
+        val remainingLockSecs = getPinLockoutRemainingSeconds(bookingId)
+        if (remainingLockSecs > 0) {
+            return PinVerificationResult.LockedOut(
+                remainingSeconds = remainingLockSecs,
+                message = "🔒 Security Lockout: Too many wrong PIN attempts (5/5). Please wait ${remainingLockSecs}s before trying again."
+            )
+        }
+
         val trimmedEnteredPin = enteredPin.trim()
         val actualPin = booking.pin.trim()
 
         if (trimmedEnteredPin != actualPin) {
+            val attempts = (pinFailedAttempts[bookingId] ?: 0) + 1
+            pinFailedAttempts[bookingId] = attempts
+
+            if (attempts >= SecurityValidator.MAX_PIN_ATTEMPTS) {
+                pinLockoutUntilMillis[bookingId] = System.currentTimeMillis() + SecurityValidator.PIN_LOCKOUT_DURATION_MS
+                return PinVerificationResult.LockedOut(
+                    remainingSeconds = 60,
+                    message = "🔒 Security Lockout: 5 wrong PIN attempts in a row! PIN verification is locked for 60 seconds."
+                )
+            }
+
+            val remaining = SecurityValidator.MAX_PIN_ATTEMPTS - attempts
             return PinVerificationResult.IncorrectPin(
-                "Invalid PIN ($trimmedEnteredPin). Anti-fraud verification failed. Please ask the customer for their 4-digit TrimTime Service PIN."
+                message = "Incorrect 4-digit PIN. $remaining attempt${if (remaining == 1) "" else "s"} remaining before 60s security lockout.",
+                attemptsRemaining = remaining
             )
         }
 
-        // Correct PIN entered! Mark as completed
+        // Correct PIN entered! Clear failed attempts & lockout state
+        pinFailedAttempts.remove(bookingId)
+        pinLockoutUntilMillis.remove(bookingId)
+
         val completedBooking = booking.copy(
             status = BookingStatus.COMPLETED.name.lowercase(),
             completedAt = System.currentTimeMillis()
@@ -1562,8 +1978,8 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     /**
-     * Rule 3: Strike / Auto-Block System
-     * Increment cancellationCount. If reaches 3, block customer from future bookings.
+     * Rule 3: 3-Strike Anti-Spam & Auto-Block System
+     * Increment cancellationCount & cancellationStrikes. If >= 3, suspend customer from future bookings.
      */
     fun cancelBooking(bookingId: String): Boolean {
         val currentBookings = _bookings.value
@@ -1577,28 +1993,39 @@ class TrimTimeRepository private constructor(context: Context) {
 
         firestore?.collection("bookings")?.document(bookingId)?.update("status", "cancelled")
 
-        // Increment cancellationCount on user profile
+        // Increment cancellationStrikes & cancellationCount on user profile
         val currentProfile = _currentUserProfile.value
         if (currentProfile != null) {
-            val newCancellationCount = currentProfile.cancellationCount + 1
-            val isNowSuspended = newCancellationCount >= 3
+            val newStrikes = currentProfile.effectiveCancellationStrikes + 1
+            val isNowSuspended = newStrikes >= 3
             val updatedProfile = currentProfile.copy(
-                cancellationCount = newCancellationCount,
+                cancellationCount = newStrikes,
+                cancellationStrikes = newStrikes,
                 isSuspended = isNowSuspended
             )
             _currentUserProfile.value = updatedProfile
 
-            firestore?.collection("users")?.document(currentProfile.id)?.update(
+            firestore?.collection("users")?.document(currentProfile.id)?.set(
                 mapOf(
-                    "cancellationCount" to newCancellationCount,
+                    "cancellationCount" to newStrikes,
+                    "cancellationStrikes" to newStrikes,
                     "isSuspended" to isNowSuspended
-                )
+                ),
+                com.google.firebase.firestore.SetOptions.merge()
             )?.addOnSuccessListener {
-                Log.d(tag, "Incremented cancellation strikes to $newCancellationCount for user ${currentProfile.id}. Suspended: $isNowSuspended")
+                Log.d(tag, "Incremented cancellationStrikes to $newStrikes for user ${currentProfile.id}. Suspended: $isNowSuspended")
             }
         }
 
         return true
+    }
+
+    private fun resolveSalonOwnerMap(salonId: String): Map<String, Any> {
+        val salon = _salons.value.find { it.id == salonId }
+        val ownerId = salon?.ownerId?.ifBlank { salon.partnerId }
+            ?: _currentUserProfile.value?.id
+            ?: ""
+        return if (ownerId.isNotBlank()) mapOf("ownerId" to ownerId) else emptyMap()
     }
 
     fun toggleSalonOpenStatus(salonId: String) {
@@ -1610,7 +2037,7 @@ class TrimTimeRepository private constructor(context: Context) {
         val updatedSalon = updated.find { it.id == salonId }
         if (updatedSalon != null) {
             firestore?.collection("salons")?.document(salonId)?.set(
-                mapOf("isOpen" to updatedSalon.isOpen),
+                mapOf("isOpen" to updatedSalon.isOpen) + resolveSalonOwnerMap(salonId),
                 com.google.firebase.firestore.SetOptions.merge()
             )
         }
@@ -1623,7 +2050,7 @@ class TrimTimeRepository private constructor(context: Context) {
         }
         _salons.value = updated
         firestore?.collection("salons")?.document(salonId)?.set(
-            mapOf("isOpen" to isOpen),
+            mapOf("isOpen" to isOpen) + resolveSalonOwnerMap(salonId),
             com.google.firebase.firestore.SetOptions.merge()
         )
             ?.addOnSuccessListener {
@@ -1658,7 +2085,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 "currentStatus" to normalizedStatus,
                 "waitingTimeMinutes" to defaultWait,
                 "nextSlotMinutes" to if (defaultWait > 0) defaultWait else 15
-            ),
+            ) + resolveSalonOwnerMap(salonId),
             com.google.firebase.firestore.SetOptions.merge()
         )
             ?.addOnSuccessListener {
@@ -1686,8 +2113,8 @@ class TrimTimeRepository private constructor(context: Context) {
             if (it.id == salonId) {
                 it.copy(
                     currentStatus = normalizedStatus,
-                    availableChairs = availableChairs.coerceAtLeast(0),
-                    waitingTimeMinutes = waitingTimeMinutes.coerceAtLeast(0),
+                    availableChairs = availableChairs.coerceIn(0, 20),
+                    waitingTimeMinutes = waitingTimeMinutes.coerceIn(0, 180),
                     nextSlotMinutes = nextSlot
                 )
             } else it
@@ -1697,10 +2124,10 @@ class TrimTimeRepository private constructor(context: Context) {
         firestore?.collection("salons")?.document(salonId)?.set(
             mapOf(
                 "currentStatus" to normalizedStatus,
-                "availableChairs" to availableChairs.coerceAtLeast(0),
-                "waitingTimeMinutes" to waitingTimeMinutes.coerceAtLeast(0),
+                "availableChairs" to availableChairs.coerceIn(0, 20),
+                "waitingTimeMinutes" to waitingTimeMinutes.coerceIn(0, 180),
                 "nextSlotMinutes" to nextSlot
-            ),
+            ) + resolveSalonOwnerMap(salonId),
             com.google.firebase.firestore.SetOptions.merge()
         )?.addOnSuccessListener {
             Log.d(tag, "Updated chair availability ($availableChairs chairs, ${waitingTimeMinutes}m wait) for $salonId in Firestore.")
@@ -1713,15 +2140,35 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
+        // Validate every service price is within ₹10..₹25,000 and sanitize service fields
+        val invalidSrv = updatedServices.firstOrNull { !SecurityValidator.isValidServicePrice(it.price) }
+        if (invalidSrv != null) {
+            onError("Service '${invalidSrv.name}' price (₹${invalidSrv.price}) must be between ₹10 and ₹25,000.")
+            return
+        }
+
+        val sanitizedServices = updatedServices.map { srv ->
+            srv.copy(
+                name = SecurityValidator.sanitizeName(srv.name, trimEdges = true).ifBlank { "Grooming Service" },
+                category = SecurityValidator.sanitizeName(srv.category, trimEdges = true).ifBlank { "Haircut" },
+                price = srv.price.coerceIn(SecurityValidator.MIN_SERVICE_PRICE, SecurityValidator.MAX_SERVICE_PRICE),
+                durationMinutes = srv.durationMinutes.coerceIn(SecurityValidator.MIN_SERVICE_DURATION, SecurityValidator.MAX_SERVICE_DURATION),
+                description = SecurityValidator.sanitizeTagline(srv.description, trimEdges = true)
+            )
+        }
+
         val currentSalons = _salons.value
         val updated = currentSalons.map {
-            if (it.id == salonId) it.copy(services = updatedServices) else it
+            if (it.id == salonId) it.copy(services = sanitizedServices) else it
         }
         _salons.value = updated
 
-        val servicesMap = updatedServices.map { it.toMap() }
+        val servicesMap = sanitizedServices.map { it.toMap() }
         firestore?.collection("salons")?.document(salonId)
-            ?.set(mapOf("services" to servicesMap), com.google.firebase.firestore.SetOptions.merge())
+            ?.set(
+                mapOf("services" to servicesMap) + resolveSalonOwnerMap(salonId),
+                com.google.firebase.firestore.SetOptions.merge()
+            )
             ?.addOnSuccessListener {
                 Log.d(tag, "Services updated in Firestore for salon: $salonId")
                 onSuccess()
@@ -1742,21 +2189,35 @@ class TrimTimeRepository private constructor(context: Context) {
         price: Int,
         durationMinutes: Int,
         description: String,
-        onSuccess: () -> Unit = {}
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
     ) {
         val currentSalon = _salons.value.find { it.id == salonId } ?: return
+        val sanitizedName = SecurityValidator.sanitizeName(name, trimEdges = true)
+        if (sanitizedName.length < 2) {
+            onError("Service name must be between 2 and 60 characters.")
+            return
+        }
+        val priceError = SecurityValidator.validateServicePriceError(price)
+        if (priceError != null) {
+            onError(priceError)
+            return
+        }
+
         val newServiceId = "${salonId}_srv_${System.currentTimeMillis().toString().takeLast(5)}"
+        val clampedDuration = durationMinutes.coerceIn(SecurityValidator.MIN_SERVICE_DURATION, SecurityValidator.MAX_SERVICE_DURATION)
         val newService = SalonService(
             id = newServiceId,
-            name = name.trim(),
-            category = category.trim().ifBlank { "Haircut" },
-            price = price.coerceAtLeast(10),
-            durationMinutes = durationMinutes.coerceAtLeast(5),
-            description = description.trim().ifBlank { "$name ($durationMinutes mins)" },
+            name = sanitizedName,
+            category = SecurityValidator.sanitizeName(category, trimEdges = true).ifBlank { "Haircut" },
+            price = price,
+            durationMinutes = clampedDuration,
+            description = SecurityValidator.sanitizeTagline(description, trimEdges = true)
+                .ifBlank { "$sanitizedName ($clampedDuration mins)" },
             isPopular = true
         )
         val updatedList = currentSalon.services + newService
-        updateSalonServices(salonId = salonId, updatedServices = updatedList, onSuccess = onSuccess)
+        updateSalonServices(salonId = salonId, updatedServices = updatedList, onSuccess = onSuccess, onError = onError)
     }
 
     /**
@@ -1765,13 +2226,32 @@ class TrimTimeRepository private constructor(context: Context) {
     fun editSalonService(
         salonId: String,
         updatedService: SalonService,
-        onSuccess: () -> Unit = {}
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
     ) {
         val currentSalon = _salons.value.find { it.id == salonId } ?: return
-        val updatedList = currentSalon.services.map {
-            if (it.id == updatedService.id) updatedService else it
+        val sanitizedName = SecurityValidator.sanitizeName(updatedService.name, trimEdges = true)
+        if (sanitizedName.length < 2) {
+            onError("Service name must be between 2 and 60 characters.")
+            return
         }
-        updateSalonServices(salonId = salonId, updatedServices = updatedList, onSuccess = onSuccess)
+        val priceError = SecurityValidator.validateServicePriceError(updatedService.price)
+        if (priceError != null) {
+            onError(priceError)
+            return
+        }
+
+        val sanitizedUpdated = updatedService.copy(
+            name = sanitizedName,
+            category = SecurityValidator.sanitizeName(updatedService.category, trimEdges = true).ifBlank { "Haircut" },
+            price = updatedService.price,
+            durationMinutes = updatedService.durationMinutes.coerceIn(SecurityValidator.MIN_SERVICE_DURATION, SecurityValidator.MAX_SERVICE_DURATION),
+            description = SecurityValidator.sanitizeTagline(updatedService.description, trimEdges = true)
+        )
+        val updatedList = currentSalon.services.map {
+            if (it.id == sanitizedUpdated.id) sanitizedUpdated else it
+        }
+        updateSalonServices(salonId = salonId, updatedServices = updatedList, onSuccess = onSuccess, onError = onError)
     }
 
     /**
@@ -1804,22 +2284,44 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
+        val cleanName = SecurityValidator.sanitizeName(name, trimEdges = true)
+        if (cleanName.length < 2) {
+            onError("Shop name must be between 2 and 60 characters.")
+            return
+        }
+        val cleanAddress = SecurityValidator.sanitizeAddress(shopAddress, trimEdges = true)
+        if (cleanAddress.length < 4) {
+            onError("Shop address must be between 4 and 250 characters.")
+            return
+        }
+        val cleanLandmark = SecurityValidator.sanitizeName(landmark, trimEdges = true)
+        val cleanTagline = SecurityValidator.sanitizeTagline(tagline, trimEdges = true)
+            .ifBlank { "Instant grooming slots • Zero queue wait time" }
+
+        val cleanPhone = if (phone.isNotBlank()) {
+            val phoneError = SecurityValidator.validateIndianMobileError(phone)
+            if (phoneError != null) {
+                onError(phoneError)
+                return
+            }
+            SecurityValidator.formatIndianMobile(phone)
+        } else {
+            ""
+        }
+
         val calculatedDistKm = calculateDistanceKm(25.5941, 85.1376, latitude, longitude)
         val dynamicDistance = String.format(java.util.Locale.US, "%.1f km", calculatedDistKm)
-        val shortLocation = if (landmark.isNotBlank()) "$landmark, $shopAddress".take(50) else shopAddress.take(50)
-        val cleanName = name.trim().ifBlank { "TrimTime Partner Salon" }
-        val cleanPhone = phone.trim()
-        val cleanTagline = tagline.trim().ifBlank { "Instant grooming slots • Zero queue wait time" }
+        val shortLocation = if (cleanLandmark.isNotBlank()) "$cleanLandmark, $cleanAddress".take(60) else cleanAddress.take(60)
 
         val currentSalons = _salons.value
         val updated = currentSalons.map {
             if (it.id == salonId) {
                 it.copy(
                     name = cleanName,
-                    phone = cleanPhone,
+                    phone = cleanPhone.ifBlank { it.phone },
                     tagline = cleanTagline,
-                    shopAddress = shopAddress,
-                    landmark = landmark,
+                    shopAddress = cleanAddress,
+                    landmark = cleanLandmark,
                     latitude = latitude,
                     longitude = longitude,
                     availableChairs = availableChairs ?: it.availableChairs,
@@ -1839,16 +2341,17 @@ class TrimTimeRepository private constructor(context: Context) {
             "name" to cleanName,
             "phone" to cleanPhone,
             "tagline" to cleanTagline,
-            "shopAddress" to shopAddress,
-            "landmark" to landmark,
+            "shopAddress" to cleanAddress,
+            "landmark" to cleanLandmark,
             "coordinates" to coordinatesMap,
             "latitude" to latitude,
             "longitude" to longitude,
             "distance" to dynamicDistance,
             "location" to shortLocation
         )
+        updates.putAll(resolveSalonOwnerMap(salonId))
         if (availableChairs != null) {
-            updates["availableChairs"] = availableChairs.coerceIn(0, 12)
+            updates["availableChairs"] = availableChairs.coerceIn(1, 20)
         }
 
         firestore?.collection("salons")?.document(salonId)
@@ -1883,7 +2386,7 @@ class TrimTimeRepository private constructor(context: Context) {
         val updates = mapOf(
             "imageUrl" to photoDataUrl,
             "photoBase64" to photoDataUrl
-        )
+        ) + resolveSalonOwnerMap(salonId)
         firestore?.collection("salons")?.document(salonId)
             ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
             ?.addOnSuccessListener {
@@ -1922,6 +2425,55 @@ class TrimTimeRepository private constructor(context: Context) {
             onSuccess = onSuccess,
             onError = onError
         )
+    }
+
+    /**
+     * Saves a Customer or Partner Feedback / Issue Report directly to the Cloud Firestore `feedback` collection.
+     */
+    fun submitFeedback(
+        rating: Int,
+        category: String,
+        message: String,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val sanitizedMessage = SecurityValidator.sanitizeFeedback(message, trimEdges = true)
+        if (sanitizedMessage.length < 3) {
+            onError("Please enter a valid feedback message (3–500 characters, no HTML/script tags).")
+            return
+        }
+
+        val currentProfile = _currentUserProfile.value
+        val activeRole = _currentRole.value.roleKey
+        val feedbackId = "fb_${System.currentTimeMillis()}_${Random.nextInt(100, 999)}"
+        val submission = FeedbackSubmission(
+            id = feedbackId,
+            userId = currentProfile?.id?.ifBlank { "anonymous_user" } ?: "anonymous_user",
+            userName = SecurityValidator.sanitizeName(currentProfile?.name?.ifBlank { "TrimTime User" } ?: "TrimTime User"),
+            userRole = currentProfile?.role?.ifBlank { activeRole } ?: activeRole,
+            rating = rating.coerceIn(1, 5),
+            category = SecurityValidator.sanitizeName(category.ifBlank { "General Feedback" }),
+            message = sanitizedMessage,
+            timestamp = System.currentTimeMillis()
+        )
+
+        val db = firestore
+        if (db == null) {
+            onSuccess()
+            return
+        }
+
+        db.collection("feedback")
+            .document(feedbackId)
+            .set(submission.toMap())
+            .addOnSuccessListener {
+                Log.d(tag, "Feedback $feedbackId saved to Firestore feedback collection")
+                onSuccess()
+            }
+            .addOnFailureListener { e ->
+                Log.w(tag, "Failed to save feedback to Firestore: ${e.message}")
+                onSuccess()
+            }
     }
 
     companion object {
