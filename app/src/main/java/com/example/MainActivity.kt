@@ -1,7 +1,6 @@
 package com.example
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
@@ -26,15 +25,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.AppAuthState
 import com.example.model.UserRole
@@ -45,7 +43,8 @@ import com.example.ui.components.AppBottomNav
 import com.example.ui.components.AppTopBar
 import com.example.ui.components.PinDisplayDialog
 import com.example.ui.components.PinVerificationDialog
-import com.example.ui.components.TestGuideDialog
+import com.example.ui.components.QuickAccessSetupDialog
+import com.example.ui.components.QuickAccessUnlockScreen
 import com.example.ui.customer.BookingBottomSheet
 import com.example.ui.customer.CustomerBookingsContent
 import com.example.ui.customer.CustomerHomeScreen
@@ -61,9 +60,10 @@ import com.example.viewmodel.TrimTimeViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.example.ui.components.initOsmDroidConfig(this)
         enableEdgeToEdge()
         setContent {
             val mainViewModel: TrimTimeViewModel = viewModel()
@@ -81,11 +81,14 @@ fun TrimTimeApp(
 ) {
     val authState by viewModel.authState.collectAsState()
     val currentUserProfile by viewModel.currentUserProfile.collectAsState()
+    val isSessionUnlocked by viewModel.isSessionUnlocked.collectAsState()
+    val showQuickAccessSetup by viewModel.showQuickAccessSetup.collectAsState()
     val isCloudSynced by viewModel.isCloudSynced.collectAsState()
     val allSalons by viewModel.allSalons.collectAsState()
     val filteredSalons by viewModel.filteredSalons.collectAsState()
     val allBookings by viewModel.allBookings.collectAsState()
     val customerBookings by viewModel.customerBookings.collectAsState()
+    val latestCompletedBooking by viewModel.latestCompletedBooking.collectAsState()
     val appPreferences by viewModel.appPreferences.collectAsState()
     val hasRegisteredPartnerSalon by viewModel.hasRegisteredPartnerSalon.collectAsState()
     val showPartnerOnboarding by viewModel.showPartnerOnboarding.collectAsState()
@@ -124,7 +127,6 @@ fun TrimTimeApp(
 
     val userMessage by viewModel.userMessage.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
-    var showHelpDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(userMessage) {
         userMessage?.let { msg ->
@@ -153,7 +155,6 @@ fun TrimTimeApp(
     ) { state ->
         when (state) {
             is AppAuthState.Loading -> {
-                // Splash Loading Screen while checking Firebase currentUser
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -170,7 +171,7 @@ fun TrimTimeApp(
                             strokeWidth = 3.dp
                         )
                         Text(
-                            text = "Checking session...",
+                            text = "Loading TrimTime...",
                             color = Color(0xFF94A3B8),
                             fontSize = 14.sp
                         )
@@ -240,61 +241,44 @@ fun TrimTimeApp(
             }
 
             is AppAuthState.Authenticated -> {
-                when (state.role) {
-                    UserRole.CUSTOMER -> {
-                        val currentProfile = currentUserProfile
-                        val userPhoneDigits = currentProfile?.phone?.filter { it.isDigit() } ?: ""
-                        // Strip country code if 12 digits starting with 91
-                        val tenDigits = if (userPhoneDigits.length > 10 && userPhoneDigits.startsWith("91")) {
-                            userPhoneDigits.drop(2).take(10)
-                        } else {
-                            userPhoneDigits.takeLast(10)
+                val profileForUnlock = currentUserProfile
+                if (!isSessionUnlocked && profileForUnlock?.hasQuickAccessSetup == true) {
+                    // Quick Access Unlock Screen on future app launches (Fingerprint / Biometrics or 4-Digit MPIN)
+                    QuickAccessUnlockScreen(
+                        userName = profileForUnlock.name,
+                        userPhone = profileForUnlock.phone.ifBlank { profileForUnlock.email },
+                        isPhoneVerified = profileForUnlock.isPhoneVerified,
+                        expectedMpin = profileForUnlock.quickAccessMpin,
+                        biometricEnabled = profileForUnlock.biometricEnabled,
+                        onUnlocked = {
+                            viewModel.unlockSessionWithQuickAccess()
+                        },
+                        onUsePasswordOrSwitchAccount = {
+                            viewModel.logout()
                         }
-                        val needsPhone = currentProfile == null || tenDigits.length != 10
+                    )
+                } else {
+                    when (state.role) {
+                        UserRole.CUSTOMER -> {
+                            val currentProfile = currentUserProfile
+                            val userPhoneDigits = currentProfile?.phone?.filter { it.isDigit() } ?: ""
+                            val tenDigits = if (userPhoneDigits.length > 10 && userPhoneDigits.startsWith("91")) {
+                                userPhoneDigits.drop(2).take(10)
+                            } else {
+                                userPhoneDigits.takeLast(10)
+                            }
+                            val needsPhone = currentProfile == null || tenDigits.length != 10
 
-                        if (needsPhone) {
-                            // Rule 1: Mandatory Phone Collection with 2-Step OTP Verification
-                            MandatoryPhoneScreen(
-                                userName = currentProfile?.name ?: "Customer",
-                                userEmail = currentProfile?.email ?: "",
-                                isLoading = isAuthLoading,
-                                errorMessage = authError,
-                                onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
-                                    viewModel.requestPhoneVerificationOtp(
-                                        rawPhone = rawPhone,
-                                        excludeUserId = currentProfile?.id,
-                                        onOtpGenerated = onOtpGenerated,
-                                        onError = onError
-                                    )
-                                },
-                                onGenerateNewOtpCode = {
-                                    viewModel.generateFourDigitOtp()
-                                },
-                                onSavePhone = { validPhone ->
-                                    viewModel.savePhoneNumber(validPhone, isPhoneVerified = true) {
-                                        viewModel.setNavTab(CustomerNavTab.SALONS)
-                                        viewModel.selectSalon(null)
-                                    }
-                                },
-                                onSignOut = {
-                                    viewModel.logout()
-                                }
-                            )
-                        } else if (showPartnerOnboarding) {
-                            // Dedicated "Become a Salon Partner" Registration Form (No instant bypass for unregistered users)
-                            Scaffold(
-                                modifier = Modifier.fillMaxSize(),
-                                containerColor = DarkBackground,
-                                snackbarHost = { SnackbarHost(snackbarHostState) }
-                            ) { onboardingPadding ->
-                                PartnerOnboardingScreen(
-                                    userProfile = currentProfile,
+                            if (needsPhone) {
+                                MandatoryPhoneScreen(
+                                    userName = currentProfile?.name ?: "Customer",
+                                    userEmail = currentProfile?.email ?: "",
                                     isLoading = isAuthLoading,
-                                    onCancel = { viewModel.dismissPartnerOnboarding() },
+                                    errorMessage = authError,
                                     onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
                                         viewModel.requestPhoneVerificationOtp(
                                             rawPhone = rawPhone,
-                                            excludeUserId = currentProfile.id,
+                                            excludeUserId = currentProfile?.id,
                                             onOtpGenerated = onOtpGenerated,
                                             onError = onError
                                         )
@@ -302,286 +286,339 @@ fun TrimTimeApp(
                                     onGenerateNewOtpCode = {
                                         viewModel.generateFourDigitOtp()
                                     },
-                                    onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
-                                        viewModel.registerPartnerSalon(
-                                            salonName = salonName,
-                                            ownerName = ownerName,
-                                            businessPhone = businessPhone,
-                                            shopAddress = shopAddress,
-                                            cityArea = cityArea,
-                                            pincode = pincode,
-                                            landmark = landmark,
-                                            shopCategory = shopCategory,
-                                            availableChairs = availableChairs,
-                                            openingTime = openingTime,
-                                            closingTime = closingTime,
-                                            initialServices = initialServices,
-                                            latitude = latitude,
-                                            longitude = longitude,
-                                            isPhoneVerified = true
-                                        )
+                                    onSavePhone = { validPhone ->
+                                        viewModel.savePhoneNumber(validPhone, isPhoneVerified = true) {
+                                            viewModel.setNavTab(CustomerNavTab.SALONS)
+                                            viewModel.selectSalon(null)
+                                        }
                                     },
-                                    modifier = Modifier.padding(onboardingPadding)
+                                    onSignOut = {
+                                        viewModel.logout()
+                                    }
                                 )
-                            }
-                        } else {
-                            // Customer Mode App (Accessible only when logged in as Customer with a verified phone)
-                            Scaffold(
-                                modifier = Modifier.fillMaxSize(),
-                                containerColor = MaterialTheme.colorScheme.background,
-                                contentWindowInsets = WindowInsets(0, 0, 0, 0),
-                                snackbarHost = { SnackbarHost(snackbarHostState) },
-                                topBar = {
-                                    if (selectedSalon == null) {
-                                        AppTopBar(
-                                            isCloudSynced = isCloudSynced,
-                                            onHelpClicked = { showHelpDialog = true },
-                                            onSwitchToPartnerMode = { viewModel.switchToPartnerRole() }
-                                        )
-                                    }
-                                },
-                                bottomBar = {
-                                    if (selectedSalon == null) {
-                                        AppBottomNav(
-                                            currentTab = currentNavTab,
-                                            pendingBookingsCount = pendingBookingsCount,
-                                            onTabSelected = { viewModel.setNavTab(it) }
-                                        )
-                                    }
+                            } else if (showPartnerOnboarding) {
+                                // Mandatory "Partner Registration Form" (No 1-click bypass for unregistered users)
+                                Scaffold(
+                                    modifier = Modifier.fillMaxSize(),
+                                    containerColor = DarkBackground,
+                                    snackbarHost = { SnackbarHost(snackbarHostState) }
+                                ) { onboardingPadding ->
+                                    PartnerOnboardingScreen(
+                                        userProfile = currentProfile,
+                                        isLoading = isAuthLoading,
+                                        onCancel = { viewModel.dismissPartnerOnboarding() },
+                                        onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
+                                            viewModel.requestPhoneVerificationOtp(
+                                                rawPhone = rawPhone,
+                                                excludeUserId = currentProfile.id,
+                                                onOtpGenerated = onOtpGenerated,
+                                                onError = onError
+                                            )
+                                        },
+                                        onGenerateNewOtpCode = {
+                                            viewModel.generateFourDigitOtp()
+                                        },
+                                        onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
+                                            viewModel.registerPartnerSalon(
+                                                salonName = salonName,
+                                                ownerName = ownerName,
+                                                businessPhone = businessPhone,
+                                                shopAddress = shopAddress,
+                                                cityArea = cityArea,
+                                                pincode = pincode,
+                                                landmark = landmark,
+                                                shopCategory = shopCategory,
+                                                availableChairs = availableChairs,
+                                                openingTime = openingTime,
+                                                closingTime = closingTime,
+                                                initialServices = initialServices,
+                                                latitude = latitude,
+                                                longitude = longitude,
+                                                isPhoneVerified = true
+                                            )
+                                        },
+                                        modifier = Modifier.padding(onboardingPadding)
+                                    )
                                 }
-                            ) { innerPadding ->
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .padding(innerPadding)
-                                        .background(MaterialTheme.colorScheme.background)
-                                ) {
-                                    val activeSalon = selectedSalon?.let { sel ->
-                                        filteredSalons.find { it.id == sel.id } ?: sel
-                                    }
-                                    if (activeSalon != null) {
-                                        // Salon Detail & Catalog View
-                                        SalonDetailScreen(
-                                            salon = activeSalon,
-                                            currentUserId = currentCustomerUid,
-                                            hasActiveBooking = hasActivePendingBooking,
-                                            isSuspended = isUserSuspended,
-                                            onBack = { viewModel.selectSalon(null) },
-                                            onServiceSelected = { service ->
-                                                viewModel.setServiceToBook(service)
-                                            },
-                                            onBookingBlocked = { reason ->
-                                                viewModel.clearUserMessage()
-                                            },
-                                            onSwitchToPartnerMode = {
-                                                viewModel.switchToPartnerRole()
-                                            }
-                                        )
-                                    } else {
-                                        // Bottom Nav Tabs
-                                        when (currentNavTab) {
-                                            CustomerNavTab.SALONS -> {
-                                                val pastBooking = customerBookings.firstOrNull {
-                                                    currentCustomerUid.isNotBlank() &&
-                                                        it.customerId == currentCustomerUid &&
-                                                        it.status.equals("completed", ignoreCase = true)
-                                                } ?: customerBookings.firstOrNull {
-                                                    currentCustomerUid.isNotBlank() &&
-                                                        it.customerId == currentCustomerUid
-                                                }
-                                                CustomerHomeScreen(
-                                                    salons = filteredSalons,
-                                                    searchQuery = searchQuery,
-                                                    onSearchChanged = { viewModel.setSearchQuery(it) },
-                                                    selectedCategory = selectedCategory,
-                                                    onCategorySelected = { viewModel.selectCategory(it) },
-                                                    onSalonSelected = { viewModel.selectSalon(it) },
-                                                    userLocationTitle = userLocationTitle,
-                                                    userLocationSubtitle = userLocationSubtitle,
-                                                    userLatitude = userLatitude,
-                                                    userLongitude = userLongitude,
-                                                    isLiveGpsActive = isLiveGpsActive,
-                                                    onDetectGpsLocation = { lat, lng, showToast ->
-                                                        viewModel.onLiveGpsDetected(lat, lng, showToast)
-                                                    },
-                                                    onManualLocationSelected = { cityText, pickedLat, pickedLng ->
-                                                        viewModel.updateCustomerLocationManually(cityText, pickedLat, pickedLng)
-                                                    },
-                                                    pastBooking = pastBooking,
-                                                    onRebook = { booking ->
-                                                        val targetSalon = allSalons.find { it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true) }
-                                                        viewModel.selectSalon(targetSalon)
-                                                    },
-                                                    onProfileClick = {
-                                                        viewModel.setNavTab(CustomerNavTab.PROFILE)
+                            } else {
+                                // Customer Mode App
+                                Scaffold(
+                                    modifier = Modifier.fillMaxSize(),
+                                    containerColor = MaterialTheme.colorScheme.background,
+                                    contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                                    snackbarHost = { SnackbarHost(snackbarHostState) },
+                                    topBar = {
+                                        if (selectedSalon == null) {
+                                            AppTopBar(
+                                                isCloudSynced = isCloudSynced,
+                                                hasRegisteredPartnerSalon = hasRegisteredPartnerSalon,
+                                                onSwitchToPartnerMode = {
+                                                    if (hasRegisteredPartnerSalon) {
+                                                        viewModel.switchToPartnerRole()
+                                                    } else {
+                                                        viewModel.openPartnerRegistrationForm()
                                                     }
-                                                )
-                                            }
-
-                                            CustomerNavTab.MY_BOOKINGS -> {
-                                                CustomerBookingsContent(
-                                                    bookings = customerBookings,
-                                                    currentUserId = currentCustomerUid,
-                                                    salons = allSalons,
-                                                    cancellationCount = currentUserProfile?.effectiveCancellationStrikes ?: 0,
-                                                    isSuspended = isUserSuspended,
-                                                    onViewBookingDetails = { /* detail */ },
-                                                    onCancelBooking = { viewModel.cancelBooking(it) }
-                                                )
-                                            }
-
-                                            CustomerNavTab.PROFILE -> {
-                                                val ownedSalon = allSalons.find {
-                                                    currentCustomerUid.isNotBlank() &&
-                                                        (it.ownerId == currentCustomerUid || it.partnerId == currentCustomerUid) &&
-                                                        it.isRegistrationCompleted
                                                 }
-                                                ProfileScreen(
-                                                    userProfile = currentUserProfile,
-                                                    appPreferences = appPreferences,
-                                                    hasRegisteredSalon = hasRegisteredPartnerSalon,
-                                                    registeredSalonName = ownedSalon?.name,
-                                                    onOpenAuth = { viewModel.openAuth(it) },
-                                                    onSwitchToPartner = { viewModel.switchToPartnerRole() },
-                                                    onUpdatePersonalProfile = { name, phone, city ->
-                                                        viewModel.updatePersonalProfile(name, phone, city, isPhoneVerified = true)
-                                                    },
-                                                    onUpdateAccountIdentity = { name, email, phone, asPartner ->
-                                                        viewModel.signInWithRealIdentity(name, email, phone, asPartner)
-                                                    },
-                                                    onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
-                                                        viewModel.requestPhoneVerificationOtp(
-                                                            rawPhone = rawPhone,
-                                                            excludeUserId = currentCustomerUid,
-                                                            onOtpGenerated = onOtpGenerated,
-                                                            onError = onError
-                                                        )
-                                                    },
-                                                    onGenerateNewOtpCode = {
-                                                        viewModel.generateFourDigitOtp()
-                                                    },
-                                                    onThemeModeChange = { viewModel.setThemeMode(it) },
-                                                    onLanguageChange = { viewModel.setLanguage(it) },
-                                                    onNotificationPreferencesChange = { bookingAlerts, queueReminders, offersDiscounts ->
-                                                        viewModel.setNotificationPreferences(bookingAlerts, queueReminders, offersDiscounts)
-                                                    },
-                                                    onShowDemoSalonsChange = { showDemo ->
-                                                        viewModel.setShowDemoSalons(showDemo)
-                                                    },
-                                                    onClearCache = { viewModel.clearAppCache() },
-                                                    onOpenHelp = { showHelpDialog = true },
-                                                    onSubmitFeedback = { rating, category, msg, onDone ->
-                                                        viewModel.submitFeedback(rating, category, msg, onDone)
-                                                    },
-                                                    onLogout = { viewModel.logout() }
-                                                )
+                                            )
+                                        }
+                                    },
+                                    bottomBar = {
+                                        if (selectedSalon == null) {
+                                            AppBottomNav(
+                                                currentTab = currentNavTab,
+                                                pendingBookingsCount = pendingBookingsCount,
+                                                onTabSelected = { viewModel.setNavTab(it) }
+                                            )
+                                        }
+                                    }
+                                ) { innerPadding ->
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(innerPadding)
+                                            .background(MaterialTheme.colorScheme.background)
+                                    ) {
+                                        val activeSalon = selectedSalon?.let { sel ->
+                                            filteredSalons.find { it.id == sel.id } ?: sel
+                                        }
+                                        if (activeSalon != null) {
+                                            SalonDetailScreen(
+                                                salon = activeSalon,
+                                                currentUserId = currentCustomerUid,
+                                                hasActiveBooking = hasActivePendingBooking,
+                                                isSuspended = isUserSuspended,
+                                                onBack = { viewModel.selectSalon(null) },
+                                                onServiceSelected = { service ->
+                                                    viewModel.setServiceToBook(service)
+                                                },
+                                                onBookingBlocked = { _ ->
+                                                    viewModel.clearUserMessage()
+                                                },
+                                                onSwitchToPartnerMode = {
+                                                    viewModel.switchToPartnerRole()
+                                                }
+                                            )
+                                        } else {
+                                            when (currentNavTab) {
+                                                CustomerNavTab.SALONS -> {
+                                                    CustomerHomeScreen(
+                                                        salons = filteredSalons,
+                                                        currentUserId = currentCustomerUid,
+                                                        searchQuery = searchQuery,
+                                                        onSearchChanged = { viewModel.setSearchQuery(it) },
+                                                        selectedCategory = selectedCategory,
+                                                        onCategorySelected = { viewModel.selectCategory(it) },
+                                                        onSalonSelected = { viewModel.selectSalon(it) },
+                                                        userLocationTitle = userLocationTitle,
+                                                        userLocationSubtitle = userLocationSubtitle,
+                                                        userLatitude = userLatitude,
+                                                        userLongitude = userLongitude,
+                                                        isLiveGpsActive = isLiveGpsActive,
+                                                        onDetectGpsLocation = { lat, lng, showToast ->
+                                                            viewModel.onLiveGpsDetected(lat, lng, showToast)
+                                                        },
+                                                        onManualLocationSelected = { cityText, pickedLat, pickedLng ->
+                                                            viewModel.updateCustomerLocationManually(cityText, pickedLat, pickedLng)
+                                                        },
+                                                        pastBooking = latestCompletedBooking,
+                                                        onRebook = { booking ->
+                                                            val targetSalon = allSalons.find { it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true) }
+                                                            viewModel.selectSalon(targetSalon)
+                                                        },
+                                                        onProfileClick = {
+                                                            viewModel.setNavTab(CustomerNavTab.PROFILE)
+                                                        }
+                                                    )
+                                                }
+
+                                                CustomerNavTab.MY_BOOKINGS -> {
+                                                    CustomerBookingsContent(
+                                                        bookings = customerBookings,
+                                                        currentUserId = currentCustomerUid,
+                                                        salons = allSalons,
+                                                        cancellationCount = currentUserProfile?.effectiveCancellationStrikes ?: 0,
+                                                        isSuspended = isUserSuspended,
+                                                        onViewBookingDetails = { /* detail */ },
+                                                        onCancelBooking = { viewModel.cancelBooking(it) },
+                                                        onSwitchToSalonsTab = { viewModel.setNavTab(CustomerNavTab.SALONS) }
+                                                    )
+                                                }
+
+                                                CustomerNavTab.PROFILE -> {
+                                                    val ownedSalon = allSalons.find {
+                                                        currentCustomerUid.isNotBlank() &&
+                                                            (it.ownerId == currentCustomerUid || it.partnerId == currentCustomerUid) &&
+                                                            it.isRegistrationCompleted &&
+                                                            it.registrationFormSubmitted
+                                                    }
+                                                    ProfileScreen(
+                                                        userProfile = currentUserProfile,
+                                                        appPreferences = appPreferences,
+                                                        hasRegisteredSalon = hasRegisteredPartnerSalon,
+                                                        registeredSalonName = ownedSalon?.name,
+                                                        onOpenAuth = { viewModel.openAuth(it) },
+                                                        onBecomePartner = { viewModel.openPartnerRegistrationForm() },
+                                                        onSwitchToPartner = { viewModel.switchToPartnerRole() },
+                                                        onResetSalonRegistration = {
+                                                            viewModel.resetPartnerSalonRegistration(ownedSalon?.id)
+                                                        },
+                                                        onOpenQuickAccessSetup = {
+                                                            viewModel.openQuickAccessSetup()
+                                                        },
+                                                        onUpdatePersonalProfile = { name, phone, city ->
+                                                            viewModel.updatePersonalProfile(name, phone, city, isPhoneVerified = true)
+                                                        },
+                                                        onUpdateAccountIdentity = { name, email, phone, asPartner ->
+                                                            viewModel.signInWithRealIdentity(name, email, phone, asPartner)
+                                                        },
+                                                        onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
+                                                            viewModel.requestPhoneVerificationOtp(
+                                                                rawPhone = rawPhone,
+                                                                excludeUserId = currentCustomerUid,
+                                                                onOtpGenerated = onOtpGenerated,
+                                                                onError = onError
+                                                            )
+                                                        },
+                                                        onGenerateNewOtpCode = {
+                                                            viewModel.generateFourDigitOtp()
+                                                        },
+                                                        onThemeModeChange = { viewModel.setThemeMode(it) },
+                                                        onLanguageChange = { viewModel.setLanguage(it) },
+                                                        onNotificationPreferencesChange = { bookingAlerts, queueReminders, offersDiscounts ->
+                                                            viewModel.setNotificationPreferences(bookingAlerts, queueReminders, offersDiscounts)
+                                                        },
+                                                        onShowDemoSalonsChange = { showDemo ->
+                                                            viewModel.setShowDemoSalons(showDemo)
+                                                        },
+                                                        onClearCache = { viewModel.clearAppCache() },
+                                                        onSubmitFeedback = { rating, category, msg, onDone ->
+                                                            viewModel.submitFeedback(rating, category, msg, onDone)
+                                                        },
+                                                        onLogout = { viewModel.logout() }
+                                                    )
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    UserRole.PARTNER -> {
-                        if (!hasRegisteredPartnerSalon) {
-                            // Strict Guard: Never allow access to PartnerDashboardScreen unless a salon with isRegistrationCompleted == true exists
-                            Scaffold(
-                                modifier = Modifier.fillMaxSize(),
-                                containerColor = DarkBackground,
-                                snackbarHost = { SnackbarHost(snackbarHostState) }
-                            ) { onboardingPadding ->
-                                PartnerOnboardingScreen(
-                                    userProfile = currentUserProfile,
-                                    isLoading = isAuthLoading,
-                                    onCancel = { viewModel.switchToCustomerRole() },
-                                    onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
-                                        viewModel.requestPhoneVerificationOtp(
-                                            rawPhone = rawPhone,
-                                            excludeUserId = currentUserProfile?.id,
-                                            onOtpGenerated = onOtpGenerated,
-                                            onError = onError
-                                        )
-                                    },
-                                    onGenerateNewOtpCode = {
-                                        viewModel.generateFourDigitOtp()
-                                    },
-                                    onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
-                                        viewModel.registerPartnerSalon(
-                                            salonName = salonName,
-                                            ownerName = ownerName,
-                                            businessPhone = businessPhone,
-                                            shopAddress = shopAddress,
-                                            cityArea = cityArea,
-                                            pincode = pincode,
-                                            landmark = landmark,
-                                            shopCategory = shopCategory,
-                                            availableChairs = availableChairs,
-                                            openingTime = openingTime,
-                                            closingTime = closingTime,
-                                            initialServices = initialServices,
-                                            latitude = latitude,
-                                            longitude = longitude,
-                                            isPhoneVerified = true
-                                        )
-                                    },
-                                    modifier = Modifier.padding(onboardingPadding)
-                                )
-                            }
-                        } else {
-                            // Partner Mode App (Accessible ONLY after completing Partner Salon Registration)
-                            Scaffold(
-                                modifier = Modifier.fillMaxSize(),
-                                containerColor = DarkBackground,
-                                snackbarHost = { SnackbarHost(snackbarHostState) }
-                            ) { innerPadding ->
-                                PartnerDashboardScreen(
-                                    salons = allSalons,
-                                    partnerProfile = currentUserProfile,
-                                    selectedSalonId = partnerSelectedSalonId,
-                                    onSelectSalonId = { viewModel.setPartnerSelectedSalonId(it) },
-                                    allBookings = allBookings,
-                                    activeFilter = partnerBookingFilter,
-                                    onFilterChange = { viewModel.setPartnerBookingFilter(it) },
-                                    onOpenPinVerification = { viewModel.openPinVerificationDialog(it) },
-                                    onAcceptBooking = { viewModel.acceptBooking(it) },
-                                    onRejectBooking = { viewModel.rejectBooking(it) },
-                                    onToggleSalonOpen = { viewModel.toggleSalonOpenStatus(it) },
-                                    onSetSalonOpen = { id, isOpen -> viewModel.setSalonOpenStatus(id, isOpen) },
-                                    onSetSalonBusyStatus = { id, status -> viewModel.setSalonBusyStatus(id, status) },
-                                    onUpdateChairAvailability = { id, currentStatus, chairs, waitMins ->
-                                        viewModel.updateSalonChairAvailability(id, currentStatus, chairs, waitMins)
-                                    },
-                                    onSaveMenuPrices = { id, h, s, f, m -> viewModel.saveSalonMenuPrices(id, h, s, f, m) },
-                                    onAddService = { id, name, category, price, duration, description ->
-                                        viewModel.addSalonService(id, name, category, price, duration, description)
-                                    },
-                                    onEditService = { id, updatedService ->
-                                        viewModel.editSalonService(id, updatedService)
-                                    },
-                                    onDeleteService = { id, serviceId, serviceName ->
-                                        viewModel.deleteSalonService(id, serviceId, serviceName)
-                                    },
-                                    onSaveShopLocation = { id, address, landmark, lat, lng ->
-                                        viewModel.saveSalonLocation(id, address, landmark, lat, lng)
-                                    },
-                                    onSaveFullProfile = { id, name, phone, tagline, address, landmark, lat, lng, availableChairs ->
-                                        viewModel.saveSalonFullProfile(id, name, phone, tagline, address, landmark, lat, lng, availableChairs)
-                                    },
-                                    onSaveShopPhoto = { id, photoDataUrl ->
-                                        viewModel.saveSalonPhoto(id, photoDataUrl)
-                                    },
-                                    onSubmitFeedback = { rating, category, msg, onDone ->
-                                        viewModel.submitFeedback(rating, category, msg, onDone)
-                                    },
-                                    onResetSalonRegistration = { salonId ->
-                                        viewModel.resetPartnerSalonRegistration(salonId)
-                                    },
-                                    onExitPartnerMode = { viewModel.switchToCustomerRole() },
-                                    modifier = Modifier.padding(innerPadding)
-                                )
+                        UserRole.PARTNER -> {
+                            if (!hasRegisteredPartnerSalon) {
+                                // Strict Guard: Never allow access to PartnerDashboardScreen unless a salon with isRegistrationCompleted == true exists
+                                Scaffold(
+                                    modifier = Modifier.fillMaxSize(),
+                                    containerColor = DarkBackground,
+                                    snackbarHost = { SnackbarHost(snackbarHostState) }
+                                ) { onboardingPadding ->
+                                    PartnerOnboardingScreen(
+                                        userProfile = currentUserProfile,
+                                        isLoading = isAuthLoading,
+                                        onCancel = { viewModel.switchToCustomerRole() },
+                                        onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
+                                            viewModel.requestPhoneVerificationOtp(
+                                                rawPhone = rawPhone,
+                                                excludeUserId = currentUserProfile?.id,
+                                                onOtpGenerated = onOtpGenerated,
+                                                onError = onError
+                                            )
+                                        },
+                                        onGenerateNewOtpCode = {
+                                            viewModel.generateFourDigitOtp()
+                                        },
+                                        onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
+                                            viewModel.registerPartnerSalon(
+                                                salonName = salonName,
+                                                ownerName = ownerName,
+                                                businessPhone = businessPhone,
+                                                shopAddress = shopAddress,
+                                                cityArea = cityArea,
+                                                pincode = pincode,
+                                                landmark = landmark,
+                                                shopCategory = shopCategory,
+                                                availableChairs = availableChairs,
+                                                openingTime = openingTime,
+                                                closingTime = closingTime,
+                                                initialServices = initialServices,
+                                                latitude = latitude,
+                                                longitude = longitude,
+                                                isPhoneVerified = true
+                                            )
+                                        },
+                                        modifier = Modifier.padding(onboardingPadding)
+                                    )
+                                }
+                            } else {
+                                // Partner Mode App (Accessible ONLY after completing Partner Salon Registration)
+                                Scaffold(
+                                    modifier = Modifier.fillMaxSize(),
+                                    containerColor = DarkBackground,
+                                    snackbarHost = { SnackbarHost(snackbarHostState) }
+                                ) { innerPadding ->
+                                    PartnerDashboardScreen(
+                                        salons = allSalons,
+                                        partnerProfile = currentUserProfile,
+                                        selectedSalonId = partnerSelectedSalonId,
+                                        onSelectSalonId = { viewModel.setPartnerSelectedSalonId(it) },
+                                        allBookings = allBookings,
+                                        activeFilter = partnerBookingFilter,
+                                        onFilterChange = { viewModel.setPartnerBookingFilter(it) },
+                                        onOpenPinVerification = { viewModel.openPinVerificationDialog(it) },
+                                        onAcceptBooking = { viewModel.acceptBooking(it) },
+                                        onRejectBooking = { viewModel.rejectBooking(it) },
+                                        onToggleSalonOpen = { viewModel.toggleSalonOpenStatus(it) },
+                                        onSetSalonOpen = { id, isOpen -> viewModel.setSalonOpenStatus(id, isOpen) },
+                                        onSetSalonBusyStatus = { id, status -> viewModel.setSalonBusyStatus(id, status) },
+                                        onUpdateChairAvailability = { id, currentStatus, chairs, waitMins ->
+                                            viewModel.updateSalonChairAvailability(id, currentStatus, chairs, waitMins)
+                                        },
+                                        onSaveMenuPrices = { id, h, s, f, m -> viewModel.saveSalonMenuPrices(id, h, s, f, m) },
+                                        onAddService = { id, name, category, price, duration, description ->
+                                            viewModel.addSalonService(id, name, category, price, duration, description)
+                                        },
+                                        onEditService = { id, updatedService ->
+                                            viewModel.editSalonService(id, updatedService)
+                                        },
+                                        onDeleteService = { id, serviceId, serviceName ->
+                                            viewModel.deleteSalonService(id, serviceId, serviceName)
+                                        },
+                                        onSaveShopLocation = { id, address, landmark, lat, lng ->
+                                            viewModel.saveSalonLocation(id, address, landmark, lat, lng)
+                                        },
+                                        onSaveFullProfile = { id, name, phone, tagline, address, landmark, lat, lng, availableChairs ->
+                                            viewModel.saveSalonFullProfile(id, name, phone, tagline, address, landmark, lat, lng, availableChairs)
+                                        },
+                                        onSaveShopPhoto = { id, photoDataUrl ->
+                                            viewModel.saveSalonPhoto(id, photoDataUrl)
+                                        },
+                                        onSubmitFeedback = { rating, category, msg, onDone ->
+                                            viewModel.submitFeedback(rating, category, msg, onDone)
+                                        },
+                                        onResetSalonRegistration = { salonId ->
+                                            viewModel.resetPartnerSalonRegistration(salonId)
+                                        },
+                                        onExitPartnerMode = { viewModel.switchToCustomerRole() },
+                                        modifier = Modifier.padding(innerPadding)
+                                    )
+                                }
                             }
                         }
+                    }
+
+                    // Post-Login / Post-Signup Quick Access Setup Dialog (4-Digit MPIN & Fingerprint/Biometric)
+                    if (showQuickAccessSetup && currentUserProfile != null) {
+                        QuickAccessSetupDialog(
+                            userName = currentUserProfile?.name.orEmpty(),
+                            initialMpin = currentUserProfile?.quickAccessMpin.orEmpty(),
+                            initialBiometricEnabled = currentUserProfile?.biometricEnabled ?: true,
+                            onSaveQuickAccess = { mpin, biometricEnabled ->
+                                viewModel.saveQuickAccessSettings(mpin, biometricEnabled)
+                            },
+                            onSkipForNow = {
+                                viewModel.dismissQuickAccessSetup()
+                            }
+                        )
                     }
                 }
             }
@@ -631,7 +668,7 @@ fun TrimTimeApp(
         )
     }
 
-    // Auth Dialog for in-app mode switching (e.g. discreet Partner Portal Login from Profile)
+    // Auth Dialog for in-app mode switching
     AuthDialog(
         authMode = authMode,
         isLoading = isAuthLoading,
@@ -641,12 +678,5 @@ fun TrimTimeApp(
         },
         onDismiss = { viewModel.dismissAuth() }
     )
-
-    // How to Test Guide Dialog
-    if (showHelpDialog) {
-        TestGuideDialog(
-            onDismiss = { showHelpDialog = false }
-        )
-    }
 }
 

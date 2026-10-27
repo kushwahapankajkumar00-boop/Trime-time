@@ -51,6 +51,8 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val authError: StateFlow<String?> = repository.authError
     val showSha1FallbackDialog: StateFlow<Boolean> = repository.showSha1FallbackDialog
     val showPartnerOnboarding: StateFlow<Boolean> = repository.showPartnerOnboarding
+    val isSessionUnlocked: StateFlow<Boolean> = repository.isSessionUnlocked
+    val showQuickAccessSetup: StateFlow<Boolean> = repository.showQuickAccessSetup
     val appPreferences: StateFlow<AppPreferences> = repository.appPreferences
 
     // Live Customer GPS Coordinates & Reverse-Geocoded Location Display
@@ -64,7 +66,8 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val allSalons = repository.salons
     val allBookings = repository.bookings
 
-    // Whether the currently logged-in user already owns a registered salon in Firestore (strictly isRegistrationCompleted == true)
+    // Whether the currently logged-in user already owns a registered salon in Firestore
+    // (strictly currentUser.uid == salon.ownerId && isRegistrationCompleted && registrationFormSubmitted)
     val hasRegisteredPartnerSalon: StateFlow<Boolean> = combine(
         allSalons,
         currentUserProfile
@@ -74,7 +77,10 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             false
         } else {
             salons.any {
-                (it.ownerId == uid || it.partnerId == uid) && it.isRegistrationCompleted
+                !repository.isDemoSalon(it.id) &&
+                    (it.ownerId == uid || it.partnerId == uid) &&
+                    it.isRegistrationCompleted &&
+                    it.registrationFormSubmitted
             }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
@@ -91,6 +97,26 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             bookings.filter { it.customerId == uid }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Most recently COMPLETED booking for the logged-in customer (for "Quick Re-Book" banner)
+    val latestCompletedBooking: StateFlow<Booking?> = combine(
+        repository.latestCompletedBooking,
+        customerBookings,
+        currentUserProfile
+    ) { repoLatestCompleted, bookings, profile ->
+        val uid = profile?.id?.trim().orEmpty()
+        if (uid.isBlank()) {
+            null
+        } else {
+            val fromBookings = bookings
+                .filter { it.customerId == uid && it.status.equals("COMPLETED", ignoreCase = true) }
+                .maxByOrNull { it.completedAt ?: it.createdAt }
+            val candidate = fromBookings ?: repoLatestCompleted?.takeIf {
+                it.customerId == uid && it.status.equals("COMPLETED", ignoreCase = true)
+            }
+            candidate
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     // Customer Navigation (Bottom Bar)
     private val _currentNavTab = MutableStateFlow(CustomerNavTab.SALONS)
@@ -267,18 +293,41 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                     uid = matchedUid,
                     newLoginPin = newPin,
                     onSuccess = { profile ->
-                        _userMessage.value = "✓ 4-Digit Login PIN updated! Welcome back, ${profile.name}."
-                        if (profile.role.equals("partner", ignoreCase = true)) {
-                            profile.salonId?.let { _partnerSelectedSalonId.value = it }
-                        } else {
-                            _currentNavTab.value = CustomerNavTab.SALONS
-                        }
+                        _userMessage.value = "✓ Password updated! Welcome back, ${profile.name}."
+                        _currentNavTab.value = CustomerNavTab.SALONS
                         onSuccess()
                     },
                     onError = onError
                 )
             },
             onError = onError
+        )
+    }
+
+    fun unlockSessionWithQuickAccess() {
+        repository.unlockSessionWithQuickAccess()
+    }
+
+    fun dismissQuickAccessSetup() {
+        repository.dismissQuickAccessSetup()
+    }
+
+    fun openQuickAccessSetup() {
+        repository.openQuickAccessSetup()
+    }
+
+    fun saveQuickAccessSettings(
+        mpin: String,
+        biometricEnabled: Boolean,
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.saveQuickAccessSettings(
+            mpin = mpin,
+            biometricEnabled = biometricEnabled,
+            onSuccess = {
+                _userMessage.value = "✓ Quick Access (4-Digit MPIN & Biometrics) enabled!"
+                onSuccess()
+            }
         )
     }
 
@@ -376,7 +425,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Direct Firestore Account Sign-In / Registration with 2-Step Phone OTP & 4-Digit Login PIN:
+     * Direct Account Sign-In / Registration with 2-Step Phone OTP & Password:
      */
     fun signInWithRealIdentity(
         name: String,
@@ -395,12 +444,8 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             loginPin = loginPin,
             isPhoneVerified = isPhoneVerified,
             onSuccess = {
-                _userMessage.value = "✓ Phone verified & account created for $name"
-                if (asPartner) {
-                    currentUserProfile.value?.salonId?.let { _partnerSelectedSalonId.value = it }
-                } else {
-                    _currentNavTab.value = CustomerNavTab.SALONS
-                }
+                _userMessage.value = "✓ Mobile verified & account created for $name"
+                _currentNavTab.value = CustomerNavTab.SALONS
                 onSuccess()
             },
             onError = { err ->
@@ -410,7 +455,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Login for Existing Users (Mobile Number OR Email Address + Mandatory 4-Digit Secret Login PIN):
+     * Login for Existing Users (Mobile Number OR Email Address + Password):
      */
     fun loginExistingUser(
         identifier: String,
@@ -423,11 +468,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             loginPin = loginPin,
             onSuccess = { profile ->
                 _userMessage.value = "Welcome back, ${profile.name}!"
-                if (profile.role.equals("partner", ignoreCase = true)) {
-                    profile.salonId?.let { _partnerSelectedSalonId.value = it }
-                } else {
-                    _currentNavTab.value = CustomerNavTab.SALONS
-                }
+                _currentNavTab.value = CustomerNavTab.SALONS
                 onSuccess()
             },
             onAccountNotFound = { prefillEmail, prefillPhone ->
@@ -440,14 +481,10 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
-    /**
-     * Developer Test Login:
-     * Directly runs Firestore logic (check/create 'users' document) with dummy UID.
-     */
     fun developerTestLogin(onSuccess: () -> Unit = {}) {
         repository.developerTestLogin(
             onSuccess = {
-                _userMessage.value = "Logged in with Developer Test Account"
+                _userMessage.value = "Welcome to TrimTime!"
                 _currentNavTab.value = CustomerNavTab.SALONS
                 onSuccess()
             },
@@ -469,6 +506,13 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         repository.dismissPartnerOnboarding()
     }
 
+    fun openPartnerRegistrationForm() {
+        _authMode.value = AuthMode.NONE
+        _selectedSalon.value = null
+        _serviceToBook.value = null
+        repository.openPartnerRegistrationForm()
+    }
+
     fun switchToPartnerRole() {
         _authMode.value = AuthMode.NONE
         _selectedSalon.value = null
@@ -478,7 +522,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 _partnerSelectedSalonId.value = salonId
             },
             onRequireRegistration = {
-                _userMessage.value = "Please complete the Salon Partner Registration Form to unlock Partner Dashboard."
+                _userMessage.value = "Please complete the Salon Partner Registration Form to unlock Partner Mode."
             }
         )
     }
@@ -488,7 +532,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         repository.resetOrDeletePartnerSalon(
             salonId = salonId,
             onSuccess = {
-                _userMessage.value = "Salon registration reset & deleted from Firestore! Fill the registration form to register a new salon."
+                _userMessage.value = "Salon registration removed. Complete the registration form to register a new salon."
             },
             onError = { err ->
                 _userMessage.value = err
@@ -531,7 +575,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             longitude = longitude,
             onSuccess = { salonId ->
                 _partnerSelectedSalonId.value = salonId
-                _userMessage.value = "🎉 '$salonName' registered in Firestore! Welcome to Partner Mode."
+                _userMessage.value = "🎉 '$salonName' registered! Welcome to Partner Mode."
                 onSuccess()
             },
             onError = { err ->
@@ -576,12 +620,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setShowDemoSalons(show: Boolean) {
-        repository.setShowDemoSalons(show)
-        _userMessage.value = if (show) {
-            "Demo salons enabled"
-        } else {
-            "Demo salons hidden (showing only real registered salons)"
-        }
+        repository.setShowDemoSalons(false)
     }
 
     fun updatePersonalProfile(
@@ -608,7 +647,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                         )
                     }
                 }
-                _userMessage.value = "Personal profile & verified phone updated in Firestore!"
+                _userMessage.value = "✓ Personal profile updated!"
                 onSuccess()
             },
             onError = { err ->
@@ -881,7 +920,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             availableChairs = availableChairs,
             waitingTimeMinutes = waitingTimeMinutes
         )
-        _userMessage.value = "Live Chairs ($availableChairs) & Wait Time (${waitingTimeMinutes}m) synced to Firestore!"
+        _userMessage.value = "Live Chairs ($availableChairs) & Wait Time (${waitingTimeMinutes}m) updated!"
     }
 
     fun addSalonService(
@@ -900,7 +939,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             durationMinutes = durationMinutes,
             description = description,
             onSuccess = {
-                _userMessage.value = "Added '${SecurityValidator.sanitizeName(name)}' (₹$price • ${durationMinutes}m) to Firestore!"
+                _userMessage.value = "Added '${SecurityValidator.sanitizeName(name)}' (₹$price • ${durationMinutes}m) to menu!"
             },
             onError = { err ->
                 _userMessage.value = err
@@ -916,7 +955,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             salonId = salonId,
             updatedService = updatedService,
             onSuccess = {
-                _userMessage.value = "Updated '${SecurityValidator.sanitizeName(updatedService.name)}' (₹${updatedService.price} • ${updatedService.durationMinutes}m) in Firestore!"
+                _userMessage.value = "Updated '${SecurityValidator.sanitizeName(updatedService.name)}' (₹${updatedService.price} • ${updatedService.durationMinutes}m)!"
             },
             onError = { err ->
                 _userMessage.value = err
@@ -933,7 +972,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             salonId = salonId,
             serviceId = serviceId,
             onSuccess = {
-                _userMessage.value = "Removed '$serviceName' from Firestore!"
+                _userMessage.value = "Removed '$serviceName' from menu!"
             }
         )
     }
@@ -1007,7 +1046,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             salonId = salonId,
             updatedServices = updatedServices,
             onSuccess = {
-                _userMessage.value = "Menu prices saved to profile & Firestore!"
+                _userMessage.value = "Service prices saved!"
                 onSuccess()
             },
             onError = { err ->
@@ -1039,7 +1078,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             longitude = longitude,
             availableChairs = availableChairs,
             onSuccess = {
-                _userMessage.value = "Shop Details & GPS saved to Cloud Firestore!"
+                _userMessage.value = "✓ Shop details & location saved!"
                 onSuccess()
             },
             onError = { err ->
@@ -1057,7 +1096,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             salonId = salonId,
             photoDataUrl = photoDataUrl,
             onSuccess = {
-                _userMessage.value = "Shop photo uploaded & synced to Firestore!"
+                _userMessage.value = "✓ Shop cover photo updated!"
                 onSuccess()
             },
             onError = { err ->
@@ -1081,7 +1120,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             latitude = latitude,
             longitude = longitude,
             onSuccess = {
-                _userMessage.value = "Shop location & GPS saved to Firestore!"
+                _userMessage.value = "✓ Shop location saved!"
                 onSuccess()
             },
             onError = { err ->
@@ -1101,7 +1140,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             category = category,
             message = message,
             onSuccess = {
-                val msg = "Thank you! Your $rating-star feedback ($category) has been saved to Firestore."
+                val msg = "Thank you! Your $rating-star feedback ($category) has been submitted."
                 _userMessage.value = msg
                 onDone(true, msg)
             },

@@ -54,8 +54,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -63,6 +65,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.ui.components.TRIMTIME_SUPPORT_PHONE
@@ -333,6 +336,7 @@ fun SalonDetailScreen(
                 ServiceCatalogItem(
                     service = service,
                     isBusy = salon.isBusy,
+                    isOwnSalon = isOwnSalon,
                     isBookDisabled = isBookDisabled,
                     disabledReason = disabledReason,
                     onBookClick = {
@@ -351,9 +355,16 @@ fun SalonDetailScreen(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SalonHeaderBanner(salon: Salon) {
-    val salonCoverBitmap = remember(salon.resolvedPhotoData) {
-        SalonImageUtils.decodeBase64ToImageBitmap(salon.resolvedPhotoData)
+    val rawPhotoData = salon.resolvedPhotoData.trim()
+    val salonCoverBitmap = remember(rawPhotoData) {
+        SalonImageUtils.decodeBase64ToImageBitmap(rawPhotoData)
     }
+    val hasCustomPhoto = salonCoverBitmap != null || rawPhotoData.isNotBlank()
+    val highContrastShadow = Shadow(
+        color = Color.Black,
+        offset = Offset(0f, 2f),
+        blurRadius = 8f
+    )
 
     Card(
         modifier = Modifier
@@ -366,7 +377,7 @@ fun SalonHeaderBanner(salon: Salon) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 110.dp)
+                    .heightIn(min = 124.dp)
                     .background(
                         Brush.linearGradient(
                             listOf(Color(0xFF1E1B4B), Color(0xFF451A03), Color(0xFF0F172A))
@@ -380,15 +391,26 @@ fun SalonHeaderBanner(salon: Salon) {
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.matchParentSize()
                     )
-                    // Strong dark vertical gradient scrim (0.65f to 0.85f) so text & badges always have crisp contrast
+                } else if (rawPhotoData.isNotBlank()) {
+                    AsyncImage(
+                        model = rawPhotoData,
+                        contentDescription = "${salon.name} Cover Photo",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.matchParentSize()
+                    )
+                }
+
+                if (hasCustomPhoto) {
+                    // Strong multi-stop dark vertical gradient scrim so text & badges always have crisp contrast
                     Box(
                         modifier = Modifier
                             .matchParentSize()
                             .background(
                                 Brush.verticalGradient(
-                                    listOf(
-                                        Color.Black.copy(alpha = 0.65f),
-                                        Color.Black.copy(alpha = 0.85f)
+                                    colorStops = arrayOf(
+                                        0.0f to Color.Black.copy(alpha = 0.55f),
+                                        0.45f to Color(0xCC090D16),
+                                        1.0f to Color(0xF5090D16)
                                     )
                                 )
                             )
@@ -467,29 +489,50 @@ fun SalonHeaderBanner(salon: Salon) {
                                 }
                             }
 
-                            if (salon.isPhoneVerified) {
-                                com.example.ui.components.VerifiedNumberBadge(
-                                    text = "✓ Verified Number"
-                                )
-                            }
                         }
 
                         Spacer(modifier = Modifier.height(6.dp))
 
-                        Text(
-                            text = salon.name,
-                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
-                            color = Color.White,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Box(
+                            modifier = Modifier.then(
+                                if (hasCustomPhoto) {
+                                    Modifier
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xB3090D16))
+                                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                                } else {
+                                    Modifier
+                                }
+                            )
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = salon.name,
+                                    style = MaterialTheme.typography.titleLarge.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        shadow = highContrastShadow
+                                    ),
+                                    color = Color.White,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
+                                )
+                                if (salon.isPhoneVerified) {
+                                    com.example.ui.components.VerifiedBlueTickIcon(size = 18.dp)
+                                }
+                            }
+                        }
                     }
 
                     Box(
                         modifier = Modifier
                             .size(54.dp)
                             .clip(CircleShape)
-                            .background(Color(0x33F59E0B)),
+                            .background(Color(0xD90F172A))
+                            .border(1.dp, AmberPrimary.copy(alpha = 0.6f), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -671,6 +714,7 @@ fun PayAtSalonBanner() {
 fun ServiceCatalogItem(
     service: SalonService,
     isBusy: Boolean = false,
+    isOwnSalon: Boolean = false,
     isBookDisabled: Boolean = false,
     disabledReason: String = "",
     onBookClick: () -> Unit
@@ -703,7 +747,9 @@ fun ServiceCatalogItem(
                             text = "★ MOST BOOKED",
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Bold,
-                            color = AmberPrimary
+                            color = AmberPrimary,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
                     Spacer(modifier = Modifier.height(4.dp))
@@ -742,55 +788,65 @@ fun ServiceCatalogItem(
                         Text(
                             text = "${service.durationMinutes} mins",
                             fontSize = 11.sp,
-                            color = Color(0xFFCBD5E1)
+                            color = Color(0xFFCBD5E1),
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
 
                     Text(
                         text = "•",
                         fontSize = 12.sp,
-                        color = Color(0xFF64748B)
+                        color = Color(0xFF64748B),
+                        maxLines = 1,
+                        softWrap = false
                     )
 
                     Text(
                         text = "₹${service.price}",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = AmberPrimary
+                        color = AmberPrimary,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            if (!isOwnSalon) {
+                Spacer(modifier = Modifier.width(12.dp))
 
-            // Booking Button: changes to "Join Waitlist" (Orange) if status is BUSY
-            Button(
-                onClick = onBookClick,
-                enabled = !isBookDisabled,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
-                    disabledContainerColor = Color(0xFF334155),
-                    contentColor = if (isBusy) Color.White else Color(0xFF1E1402),
-                    disabledContentColor = Color(0xFF94A3B8)
-                ),
-                shape = RoundedCornerShape(10.dp),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                modifier = Modifier.testTag("book_service_btn_${service.id}")
-            ) {
-                Text(
-                    text = when {
-                        isBookDisabled -> "Disabled"
-                        isBusy -> "Join Waitlist"
-                        else -> "Pick Slot"
-                    },
-                    color = when {
-                        isBookDisabled -> Color(0xFF94A3B8)
-                        isBusy -> Color.White
-                        else -> Color(0xFF1E1402)
-                    },
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp
-                )
+                // Booking Button: changes to "Join Waitlist" (Orange) if status is BUSY
+                Button(
+                    onClick = onBookClick,
+                    enabled = !isBookDisabled,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
+                        disabledContainerColor = Color(0xFF334155),
+                        contentColor = if (isBusy) Color.White else Color(0xFF1E1402),
+                        disabledContentColor = Color(0xFF94A3B8)
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier.testTag("book_service_btn_${service.id}")
+                ) {
+                    Text(
+                        text = when {
+                            isBookDisabled -> "Disabled"
+                            isBusy -> "Join Waitlist"
+                            else -> "Pick Slot"
+                        },
+                        color = when {
+                            isBookDisabled -> Color(0xFF94A3B8)
+                            isBusy -> Color.White
+                            else -> Color(0xFF1E1402)
+                        },
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
             }
         }
     }

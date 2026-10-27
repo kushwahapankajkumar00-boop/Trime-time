@@ -93,6 +93,7 @@ import org.osmdroid.views.CustomZoomButtonsController
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
+import java.io.File
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.pow
@@ -101,6 +102,28 @@ import kotlin.math.sqrt
 
 const val DEFAULT_PATNA_LAT = 25.5941
 const val DEFAULT_PATNA_LNG = 85.1376
+const val DEFAULT_CUSTOMER_MAP_ZOOM = 15.5
+
+/**
+ * Initializes OSMDroid Configuration BEFORE any MapView is created or rendered:
+ * - Sets `Configuration.getInstance().userAgentValue`
+ * - Configures `osmdroidBasePath` and `osmdroidTileCache` inside `context.cacheDir` so map tiles
+ *   always download and render reliably on Android 10–16 without external storage permissions.
+ */
+fun initOsmDroidConfig(context: Context) {
+    try {
+        val appCtx = context.applicationContext
+        val osmConfig = Configuration.getInstance()
+        val baseDir = File(appCtx.cacheDir, "osmdroid").apply { mkdirs() }
+        val tileCacheDir = File( baseDir, "tiles").apply { mkdirs() }
+        osmConfig.osmdroidBasePath = baseDir
+        osmConfig.osmdroidTileCache = tileCacheDir
+        osmConfig.load(appCtx, appCtx.getSharedPreferences("osmdroid_prefs", Context.MODE_PRIVATE))
+        osmConfig.userAgentValue = appCtx.packageName.ifBlank { "com.trimtime.app" }
+    } catch (_: Exception) {
+        Configuration.getInstance().userAgentValue = context.packageName.ifBlank { "com.trimtime.app" }
+    }
+}
 
 /**
  * Launches a 100% free turn-by-turn navigation intent using standard `geo:` URI
@@ -128,7 +151,7 @@ fun launchGeoDirections(
         // Fallback to browser OpenStreetMap directions if no map app is installed
         try {
             val browserUri = Uri.parse(
-                "https://www.openstreetmap.org/?mlat=$validLat&mlon=$validLng#map=17/$validLat/$validLng"
+                "https://www.openstreetmap.org/?mlat=$validLat&mlon=$validLng#map=16/$validLat/$validLng"
             )
             context.startActivity(
                 Intent(Intent.ACTION_VIEW, browserUri).apply {
@@ -161,8 +184,8 @@ fun hasLocationPermission(context: Context): Boolean {
 }
 
 /**
- * Fetches the device's real GPS / Network location using Android's native LocationManager
- * (zero billing, no Play Services key needed). Calls `onLocationResult(lat, lng, isLiveGps)`.
+ * Fetches the device's real GPS / Network location using both Google Play Services
+ * `FusedLocationProviderClient` and Android's native `LocationManager`.
  * Immediately returns the best lastKnownLocation if available AND requests a fresh live GPS update.
  */
 @SuppressLint("MissingPermission")
@@ -177,10 +200,36 @@ fun fetchDeviceGpsLocation(
         return
     }
 
+    var emittedLiveFix = false
+
+    // 1. Try FusedLocationProviderClient for fast & accurate real GPS
+    try {
+        val fusedClient = com.google.android.gms.location.LocationServices.getFusedLocationProviderClient(context)
+        fusedClient.lastLocation.addOnSuccessListener { loc ->
+            if (loc != null && loc.latitude != 0.0 && loc.longitude != 0.0) {
+                emittedLiveFix = true
+                onLocationResult(loc.latitude, loc.longitude, true)
+            }
+        }
+        val cancellationTokenSource = com.google.android.gms.tasks.CancellationTokenSource()
+        fusedClient.getCurrentLocation(
+            com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY,
+            cancellationTokenSource.token
+        ).addOnSuccessListener { freshLoc ->
+            if (freshLoc != null && freshLoc.latitude != 0.0 && freshLoc.longitude != 0.0) {
+                emittedLiveFix = true
+                onLocationResult(freshLoc.latitude, freshLoc.longitude, true)
+            }
+        }
+    } catch (_: Exception) {
+        // Fallback to LocationManager below
+    }
+
+    // 2. Also query native LocationManager for immediate cached & active GPS/Network fix
     try {
         val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         if (locationManager == null) {
-            onLocationResult(fallbackLat, fallbackLng, false)
+            if (!emittedLiveFix) onLocationResult(fallbackLat, fallbackLng, false)
             return
         }
 
@@ -207,6 +256,7 @@ fun fetchDeviceGpsLocation(
         }
 
         val emittedCachedFix = if (bestLocation != null) {
+            emittedLiveFix = true
             onLocationResult(bestLocation.latitude, bestLocation.longitude, true)
             true
         } else {
@@ -222,8 +272,9 @@ fun fetchDeviceGpsLocation(
                 override fun onLocationChanged(location: Location) {
                     runCatching { locationManager.removeUpdates(this) }
                     if (location.latitude != 0.0 && location.longitude != 0.0) {
+                        emittedLiveFix = true
                         onLocationResult(location.latitude, location.longitude, true)
-                    } else if (!emittedCachedFix) {
+                    } else if (!emittedCachedFix && !emittedLiveFix) {
                         onLocationResult(fallbackLat, fallbackLng, false)
                     }
                 }
@@ -238,11 +289,13 @@ fun fetchDeviceGpsLocation(
                     locationManager.requestSingleUpdate(prov, listener, Looper.getMainLooper())
                 }
             }
-        } else if (!emittedCachedFix) {
+        } else if (!emittedCachedFix && !emittedLiveFix) {
             onLocationResult(fallbackLat, fallbackLng, false)
         }
     } catch (_: Exception) {
-        onLocationResult(fallbackLat, fallbackLng, false)
+        if (!emittedLiveFix) {
+            onLocationResult(fallbackLat, fallbackLng, false)
+        }
     }
 }
 
@@ -555,9 +608,9 @@ fun CustomerSalonsOsmMapSection(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Configure OSMDroid User-Agent BEFORE creating MapView
+    // Configure OSMDroid User-Agent and internal tile cache BEFORE creating MapView
     remember(context) {
-        Configuration.getInstance().userAgentValue = context.packageName
+        initOsmDroidConfig(context)
         true
     }
 
@@ -588,8 +641,9 @@ fun CustomerSalonsOsmMapSection(
                 if (isLive) {
                     onGpsLocationDetected(lat, lng)
                 }
+                mapViewRef?.controller?.setZoom(DEFAULT_CUSTOMER_MAP_ZOOM)
                 mapViewRef?.controller?.animateTo(GeoPoint(lat, lng))
-                mapViewRef?.controller?.setZoom(15.0)
+                mapViewRef?.invalidate()
             }
         } else {
             Toast.makeText(
@@ -597,11 +651,14 @@ fun CustomerSalonsOsmMapSection(
                 "GPS permission denied. Tap top location bar to set your location manually.",
                 Toast.LENGTH_SHORT
             ).show()
+            mapViewRef?.controller?.setZoom(DEFAULT_CUSTOMER_MAP_ZOOM)
             mapViewRef?.controller?.animateTo(GeoPoint(userLat, userLng))
+            mapViewRef?.invalidate()
         }
     }
 
     LaunchedEffect(Unit) {
+        initOsmDroidConfig(context)
         if (hasLocationPermission(context)) {
             fetchDeviceGpsLocation(
                 context = context,
@@ -614,7 +671,9 @@ fun CustomerSalonsOsmMapSection(
                 if (isLive) {
                     onGpsLocationDetected(lat, lng)
                 }
+                mapViewRef?.controller?.setZoom(DEFAULT_CUSTOMER_MAP_ZOOM)
                 mapViewRef?.controller?.setCenter(GeoPoint(lat, lng))
+                mapViewRef?.invalidate()
             }
         } else {
             locationPermissionLauncher.launch(
@@ -630,7 +689,9 @@ fun CustomerSalonsOsmMapSection(
         if (userLatitude != 0.0 && userLongitude != 0.0) {
             userLat = userLatitude
             userLng = userLongitude
+            mapViewRef?.controller?.setZoom(DEFAULT_CUSTOMER_MAP_ZOOM)
             mapViewRef?.controller?.animateTo(GeoPoint(userLatitude, userLongitude))
+            mapViewRef?.invalidate()
         }
     }
 
@@ -673,9 +734,10 @@ fun CustomerSalonsOsmMapSection(
                         .fillMaxSize()
                         .testTag("customer_osm_map_view"),
                     factory = { ctx ->
-                        Configuration.getInstance().userAgentValue = ctx.packageName
+                        initOsmDroidConfig(ctx)
                         MapView(ctx).apply {
                             setTileSource(TileSourceFactory.MAPNIK)
+                            setUseDataConnection(true)
                             setMultiTouchControls(true)
                             minZoomLevel = 4.0
                             maxZoomLevel = 17.5
@@ -685,13 +747,18 @@ fun CustomerSalonsOsmMapSection(
                                 v.parent?.requestDisallowInterceptTouchEvent(true)
                                 false
                             }
-                            controller.setZoom(15.5)
+                            onResume()
+                            controller.setZoom(DEFAULT_CUSTOMER_MAP_ZOOM)
                             controller.setCenter(GeoPoint(userLat, userLng))
                             mapViewRef = this
                         }
                     },
                     update = { mapView ->
-                        Configuration.getInstance().userAgentValue = mapView.context.packageName
+                        initOsmDroidConfig(mapView.context)
+                        mapView.onResume()
+                        if (mapView.zoomLevelDouble > 17.5 || mapView.zoomLevelDouble < 4.0) {
+                            mapView.controller.setZoom(DEFAULT_CUSTOMER_MAP_ZOOM)
+                        }
                         mapView.overlays.clear()
 
                         // 1. User's current GPS Location Marker
@@ -1060,7 +1127,7 @@ fun PartnerLocationPickerOsmMap(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     remember(context) {
-        Configuration.getInstance().userAgentValue = context.packageName
+        initOsmDroidConfig(context)
         true
     }
 
@@ -1081,10 +1148,10 @@ fun PartnerLocationPickerOsmMap(
         }
     }
 
-    // Automatically re-center and set zoom to 15.5 whenever GPS lock or parent updates latitude/longitude
+    // Automatically re-center and set zoom to 15.0 whenever GPS lock or parent updates latitude/longitude
     LaunchedEffect(latitude, longitude) {
         if (latitude != 0.0 && longitude != 0.0) {
-            mapViewRef?.controller?.setZoom(15.5)
+            mapViewRef?.controller?.setZoom(DEFAULT_CUSTOMER_MAP_ZOOM)
             mapViewRef?.controller?.animateTo(GeoPoint(latitude, longitude))
             mapViewRef?.invalidate()
         }
@@ -1128,9 +1195,10 @@ fun PartnerLocationPickerOsmMap(
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
-                    Configuration.getInstance().userAgentValue = ctx.packageName
+                    initOsmDroidConfig(ctx)
                     MapView(ctx).apply {
                         setTileSource(TileSourceFactory.MAPNIK)
+                        setUseDataConnection(true)
                         setMultiTouchControls(true)
                         minZoomLevel = 4.0
                         maxZoomLevel = 17.5
@@ -1140,17 +1208,19 @@ fun PartnerLocationPickerOsmMap(
                             v.parent?.requestDisallowInterceptTouchEvent(true)
                             false
                         }
+                        onResume()
                         val startPoint = GeoPoint(
                             if (latitude != 0.0) latitude else DEFAULT_PATNA_LAT,
                             if (longitude != 0.0) longitude else DEFAULT_PATNA_LNG
                         )
-                        controller.setZoom(15.5)
+                        controller.setZoom(DEFAULT_CUSTOMER_MAP_ZOOM)
                         controller.setCenter(startPoint)
                         mapViewRef = this
                     }
                 },
                 update = { mapView ->
-                    Configuration.getInstance().userAgentValue = mapView.context.packageName
+                    initOsmDroidConfig(mapView.context)
+                    mapView.onResume()
                     mapView.overlays.clear()
 
                     val currentGeoPoint = GeoPoint(

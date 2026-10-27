@@ -57,6 +57,10 @@ import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
 
+import androidx.compose.material3.Button
+import androidx.compose.ui.text.style.TextAlign
+import com.example.util.SecurityValidator
+
 @Composable
 fun CustomerBookingsContent(
     bookings: List<Booking>,
@@ -65,12 +69,20 @@ fun CustomerBookingsContent(
     cancellationCount: Int = 0,
     isSuspended: Boolean = false,
     onViewBookingDetails: (Booking) -> Unit,
-    onCancelBooking: (String) -> Unit
+    onCancelBooking: (String) -> Unit,
+    onSwitchToSalonsTab: () -> Unit = {}
 ) {
     val userBookings = if (currentUserId.isNotBlank()) {
         bookings.filter { it.customerId == currentUserId }
     } else {
         emptyList()
+    }
+
+    val activeBookings = userBookings.filter {
+        SecurityValidator.isBookingActiveStatus(it.status)
+    }
+    val pastOrCancelledBookings = userBookings.filterNot {
+        SecurityValidator.isBookingActiveStatus(it.status)
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -120,43 +132,130 @@ fun CustomerBookingsContent(
             }
         }
 
-        if (userBookings.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(32.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.AccessTime,
-                        contentDescription = null,
-                        tint = Color(0xFF64748B),
-                        modifier = Modifier.size(54.dp)
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("customer_bookings_list"),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // 1. Active Bookings Section OR Friendly Empty Active Bookings Card
+            if (activeBookings.isEmpty()) {
+                item(key = "no_active_bookings_empty_state") {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("empty_active_bookings_card"),
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
+                        border = CardDefaults.outlinedCardBorder().copy(
+                            brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF334155))
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp, vertical = 24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF1E293B))
+                                    .border(1.dp, AmberPrimary.copy(alpha = 0.5f), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AccessTime,
+                                    contentDescription = "No active bookings",
+                                    tint = AmberPrimary,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
+
+                            Text(
+                                text = "No active bookings right now",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
+                                color = Color.White,
+                                textAlign = TextAlign.Center
+                            )
+
+                            Text(
+                                text = "No active bookings right now. Switch to the Salons tab to book your next slot!",
+                                color = Color(0xFFCBD5E1),
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.testTag("empty_active_bookings_message")
+                            )
+
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            Button(
+                                onClick = onSwitchToSalonsTab,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = AmberPrimary,
+                                    contentColor = Color(0xFF1E1402)
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+                                modifier = Modifier.testTag("empty_bookings_browse_salons_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Storefront,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Browse Nearby Salons",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                item(key = "active_bookings_header") {
                     Text(
-                        text = "No bookings yet",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color.White
+                        text = "ACTIVE BOOKING (${activeBookings.size})",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = GreenSuccess,
+                        letterSpacing = 0.8.sp
                     )
-                    Text(
-                        text = "Switch to 'Nearby Salons' tab to book your first slot!",
-                        color = Color(0xFF94A3B8),
-                        fontSize = 13.sp,
-                        modifier = Modifier.padding(top = 4.dp)
+                }
+
+                items(activeBookings, key = { "active_${it.id}" }) { booking ->
+                    val matchedSalon = salons.find {
+                        it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true)
+                    }
+                    CustomerBookingCard(
+                        booking = booking,
+                        salon = matchedSalon,
+                        onViewDetails = { onViewBookingDetails(booking) },
+                        onCancel = { onCancelBooking(booking.id) }
                     )
                 }
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("customer_bookings_list"),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                items(userBookings, key = { it.id }) { booking ->
+
+            // 2. Past / Completed / Cancelled Bookings History Section
+            if (pastOrCancelledBookings.isNotEmpty()) {
+                item(key = "past_bookings_header") {
+                    Text(
+                        text = "PAST & CANCELLED BOOKINGS (${pastOrCancelledBookings.size})",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color(0xFF94A3B8),
+                        letterSpacing = 0.8.sp,
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+
+                items(pastOrCancelledBookings, key = { "past_${it.id}" }) { booking ->
                     val matchedSalon = salons.find {
                         it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true)
                     }
@@ -363,8 +462,7 @@ fun CustomerBookingCard(
                             // 4-Digit PIN Display Box - strictly single-line horizontal
                             Box(
                                 modifier = Modifier
-                                    .
-                                    clip(RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(8.dp))
                                     .background(DarkSurface)
                                     .border(1.dp, if (isAccepted) GreenSuccess else AmberPrimary, RoundedCornerShape(8.dp))
                                     .padding(horizontal = 12.dp, vertical = 6.dp)

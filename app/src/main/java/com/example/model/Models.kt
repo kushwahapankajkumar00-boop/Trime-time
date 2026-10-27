@@ -32,7 +32,7 @@ data class AppPreferences(
     val bookingStatusAlerts: Boolean = true,
     val queueTurnReminders: Boolean = true,
     val salonOffersDiscounts: Boolean = false,
-    val defaultCity: String = "Patna, Bihar",
+    val defaultCity: String = "Current Location",
     val showDemoSalons: Boolean = false
 )
 
@@ -47,12 +47,16 @@ data class UserProfile(
     val name: String = "",
     val email: String = "",
     val phone: String = "",
+    val password: String = "",
     val loginPin: String = "",
+    val quickAccessMpin: String = "",
+    val biometricEnabled: Boolean = false,
+    val isQuickAccessEnabled: Boolean = false,
     val isPhoneVerified: Boolean = false,
     val role: String = "customer", // "customer" or "partner"
     val salonId: String? = null,
     val hasRegisteredSalon: Boolean = false,
-    val defaultCity: String = "Patna, Bihar",
+    val defaultCity: String = "Current Location",
     val cancellationCount: Int = 0,
     val cancellationStrikes: Int = cancellationCount,
     val isSuspended: Boolean = false,
@@ -61,12 +65,22 @@ data class UserProfile(
     val effectiveCancellationStrikes: Int
         get() = maxOf(cancellationCount, cancellationStrikes)
 
+    val effectivePassword: String
+        get() = password.ifBlank { loginPin }
+
+    val hasQuickAccessSetup: Boolean
+        get() = isQuickAccessEnabled && (quickAccessMpin.length == 4 || biometricEnabled)
+
     fun toMap(): Map<String, Any?> = mapOf(
         "id" to id,
         "name" to name,
         "email" to email,
         "phone" to phone,
-        "loginPin" to loginPin,
+        "password" to password.ifBlank { loginPin },
+        "loginPin" to loginPin.ifBlank { password },
+        "quickAccessMpin" to quickAccessMpin,
+        "biometricEnabled" to biometricEnabled,
+        "isQuickAccessEnabled" to isQuickAccessEnabled,
         "isPhoneVerified" to isPhoneVerified,
         "role" to role,
         "salonId" to salonId,
@@ -128,6 +142,7 @@ data class Salon(
     val latitude: Double? = null,
     val longitude: Double? = null,
     val isRegistrationCompleted: Boolean = false,
+    val registrationFormSubmitted: Boolean = false,
     val isPhoneVerified: Boolean = true
 ) {
     val isBusy: Boolean
@@ -172,6 +187,7 @@ data class Salon(
         "latitude" to latitude,
         "longitude" to longitude,
         "isRegistrationCompleted" to isRegistrationCompleted,
+        "registrationFormSubmitted" to registrationFormSubmitted,
         "isPhoneVerified" to isPhoneVerified,
         "coordinates" to if (latitude != null && longitude != null) mapOf(
             "lat" to latitude,

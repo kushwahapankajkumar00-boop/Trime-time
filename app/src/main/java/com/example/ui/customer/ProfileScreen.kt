@@ -72,12 +72,13 @@ import com.example.model.AppLanguage
 import com.example.model.AppPreferences
 import com.example.model.AppThemeMode
 import com.example.model.UserProfile
-import com.example.ui.auth.Sha1RealAccountLoginDialog
+import androidx.compose.material.icons.filled.Fingerprint
 import com.example.ui.components.HelpAndSupportCenterDialog
 import com.example.ui.components.LegalPoliciesViewerDialog
 import com.example.ui.components.LegalPolicyTab
 import com.example.ui.components.SendFeedbackDialog
 import com.example.ui.components.SupportFeedbackLegalSectionCard
+import com.example.ui.components.VerifiedBlueTickIcon
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.GreenSuccess
 import com.example.viewmodel.AuthMode
@@ -89,7 +90,10 @@ fun ProfileScreen(
     hasRegisteredSalon: Boolean = false,
     registeredSalonName: String? = null,
     onOpenAuth: (AuthMode) -> Unit,
+    onBecomePartner: () -> Unit = {},
     onSwitchToPartner: () -> Unit = {},
+    onResetSalonRegistration: () -> Unit = {},
+    onOpenQuickAccessSetup: () -> Unit = {},
     onUpdatePersonalProfile: (name: String, phone: String, defaultCity: String) -> Unit = { _, _, _ -> },
     onUpdateAccountIdentity: (name: String, email: String, phone: String, asPartner: Boolean) -> Unit = { _, _, _, _ -> },
     onRequestPhoneOtp: (
@@ -115,12 +119,11 @@ fun ProfileScreen(
 ) {
     val context = LocalContext.current
     var showEditPersonalDialog by remember { mutableStateOf(false) }
-    var showSwitchIdentityDialog by remember { mutableStateOf(false) }
     var showSupportDialog by remember { mutableStateOf(false) }
     var showFeedbackDialog by remember { mutableStateOf(false) }
     var activeLegalTab by remember { mutableStateOf<LegalPolicyTab?>(null) }
 
-    // 2-Step Phone OTP state for Profile Phone Verification / Edit
+    // 2-Step Phone OTP state for Profile Phone Verification / Edit (Shown only during active verification)
     var showTopSmsBanner by remember { mutableStateOf(false) }
     var activeOtpPhone by remember { mutableStateOf("") }
     var activeOtpCode by remember { mutableStateOf("") }
@@ -141,7 +144,7 @@ fun ProfileScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        if (showTopSmsBanner && activeOtpCode.length == 4) {
+        if (showTopSmsBanner && showPhoneOtpModal && activeOtpCode.length == 4) {
             item {
                 com.example.ui.components.TopSmsOtpBanner(
                     visible = true,
@@ -187,13 +190,21 @@ fun ProfileScreen(
                         }
 
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = userProfile?.name ?: "Customer",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                color = primaryTextColor,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = userProfile?.name ?: "Customer",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = primaryTextColor,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                if (userProfile?.isPhoneVerified == true) {
+                                    VerifiedBlueTickIcon(size = 17.dp)
+                                }
+                            }
                             Text(
                                 text = userProfile?.email?.takeIf { it.isNotBlank() } ?: "Not signed in",
                                 fontSize = 12.sp,
@@ -204,21 +215,19 @@ fun ProfileScreen(
                             if (!userProfile?.phone.isNullOrBlank()) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                                     modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)
                                 ) {
                                     Text(
                                         text = userProfile?.phone ?: "",
-                                        fontSize = 11.sp,
+                                        fontSize = 12.sp,
                                         color = AmberPrimary,
                                         fontWeight = FontWeight.SemiBold,
                                         maxLines = 1,
                                         softWrap = false
                                     )
                                     if (userProfile?.isPhoneVerified == true) {
-                                        com.example.ui.components.VerifiedNumberBadge(
-                                            text = "✓ Verified Number"
-                                        )
+                                        VerifiedBlueTickIcon(size = 15.dp)
                                     }
                                 }
                             }
@@ -256,7 +265,9 @@ fun ProfileScreen(
                                 text = if (isHinglish) "ग्राहक (Customer)" else "Customer",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = GreenSuccess
+                                color = GreenSuccess,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -283,7 +294,7 @@ fun ProfileScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (isHinglish) "प्रोफ़ाइल बदलें (Edit)" else "Edit Profile",
+                                text = if (isHinglish) "प्रोफ़ाइल बदलें" else "Edit Profile",
                                 color = AmberPrimary,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
@@ -294,24 +305,24 @@ fun ProfileScreen(
                         }
 
                         OutlinedButton(
-                            onClick = { showSwitchIdentityDialog = true },
+                            onClick = onOpenQuickAccessSetup,
                             modifier = Modifier
                                 .weight(1f)
                                 .heightIn(min = 44.dp)
-                                .testTag("edit_account_identity_btn"),
+                                .testTag("quick_access_setup_btn"),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, Color(0xFF64748B))
+                            border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.7f))
                         ) {
                             Icon(
-                                imageVector = Icons.Default.SwapHoriz,
-                                contentDescription = "Switch Account",
-                                tint = primaryTextColor,
+                                imageVector = Icons.Default.Fingerprint,
+                                contentDescription = "Quick Access",
+                                tint = Color(0xFF38BDF8),
                                 modifier = Modifier.size(15.dp)
                             )
                             Spacer(modifier = Modifier.width(5.dp))
                             Text(
-                                text = if (isHinglish) "दूसरा अकाउंट" else "Switch Account",
+                                text = if (userProfile?.hasQuickAccessSetup == true) "Quick Access ✓" else "Set MPIN / Biometric",
                                 color = primaryTextColor,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
@@ -325,7 +336,7 @@ fun ProfileScreen(
             }
         }
 
-        // 2. Partner Salon Registration / Switcher Card
+        // 2. Partner Salon Registration / Switcher Card (Strict Registration Wall)
         item {
             Card(
                 modifier = Modifier
@@ -368,19 +379,14 @@ fun ProfileScreen(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Text(
-                                    text = if (hasRegisteredSalon) "REGISTERED SALON PARTNER" else "SALON OWNER / PARTNER PORTAL",
+                                    text = if (hasRegisteredSalon) "REGISTERED SALON PARTNER" else "SALON OWNER PORTAL",
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = Color(0xFF93C5FD),
                                     letterSpacing = 0.8.sp
                                 )
                                 if (hasRegisteredSalon) {
-                                    Icon(
-                                        imageVector = Icons.Default.Verified,
-                                        contentDescription = "Verified Partner",
-                                        tint = GreenSuccess,
-                                        modifier = Modifier.size(13.dp)
-                                    )
+                                    VerifiedBlueTickIcon(size = 14.dp)
                                 }
                             }
                             Text(
@@ -394,7 +400,7 @@ fun ProfileScreen(
                             )
                             Text(
                                 text = if (hasRegisteredSalon) {
-                                    "Your salon is registered in Cloud Firestore. Switch anytime to manage live chairs & bookings."
+                                    "Manage your salon schedule, live chair availability, and customer bookings."
                                 } else {
                                     "Register your shop name, address, timings, services & GPS pin to start receiving bookings."
                                 },
@@ -406,7 +412,13 @@ fun ProfileScreen(
                     }
 
                     Button(
-                        onClick = onSwitchToPartner,
+                        onClick = {
+                            if (hasRegisteredSalon) {
+                                onSwitchToPartner()
+                            } else {
+                                onBecomePartner()
+                            }
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 50.dp)
@@ -427,12 +439,12 @@ fun ProfileScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = if (hasRegisteredSalon) {
-                                if (isHinglish) "पार्टनर डैशबोर्ड खोलें (Switch to Partner Mode)" else "Switch to Partner / Salon Owner Mode"
+                                if (isHinglish) "पार्टनर डैशबोर्ड खोलें" else "Open Partner Dashboard"
                             } else {
-                                if (isHinglish) "सैलून पार्टनर बनें (Register Your Salon)" else "Become a Salon Partner (Register Shop)"
+                                if (isHinglish) "सैलून पार्टनर बनें (Become a Salon Partner)" else "Become a Salon Partner"
                             },
                             fontWeight = FontWeight.ExtraBold,
-                            fontSize = 12.sp,
+                            fontSize = 13.sp,
                             color = if (hasRegisteredSalon) Color.White else Color.Black,
                             maxLines = 1,
                             softWrap = false,
@@ -477,7 +489,7 @@ fun ProfileScreen(
                                 color = primaryTextColor
                             )
                             Text(
-                                text = if (isHinglish) "थीम, नोटिफिकेशन, भाषा और प्रोफ़ाइल सेटिंग्स" else "Theme, notifications, language & profile controls",
+                                text = if (isHinglish) "थीम, नोटिफिकेशन, भाषा और प्रोफ़ाइल सेटिंग्स" else "Theme, notifications, language & security controls",
                                 fontSize = 11.sp,
                                 color = secondaryTextColor
                             )
@@ -673,22 +685,7 @@ fun ProfileScreen(
 
                     HorizontalDivider(color = Color(0xFF334155).copy(alpha = 0.5f))
 
-                    // Real Production Mode: Hide Dummy HSR Layout / Bangalore Salons by default ("Show Demo Salons" OFF)
-                    NotificationToggleRow(
-                        title = if (isHinglish) "डेमो सैलून दिखाएं (Show Demo Salons)" else "Show Demo Salons",
-                        subtitle = "Keep OFF in production so only real Firestore-registered salons are shown",
-                        checked = appPreferences.showDemoSalons,
-                        onCheckedChange = { checked ->
-                            onShowDemoSalonsChange(checked)
-                        },
-                        primaryTextColor = primaryTextColor,
-                        secondaryTextColor = secondaryTextColor,
-                        testTag = "settings_toggle_show_demo_salons"
-                    )
-
-                    HorizontalDivider(color = Color(0xFF334155).copy(alpha = 0.5f))
-
-                    // (d) & (e) Edit Personal Profile, Clear Cache & Help & Support Quick Links
+                    // (d) & (e) Clear Cache & Help & Support Quick Links
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -767,7 +764,7 @@ fun ProfileScreen(
             )
         }
 
-        // 5. Log Out / Switch Account Button
+        // 5. Log Out Button
         item {
             OutlinedButton(
                 onClick = onLogout,
@@ -787,7 +784,7 @@ fun ProfileScreen(
                 )
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = if (isHinglish) "लॉग आउट / अकाउंट बदलें (Log Out)" else "Log Out / Switch Account",
+                    text = if (isHinglish) "लॉग आउट (Log Out)" else "Log Out",
                     color = Color(0xFFEF4444),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
@@ -855,6 +852,7 @@ fun ProfileScreen(
             onVerified = { _ ->
                 showPhoneOtpModal = false
                 showTopSmsBanner = false
+                activeOtpCode = ""
                 pendingProfileSave?.let { (uName, uPhone, uCity) ->
                     onUpdatePersonalProfile(uName, uPhone, uCity)
                 }
@@ -862,21 +860,7 @@ fun ProfileScreen(
             },
             onDismiss = {
                 showPhoneOtpModal = false
-            }
-        )
-    }
-
-    // Dialog 2: Switch Account Identity (Name + Email + Phone + PIN)
-    if (showSwitchIdentityDialog) {
-        val initialPhoneDigits = userProfile?.phone?.filter { it.isDigit() }?.takeLast(10) ?: ""
-        Sha1RealAccountLoginDialog(
-            initialName = if (userProfile?.name == "Dev Tester") "" else (userProfile?.name ?: ""),
-            initialEmail = if (userProfile?.email == "devtester@trimtime.local") "" else (userProfile?.email ?: ""),
-            initialPhone = initialPhoneDigits,
-            onDismiss = { showSwitchIdentityDialog = false },
-            onConfirmSignIn = { name, email, phone, asPartner, _ ->
-                showSwitchIdentityDialog = false
-                onUpdateAccountIdentity(name, email, phone, asPartner)
+                showTopSmsBanner = false
             }
         )
     }
@@ -900,7 +884,7 @@ fun ProfileScreen(
         )
     }
 
-    // Dialog 4: Real-Time Send Feedback / Report an Issue Form (Saved to Firestore `feedback`)
+    // Dialog 4: Send Feedback / Report an Issue Form
     if (showFeedbackDialog) {
         SendFeedbackDialog(
             userName = userProfile?.name ?: "Customer",
@@ -1068,7 +1052,7 @@ private fun EditPersonalProfileDialog(
                 onClick = {
                     val cleanName = name.trim()
                     val cleanPhone = phone.filter { it.isDigit() }
-                    val cleanCity = city.trim().ifBlank { "Patna, Bihar" }
+                    val cleanCity = city.trim().ifBlank { "Current Location" }
                     when {
                         cleanName.length < 2 -> errorText = "Please enter your full name."
                         cleanPhone.length != 10 -> errorText = "Please enter a valid 10-digit phone number."

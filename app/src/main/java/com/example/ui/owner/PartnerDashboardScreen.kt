@@ -1659,13 +1659,13 @@ fun PartnerMenuManagerTabContent(
                     )
                     Column {
                         Text(
-                            text = "Real-Time Services & Pricing Manager",
+                            text = "Services & Pricing Manager",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
                         Text(
-                            text = "Add, Edit, or Delete services (₹ & mins) directly in your live Firestore salon catalog.",
+                            text = "Add, Edit, or Delete services (₹ & mins) in your salon service catalog.",
                             fontSize = 11.sp,
                             color = Color(0xFFCBD5E1)
                         )
@@ -1877,7 +1877,7 @@ fun PartnerMenuManagerTabContent(
         if (liveServices.isNotEmpty()) {
             item {
                 Text(
-                    text = "LIVE SALON SERVICES IN FIRESTORE (${liveServices.size})",
+                    text = "ACTIVE SALON SERVICES (${liveServices.size})",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = Color(0xFF94A3B8),
@@ -2068,7 +2068,7 @@ fun PartnerMenuManagerTabContent(
                                 ),
                                 shape = RoundedCornerShape(10.dp)
                             ) {
-                                Text("Save Service Changes to Firestore", fontWeight = FontWeight.Bold)
+                                Text("Save Service Changes", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -2542,7 +2542,7 @@ fun PartnerShopProfileTabContent(
                                     color = Color.White
                                 )
                                 Text(
-                                    text = "Pick a photo from your phone gallery (syncs directly to Firestore)",
+                                    text = "Pick a photo from your phone gallery to display on your salon card",
                                     fontSize = 11.sp,
                                     color = Color(0xFF94A3B8),
                                     textAlign = TextAlign.Center
@@ -2617,7 +2617,7 @@ fun PartnerShopProfileTabContent(
                                             val generatedDataUrl = SalonImageUtils.generatePresetCoverBase64(preset)
                                             localPhotoDataUrl = generatedDataUrl
                                             onSaveShopPhoto(salon.id, generatedDataUrl)
-                                            uploadStatusMessage = "Applied '${preset.title}' cover & synced to Firestore!"
+                                            uploadStatusMessage = "Applied '${preset.title}' cover photo!"
                                         }
                                     }
                                     .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -2712,26 +2712,8 @@ fun PartnerShopProfileTabContent(
                             )
                         }
 
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(Color(0xFF064E3B))
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = null,
-                                tint = GreenSuccess,
-                                modifier = Modifier.size(12.dp)
-                            )
-                            Text(
-                                text = "LIVE SYNC",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFA7F3D0)
-                            )
+                        if (salon?.isPhoneVerified == true || partnerProfile?.isPhoneVerified == true) {
+                            com.example.ui.components.VerifiedBlueTickIcon(size = 18.dp)
                         }
                     }
 
@@ -3108,7 +3090,7 @@ fun PartnerShopProfileTabContent(
                                 modifier = Modifier.size(16.dp)
                             )
                             Text(
-                                text = "Shop Details & GPS saved to Cloud Firestore!",
+                                text = "Shop Details & GPS location saved!",
                                 fontSize = 11.sp,
                                 color = Color(0xFFA7F3D0),
                                 fontWeight = FontWeight.SemiBold
@@ -3131,74 +3113,6 @@ fun PartnerShopProfileTabContent(
                 onOpenTerms = onOpenTerms,
                 onOpenPrivacyPolicy = onOpenPrivacyPolicy
             )
-        }
-
-        // 4. Unregister / Reset Salon Profile Option (Danger Zone)
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, Color(0xFFEF4444).copy(alpha = 0.45f), RoundedCornerShape(16.dp)),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1218))
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Delete,
-                            contentDescription = null,
-                            tint = Color(0xFFEF4444),
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = "Unregister / Reset Salon Profile",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
-                            color = Color(0xFFFCA5A5)
-                        )
-                    }
-                    Text(
-                        text = "Deletes your current salon registration (${salon?.name ?: "My Salon"}) from Cloud Firestore so you can test the fresh Customer → Partner Registration Form flow from scratch.",
-                        fontSize = 11.sp,
-                        color = Color(0xFFE2E8F0),
-                        lineHeight = 15.sp
-                    )
-                    OutlinedButton(
-                        onClick = onResetSalonRegistration,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 48.dp)
-                            .testTag("reset_delete_salon_registration_btn"),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFEF4444))
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Delete,
-                            contentDescription = "Reset / Delete Salon Registration",
-                            tint = Color(0xFFEF4444),
-                            modifier = Modifier.size(17.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Reset / Delete Salon Registration",
-                            color = Color(0xFFEF4444),
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
         }
     }
 }

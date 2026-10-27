@@ -158,7 +158,10 @@ fun PartnerOnboardingScreen(
     // 2. Full Shop Address, City/Area, Pincode & Landmark
     var shopAddress by remember { mutableStateOf("") }
     var cityArea by remember(userProfile?.defaultCity) {
-        mutableStateOf(userProfile?.defaultCity?.ifBlank { "Patna, Bihar" } ?: "Patna, Bihar")
+        val initialCity = userProfile?.defaultCity?.takeIf {
+            it.isNotBlank() && !it.equals("Current Location", ignoreCase = true) && !it.equals("Patna, Bihar", ignoreCase = true)
+        } ?: ""
+        mutableStateOf(initialCity)
     }
     var pincode by remember { mutableStateOf("") }
     var landmark by remember { mutableStateOf("") }
@@ -442,8 +445,8 @@ fun PartnerOnboardingScreen(
                             },
                             trailingIcon = {
                                 if (isBusinessPhoneVerified) {
-                                    com.example.ui.components.VerifiedNumberBadge(
-                                        text = "✓ Verified Number",
+                                    com.example.ui.components.VerifiedBlueTickIcon(
+                                        size = 18.dp,
                                         modifier = Modifier.padding(end = 8.dp)
                                     )
                                 }
@@ -1331,7 +1334,7 @@ fun PartnerOnboardingScreen(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "Registering Salon in Cloud Firestore...",
+                            text = "Completing Salon Registration...",
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 14.sp
                         )

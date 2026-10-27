@@ -42,7 +42,8 @@ import com.example.ui.theme.GreenSuccess
 @Composable
 fun AppTopBar(
     isCloudSynced: Boolean,
-    onHelpClicked: () -> Unit,
+    hasRegisteredPartnerSalon: Boolean = false,
+    onHelpClicked: () -> Unit = {},
     onSwitchToPartnerMode: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -55,22 +56,22 @@ fun AppTopBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Left: Logo + Title + Subtitle (weighted so it never clips on narrow mobile screens)
+            // Left: Logo + Title + Subtitle
             Row(
                 modifier = Modifier
                     .weight(1f)
                     .padding(end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(9.dp))
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(10.dp))
                         .background(
                             Brush.linearGradient(
                                 listOf(AmberPrimary, Color(0xFFD97706))
@@ -82,55 +83,26 @@ fun AppTopBar(
                         imageVector = Icons.Default.ContentCut,
                         contentDescription = "TrimTime Logo",
                         tint = Color.Black,
-                        modifier = Modifier.size(19.dp)
+                        modifier = Modifier.size(20.dp)
                     )
                 }
 
                 Column(
                     modifier = Modifier.weight(1f)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = "TrimTime",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 17.sp,
-                                letterSpacing = 0.3.sp
-                            ),
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(Color(0xFF064E3B))
-                                .padding(horizontal = 5.dp, vertical = 1.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.CloudDone,
-                                    contentDescription = "Synced",
-                                    tint = if (isCloudSynced) GreenSuccess else Color(0xFF94A3B8),
-                                    modifier = Modifier.size(10.dp)
-                                )
-                                Text(
-                                    text = "LIVE",
-                                    fontSize = 8.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = if (isCloudSynced) Color(0xFF6EE7B7) else Color(0xFF94A3B8)
-                                )
-                            }
-                        }
-                    }
                     Text(
-                        text = "Hyper-local slots • Pay at Salon • Anti-Fake PIN",
+                        text = "TrimTime",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 18.sp,
+                            letterSpacing = 0.3.sp
+                        ),
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "Instant Salon & Barber Appointments",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF94A3B8),
                         fontSize = 11.sp,
@@ -140,52 +112,38 @@ fun AppTopBar(
                 }
             }
 
-            // Right: 1-Tap Partner Mode Switcher + Help Icon
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            // Right: Partner Button (Enforces Registration Wall if user has no registered salon)
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (hasRegisteredPartnerSalon) Color(0xFF1E3A8A) else Color(0xFF1E293B))
+                    .border(
+                        1.dp,
+                        if (hasRegisteredPartnerSalon) Color(0xFF3B82F6) else AmberPrimary.copy(alpha = 0.6f),
+                        RoundedCornerShape(10.dp)
+                    )
+                    .clickable { onSwitchToPartnerMode() }
+                    .padding(horizontal = 11.dp, vertical = 7.dp)
+                    .testTag("top_bar_partner_switch_btn"),
+                contentAlignment = Alignment.Center
             ) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF1E3A8A))
-                        .border(1.dp, Color(0xFF3B82F6), RoundedCornerShape(10.dp))
-                        .clickable { onSwitchToPartnerMode() }
-                        .padding(horizontal = 9.dp, vertical = 6.dp)
-                        .testTag("top_bar_partner_switch_btn"),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Storefront,
-                            contentDescription = "Switch to Partner Mode",
-                            tint = Color(0xFF93C5FD),
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "Partner",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                            maxLines = 1
-                        )
-                    }
-                }
-
-                IconButton(
-                    onClick = onHelpClicked,
-                    modifier = Modifier
-                        .size(34.dp)
-                        .testTag("help_button")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.HelpOutline,
-                        contentDescription = "Test instructions",
-                        tint = AmberPrimary,
-                        modifier = Modifier.size(19.dp)
+                        imageVector = Icons.Default.Storefront,
+                        contentDescription = "Partner Mode",
+                        tint = if (hasRegisteredPartnerSalon) Color(0xFF93C5FD) else AmberPrimary,
+                        modifier = Modifier.size(15.dp)
+                    )
+                    Text(
+                        text = "Partner",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }

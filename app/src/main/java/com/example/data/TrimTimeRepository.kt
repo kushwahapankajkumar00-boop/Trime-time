@@ -95,6 +95,10 @@ class TrimTimeRepository private constructor(context: Context) {
     private val _customerBookings = MutableStateFlow<List<Booking>>(emptyList())
     val customerBookings: StateFlow<List<Booking>> = _customerBookings.asStateFlow()
 
+    // Most recently COMPLETED booking for the currently logged-in Customer (for Quick Re-Book banner)
+    private val _latestCompletedBooking = MutableStateFlow<Booking?>(null)
+    val latestCompletedBooking: StateFlow<Booking?> = _latestCompletedBooking.asStateFlow()
+
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
@@ -112,29 +116,38 @@ class TrimTimeRepository private constructor(context: Context) {
     private val _showPartnerOnboarding = MutableStateFlow(false)
     val showPartnerOnboarding: StateFlow<Boolean> = _showPartnerOnboarding.asStateFlow()
 
+    // Quick Access (4-Digit MPIN / Fingerprint Biometrics) state
+    private val _isSessionUnlocked = MutableStateFlow(true)
+    val isSessionUnlocked: StateFlow<Boolean> = _isSessionUnlocked.asStateFlow()
+
+    private val _showQuickAccessSetup = MutableStateFlow(false)
+    val showQuickAccessSetup: StateFlow<Boolean> = _showQuickAccessSetup.asStateFlow()
+
     // Persisted Customer App Settings & Preferences
     private val _appPreferences = MutableStateFlow(loadSavedPreferences())
     val appPreferences: StateFlow<AppPreferences> = _appPreferences.asStateFlow()
 
     // Live Customer GPS Coordinates & Reverse-Geocoded Location Display
     private val _userLatitude = MutableStateFlow(
-        settingsPrefs.getString("pref_user_lat", null)?.toDoubleOrNull()?.takeIf { it != 0.0 } ?: 25.5941
+        settingsPrefs.getString("pref_user_lat", null)?.toDoubleOrNull()?.takeIf { it != 0.0 } ?: 26.3359
     )
     val userLatitude: StateFlow<Double> = _userLatitude.asStateFlow()
 
     private val _userLongitude = MutableStateFlow(
-        settingsPrefs.getString("pref_user_lng", null)?.toDoubleOrNull()?.takeIf { it != 0.0 } ?: 85.1376
+        settingsPrefs.getString("pref_user_lng", null)?.toDoubleOrNull()?.takeIf { it != 0.0 } ?: 84.6304
     )
     val userLongitude: StateFlow<Double> = _userLongitude.asStateFlow()
 
     private val _userLocationTitle = MutableStateFlow(
-        settingsPrefs.getString("pref_default_city", "Patna, Bihar")?.ifBlank { "Patna, Bihar" } ?: "Patna, Bihar"
+        settingsPrefs.getString("pref_default_city", null)
+            ?.takeIf { it.isNotBlank() && !it.equals("Patna, Bihar", ignoreCase = true) }
+            ?: "Detecting Live GPS..."
     )
     val userLocationTitle: StateFlow<String> = _userLocationTitle.asStateFlow()
 
     private val _userLocationSubtitle = MutableStateFlow(
-        settingsPrefs.getString("pref_location_subtitle", "Tap to detect live GPS location")
-            ?.ifBlank { "Tap to detect live GPS location" } ?: "Tap to detect live GPS location"
+        settingsPrefs.getString("pref_location_subtitle", "Fetching your live GPS location...")
+            ?.ifBlank { "Fetching your live GPS location..." } ?: "Fetching your live GPS location..."
     )
     val userLocationSubtitle: StateFlow<String> = _userLocationSubtitle.asStateFlow()
 
@@ -149,14 +162,61 @@ class TrimTimeRepository private constructor(context: Context) {
 
     fun isDemoSalon(salonId: String): Boolean = salonId in seedSalonIds
 
+    fun unlockSessionWithQuickAccess() {
+        _isSessionUnlocked.value = true
+    }
+
+    fun dismissQuickAccessSetup() {
+        _showQuickAccessSetup.value = false
+    }
+
+    fun openQuickAccessSetup() {
+        _showQuickAccessSetup.value = true
+    }
+
+    fun saveQuickAccessSettings(
+        mpin: String,
+        biometricEnabled: Boolean,
+        onSuccess: () -> Unit = {}
+    ) {
+        val cleanMpin = mpin.filter { it.isDigit() }.take(4)
+        val current = _currentUserProfile.value
+        sessionPrefs.edit()
+            .putString("saved_quick_mpin", cleanMpin)
+            .putBoolean("saved_biometric_enabled", biometricEnabled)
+            .putBoolean("saved_quick_access_enabled", true)
+            .apply()
+
+        if (current != null) {
+            val updated = current.copy(
+                quickAccessMpin = cleanMpin,
+                biometricEnabled = biometricEnabled,
+                isQuickAccessEnabled = true
+            )
+            _currentUserProfile.value = updated
+            firestore?.collection("users")?.document(current.id)?.set(
+                mapOf(
+                    "quickAccessMpin" to cleanMpin,
+                    "biometricEnabled" to biometricEnabled,
+                    "isQuickAccessEnabled" to true
+                ),
+                com.google.firebase.firestore.SetOptions.merge()
+            )
+        }
+        _showQuickAccessSetup.value = false
+        _isSessionUnlocked.value = true
+        onSuccess()
+    }
+
     private fun loadSavedPreferences(): AppPreferences {
         val themeKey = settingsPrefs.getString("pref_theme_mode", AppThemeMode.DARK.key)
         val langKey = settingsPrefs.getString("pref_language", AppLanguage.ENGLISH.key)
         val bookingAlerts = settingsPrefs.getBoolean("pref_notif_booking_status", true)
         val queueReminders = settingsPrefs.getBoolean("pref_notif_queue_turn", true)
         val offersDiscounts = settingsPrefs.getBoolean("pref_notif_salon_offers", false)
-        val defaultCity = settingsPrefs.getString("pref_default_city", "Patna, Bihar") ?: "Patna, Bihar"
-        val showDemoSalons = settingsPrefs.getBoolean("pref_show_demo_salons", false)
+        val defaultCity = settingsPrefs.getString("pref_default_city", null)
+            ?.takeIf { it.isNotBlank() && !it.equals("Patna, Bihar", ignoreCase = true) }
+            ?: "Current Location"
         return AppPreferences(
             themeMode = AppThemeMode.fromKey(themeKey),
             language = AppLanguage.fromKey(langKey),
@@ -164,7 +224,7 @@ class TrimTimeRepository private constructor(context: Context) {
             queueTurnReminders = queueReminders,
             salonOffersDiscounts = offersDiscounts,
             defaultCity = defaultCity,
-            showDemoSalons = showDemoSalons
+            showDemoSalons = false
         )
     }
 
@@ -222,21 +282,19 @@ class TrimTimeRepository private constructor(context: Context) {
         userLat: Double = _userLatitude.value,
         userLng: Double = _userLongitude.value
     ): List<Salon> {
-        return salonsList.map { salon ->
-            val sLat = salon.latitude
-            val sLng = salon.longitude
-            if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
-                val dKm = calculateDistanceKm(userLat, userLng, sLat, sLng)
-                val formatted = String.format(java.util.Locale.US, "%.1f km", dKm)
-                salon.copy(distance = formatted)
-            } else {
-                salon
-            }
-        }.sortedWith(
-            compareBy<Salon> { salon ->
-                // Always prioritize real Firestore-registered salons (0) before demo/seed salons (1)
-                if (salon.id in seedSalonIds) 1 else 0
-            }.thenBy { salon ->
+        return salonsList
+            .filterNot { it.id in seedSalonIds }
+            .map { salon ->
+                val sLat = salon.latitude
+                val sLng = salon.longitude
+                if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
+                    val dKm = calculateDistanceKm(userLat, userLng, sLat, sLng)
+                    val formatted = String.format(java.util.Locale.US, "%.1f km", dKm)
+                    salon.copy(distance = formatted)
+                } else {
+                    salon
+                }
+            }.sortedBy { salon ->
                 val sLat = salon.latitude
                 val sLng = salon.longitude
                 if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
@@ -245,11 +303,65 @@ class TrimTimeRepository private constructor(context: Context) {
                     salon.distance.replace("km", "", ignoreCase = true).trim().toDoubleOrNull() ?: 999.0
                 }
             }
-        )
+    }
+
+    fun openPartnerRegistrationForm() {
+        _currentRole.value = UserRole.CUSTOMER
+        _showPartnerOnboarding.value = true
     }
 
     fun dismissPartnerOnboarding() {
         _showPartnerOnboarding.value = false
+    }
+
+    private fun isGenuinelyRegisteredSalonValues(
+        docId: String,
+        salonName: String,
+        shopAddress: String,
+        ownerId: String,
+        isRegistrationCompletedFlag: Boolean,
+        registrationFormSubmittedFlag: Boolean
+    ): Boolean {
+        if (docId in seedSalonIds) return false
+        val cleanName = salonName.trim()
+        val cleanAddr = shopAddress.trim()
+        val isLegacyDummyName = cleanName.length < 3 ||
+            cleanName.endsWith("'s Grooming Studio", ignoreCase = true) ||
+            cleanName.equals("cod", ignoreCase = true) ||
+            cleanName.equals("My Salon", ignoreCase = true) ||
+            cleanName.startsWith("Salon salon_", ignoreCase = true)
+        return isRegistrationCompletedFlag &&
+            registrationFormSubmittedFlag &&
+            ownerId.isNotBlank() &&
+            !isLegacyDummyName &&
+            cleanAddr.length >= 4
+    }
+
+    private fun isGenuinelyRegisteredSalonDoc(doc: com.google.firebase.firestore.DocumentSnapshot): Boolean {
+        val resolvedDocId = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id
+        if (resolvedDocId in seedSalonIds) return false
+        val salonName = doc.getString("name")
+            ?: doc.getString("salonName")
+            ?: doc.getString("title")
+            ?: ""
+        val shopAddress = doc.getString("shopAddress")
+            ?: doc.getString("address")
+            ?: doc.getString("location")
+            ?: ""
+        val ownerId = doc.getString("ownerId")
+            ?: doc.getString("partnerId")
+            ?: doc.getString("userId")
+            ?: ""
+        val isRegCompleted = doc.getBoolean("isRegistrationCompleted") == true
+        val isFormSubmitted = doc.getBoolean("registrationFormSubmitted") == true
+        return isGenuinelyRegisteredSalonValues(
+            docId = resolvedDocId,
+            salonName = salonName,
+            shopAddress = shopAddress,
+            ownerId = ownerId,
+            isRegistrationCompletedFlag = isRegCompleted,
+            registrationFormSubmittedFlag = isFormSubmitted
+        )
     }
 
     fun dismissSha1FallbackDialog() {
@@ -471,13 +583,21 @@ class TrimTimeRepository private constructor(context: Context) {
                                 val openingTime = doc.getString("openingTime") ?: "9:00 AM"
                                 val closingTime = doc.getString("closingTime") ?: "9:00 PM"
                                 val isSeedSalon = resolvedDocId in seedSalonIds
-                                val isRegistrationCompleted = isSeedSalon || (doc.getBoolean("isRegistrationCompleted") == true)
+                                val isRegFlag = doc.getBoolean("isRegistrationCompleted") == true
+                                val isFormSubmittedFlag = doc.getBoolean("registrationFormSubmitted") == true
+                                val isGenuinelyRegistered = isGenuinelyRegisteredSalonValues(
+                                    docId = resolvedDocId,
+                                    salonName = salonName,
+                                    shopAddress = shopAddress.ifBlank { location },
+                                    ownerId = ownerId,
+                                    isRegistrationCompletedFlag = isRegFlag,
+                                    registrationFormSubmittedFlag = isFormSubmittedFlag
+                                )
                                 val isSalonPhoneVerified = doc.getBoolean("isPhoneVerified") ?: true
 
-                                // If a legacy auto-created salon document exists in Firestore without isRegistrationCompleted == true,
-                                // purge it from Firestore and never load it as a registered salon.
-                                if (!isSeedSalon && !isRegistrationCompleted) {
-                                    Log.w(tag, "Purging legacy unregistered auto-created salon doc: $resolvedDocId ($salonName)")
+                                // Purge any legacy auto-created or dummy salon document in Firestore
+                                if (!isSeedSalon && !isGenuinelyRegistered) {
+                                    Log.w(tag, "Purging legacy/dummy unregistered salon doc: $resolvedDocId ($salonName)")
                                     db.collection("salons").document(doc.id).delete()
                                     return@mapNotNull null
                                 }
@@ -510,7 +630,8 @@ class TrimTimeRepository private constructor(context: Context) {
                                     closingTime = closingTime,
                                     latitude = lat,
                                     longitude = lng,
-                                    isRegistrationCompleted = isRegistrationCompleted,
+                                    isRegistrationCompleted = isGenuinelyRegistered,
+                                    registrationFormSubmitted = isSeedSalon || isFormSubmittedFlag,
                                     isPhoneVerified = isSalonPhoneVerified
                                 )
                             } catch (e: Exception) {
@@ -529,7 +650,9 @@ class TrimTimeRepository private constructor(context: Context) {
                                     .set(missing.toMap(), com.google.firebase.firestore.SetOptions.merge())
                             }
                         }
-                        val validLiveSalons = liveSalons.filter { it.isRegistrationCompleted || it.id in seedSalonIds }
+                        val validLiveSalons = liveSalons.filter {
+                            (it.isRegistrationCompleted && it.registrationFormSubmitted) || it.id in seedSalonIds
+                        }
                         val combinedSalons = recalculateAndSortSalons(
                             (validLiveSalons + missingSeeds).distinctBy { it.id },
                             _userLatitude.value,
@@ -537,6 +660,32 @@ class TrimTimeRepository private constructor(context: Context) {
                         )
                         Log.d(tag, "Successfully loaded ${combinedSalons.size} real salons from Firestore!")
                         _salons.value = combinedSalons
+
+                        // Sync current user's salon ownership flag from real Firestore salons
+                        _currentUserProfile.value?.let { currentProfile ->
+                            val uid = currentProfile.id.trim()
+                            if (uid.isNotBlank()) {
+                                val ownedRegisteredSalon = combinedSalons.find {
+                                    it.id !in seedSalonIds &&
+                                        (it.ownerId == uid || it.partnerId == uid) &&
+                                        it.isRegistrationCompleted &&
+                                        it.registrationFormSubmitted
+                                }
+                                val updatedHasSalon = ownedRegisteredSalon != null
+                                val updatedSalonId = ownedRegisteredSalon?.id
+                                if (currentProfile.hasRegisteredSalon != updatedHasSalon || currentProfile.salonId != updatedSalonId) {
+                                    _currentUserProfile.value = currentProfile.copy(
+                                        hasRegisteredSalon = updatedHasSalon,
+                                        salonId = updatedSalonId,
+                                        role = if (updatedHasSalon && _currentRole.value == UserRole.PARTNER) "partner" else "customer"
+                                    )
+                                }
+                                if (!updatedHasSalon && _currentRole.value == UserRole.PARTNER) {
+                                    _currentRole.value = UserRole.CUSTOMER
+                                    _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -602,19 +751,25 @@ class TrimTimeRepository private constructor(context: Context) {
     /**
      * Attaches a Firestore real-time query listener strictly scoped to `customerId == currentUser.uid`
      * so "My Bookings" and "Quick Re-Book" NEVER show bookings belonging to any other user.
+     * Also explicitly resolves the latest booking with `status == "COMPLETED"` for Quick Re-Book.
      */
     private fun attachCustomerBookingsListener(customerId: String) {
         customerBookingsListener?.remove()
         val cleanUid = customerId.trim()
         if (cleanUid.isBlank() || cleanUid in invalidSharedUserIds) {
             _customerBookings.value = emptyList()
+            _latestCompletedBooking.value = null
             return
         }
 
         // Immediately filter existing in-memory bookings strictly by cleanUid
-        _customerBookings.value = _bookings.value
+        val initialScoped = _bookings.value
             .filter { it.customerId == cleanUid }
             .sortedByDescending { it.createdAt }
+        _customerBookings.value = initialScoped
+        _latestCompletedBooking.value = initialScoped
+            .filter { it.status.equals("COMPLETED", ignoreCase = true) }
+            .maxByOrNull { it.completedAt ?: it.createdAt }
 
         val db = firestore ?: return
         customerBookingsListener = db.collection("bookings")
@@ -630,6 +785,26 @@ class TrimTimeRepository private constructor(context: Context) {
                         .filter { it.customerId == cleanUid && it.id != "past_demo_1" }
                         .sortedByDescending { it.createdAt }
                     _customerBookings.value = userBookings
+                    _latestCompletedBooking.value = userBookings
+                        .filter { it.status.equals("COMPLETED", ignoreCase = true) }
+                        .maxByOrNull { it.completedAt ?: it.createdAt }
+                }
+            }
+
+        // Also query Firestore specifically for the user's COMPLETED bookings to guarantee fresh Quick Re-Book state
+        db.collection("bookings")
+            .whereEqualTo("customerId", cleanUid)
+            .whereIn("status", listOf("COMPLETED", "completed"))
+            .get()
+            .addOnSuccessListener { completedSnapshot ->
+                if (completedSnapshot != null) {
+                    val latestCompleted = completedSnapshot.documents
+                        .mapNotNull { doc -> parseBookingDocument(doc) }
+                        .filter { it.customerId == cleanUid && it.status.equals("COMPLETED", ignoreCase = true) }
+                        .maxByOrNull { it.completedAt ?: it.createdAt }
+                    if (latestCompleted != null) {
+                        _latestCompletedBooking.value = latestCompleted
+                    }
                 }
             }
     }
@@ -953,7 +1128,7 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     /**
-     * Completes "Forgot PIN? Verify via OTP" by saving the new 4-Digit Secret Login PIN
+     * Completes "Forgot Password? Verify via OTP" by saving the new account Password
      * and `isPhoneVerified = true` to Firestore `users/{uid}` and logging the user in.
      */
     fun resetLoginPinAndAuthenticate(
@@ -962,16 +1137,16 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: (UserProfile) -> Unit,
         onError: (String) -> Unit
     ) {
-        val cleanPin = newLoginPin.filter { it.isDigit() }.take(4)
-        if (cleanPin.length != 4) {
-            val msg = "Please enter a valid 4-Digit Secret Login PIN."
+        val cleanPassword = newLoginPin.trim()
+        if (cleanPassword.length < 4) {
+            val msg = "Please enter a valid password (at least 4 characters)."
             _authError.value = msg
             onError(msg)
             return
         }
         val firestoreDb = firestore
         if (firestoreDb == null) {
-            onError("Firestore database is not connected.")
+            onError("Unable to connect to server. Please check your internet connection.")
             return
         }
         _isLoading.value = true
@@ -979,7 +1154,8 @@ class TrimTimeRepository private constructor(context: Context) {
         val userDocRef = firestoreDb.collection("users").document(uid)
         userDocRef.set(
             mapOf(
-                "loginPin" to cleanPin,
+                "password" to cleanPassword,
+                "loginPin" to cleanPassword,
                 "isPhoneVerified" to true
             ),
             com.google.firebase.firestore.SetOptions.merge()
@@ -999,13 +1175,13 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
         }.addOnFailureListener { err ->
             _isLoading.value = false
-            onError("Failed to save new Login PIN: ${err.localizedMessage}")
+            onError("Failed to save new password: ${err.localizedMessage}")
         }
     }
 
     /**
-     * Direct Firestore Account Sign-Up / Registration:
-     * Requires a verified 10-digit mobile number (`isPhoneVerified = true`) and a mandatory 4-Digit Secret Login PIN (`loginPin`).
+     * Direct Account Sign-Up / Registration:
+     * Requires Full Name, Email, OTP-verified 10-Digit Mobile (`isPhoneVerified = true`), and Password (`loginPin`).
      */
     fun signInWithRealIdentity(
         name: String,
@@ -1020,7 +1196,7 @@ class TrimTimeRepository private constructor(context: Context) {
         val trimmedName = SecurityValidator.sanitizeName(name, trimEdges = true)
         val trimmedEmail = SecurityValidator.sanitizeInput(email, maxLength = 100, trimEdges = true).lowercase()
         if (trimmedName.length < 2) {
-            val msg = "Please enter a valid full name (2–60 characters, no HTML/script tags)."
+            val msg = "Please enter your full name (at least 2 characters)."
             _authError.value = msg
             onError(msg)
             return
@@ -1042,10 +1218,10 @@ class TrimTimeRepository private constructor(context: Context) {
         val tenDigits = SecurityValidator.extractTenDigitMobile(phone)
         val formattedPhone = "+91 $tenDigits"
 
-        // Validate 4-digit Secret Login PIN
-        val cleanLoginPin = loginPin.filter { it.isDigit() }.take(4)
-        if (cleanLoginPin.length != 4) {
-            val msg = "Please set a 4-Digit Secret Login PIN (4 digits, e.g. 2580) to protect your account."
+        // Validate Password (at least 4 characters)
+        val cleanPassword = loginPin.trim()
+        if (cleanPassword.length < 4) {
+            val msg = "Please create a password (at least 4 characters) to protect your account."
             _authError.value = msg
             onError(msg)
             return
@@ -1066,7 +1242,7 @@ class TrimTimeRepository private constructor(context: Context) {
         val firestoreDb = firestore
         if (firestoreDb == null) {
             _isLoading.value = false
-            val msg = "Firestore database is not connected."
+            val msg = "Unable to connect to server. Please check your internet connection."
             _authError.value = msg
             onError(msg)
             return
@@ -1079,7 +1255,7 @@ class TrimTimeRepository private constructor(context: Context) {
             "+91-$tenDigits"
         )
 
-        // Ensure phone number isn't already taken by a different user account in Firestore
+        // Ensure phone number isn't already taken by a different user account
         firestoreDb.collection("users")
             .whereIn("phone", candidatePhones)
             .get()
@@ -1109,24 +1285,34 @@ class TrimTimeRepository private constructor(context: Context) {
                             )
                             val existingIsSuspended = existingDoc.getBoolean("isSuspended") ?: (existingStrikes >= 3)
                             val verifiedSalon = _salons.value.find {
-                                (it.ownerId == uid || it.partnerId == uid) && it.isRegistrationCompleted
+                                it.id !in seedSalonIds &&
+                                    (it.ownerId == uid || it.partnerId == uid) &&
+                                    it.isRegistrationCompleted &&
+                                    it.registrationFormSubmitted
                             }
                             val existingSalonId = verifiedSalon?.id
                             val existingHasSalon = verifiedSalon != null
                             val existingCity = SecurityValidator.sanitizeAddress(
                                 existingDoc.getString("defaultCity")?.takeIf { it.isNotBlank() } ?: _appPreferences.value.defaultCity
                             )
-                            val existingRole = if (asPartner && existingHasSalon) "partner" else "customer"
                             val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
+                            val existingQuickMpin = existingDoc.getString("quickAccessMpin") ?: ""
+                            val existingBiometric = existingDoc.getBoolean("biometricEnabled") ?: false
+                            val existingQuickEnabled = existingDoc.getBoolean("isQuickAccessEnabled") ?: false
 
+                            // Every user MUST default to Customer Mode upon Login/Signup
                             val userProfile = UserProfile(
                                 id = uid,
                                 name = trimmedName,
                                 email = trimmedEmail,
                                 phone = resolvedPhone,
-                                loginPin = cleanLoginPin,
+                                password = cleanPassword,
+                                loginPin = cleanPassword,
+                                quickAccessMpin = existingQuickMpin,
+                                biometricEnabled = existingBiometric,
+                                isQuickAccessEnabled = existingQuickEnabled,
                                 isPhoneVerified = isPhoneVerified,
-                                role = existingRole,
+                                role = "customer",
                                 salonId = existingSalonId,
                                 hasRegisteredSalon = existingHasSalon,
                                 defaultCity = existingCity,
@@ -1141,18 +1327,20 @@ class TrimTimeRepository private constructor(context: Context) {
                                 .putString("saved_uid", uid)
                                 .putString("saved_name", trimmedName)
                                 .putString("saved_email", trimmedEmail)
-                                .putString("saved_role", if (existingHasSalon && asPartner) "partner" else "customer")
+                                .putString("saved_role", "customer")
                                 .apply()
 
                             _currentUserProfile.value = userProfile
                             attachCustomerBookingsListener(uid)
                             _isLoading.value = false
-
-                            if (asPartner) {
-                                verifyExistingPartnerSalonOrPromptOnboarding(userProfile, openOnboardingIfMissing = true)
-                            } else {
-                                _currentRole.value = UserRole.CUSTOMER
-                                _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+                            _isSessionUnlocked.value = true
+                            if (!userProfile.hasQuickAccessSetup) {
+                                _showQuickAccessSetup.value = true
+                            }
+                            _currentRole.value = UserRole.CUSTOMER
+                            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+                            if (asPartner && !existingHasSalon) {
+                                _showPartnerOnboarding.value = true
                             }
                             onSuccess()
                         } else {
@@ -1161,7 +1349,8 @@ class TrimTimeRepository private constructor(context: Context) {
                                 name = trimmedName,
                                 email = trimmedEmail,
                                 phone = formattedPhone,
-                                loginPin = cleanLoginPin,
+                                password = cleanPassword,
+                                loginPin = cleanPassword,
                                 isPhoneVerified = isPhoneVerified,
                                 role = "customer",
                                 salonId = null,
@@ -1185,17 +1374,18 @@ class TrimTimeRepository private constructor(context: Context) {
                                     _currentUserProfile.value = newProfile
                                     attachCustomerBookingsListener(uid)
                                     _currentRole.value = UserRole.CUSTOMER
+                                    _isSessionUnlocked.value = true
+                                    _showQuickAccessSetup.value = true
                                     _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                                     _isLoading.value = false
                                     if (asPartner) {
-                                        // New user who chose Partner during Sign Up must complete Partner Salon Registration Form
                                         _showPartnerOnboarding.value = true
                                     }
                                     onSuccess()
                                 }
                                 .addOnFailureListener { setErr ->
                                     _isLoading.value = false
-                                    val errMsg = "Failed to save account to Firestore: ${setErr.localizedMessage}"
+                                    val errMsg = "Failed to create account: ${setErr.localizedMessage}"
                                     _authError.value = errMsg
                                     onError(errMsg)
                                 }
@@ -1203,23 +1393,23 @@ class TrimTimeRepository private constructor(context: Context) {
                     }
                     .addOnFailureListener { getErr ->
                         _isLoading.value = false
-                        val errMsg = "Failed to connect to Firestore: ${getErr.localizedMessage}"
+                        val errMsg = "Connection error: ${getErr.localizedMessage}"
                         _authError.value = errMsg
                         onError(errMsg)
                     }
             }
             .addOnFailureListener { err ->
                 _isLoading.value = false
-                val errMsg = "Failed to check phone availability in Firestore: ${err.localizedMessage}"
+                val errMsg = "Failed to verify mobile number availability: ${err.localizedMessage}"
                 _authError.value = errMsg
                 onError(errMsg)
             }
     }
 
     /**
-     * Secure 2-Factor Login for Existing Users (Mobile Number OR Email Address + 4-Digit Secret Login PIN):
-     * Searches Firestore `users` collection for an existing account matching the phone or email,
-     * and ONLY logs the user in if BOTH the Mobile/Email AND the 4-Digit Login PIN match their Firestore user document!
+     * Secure Login for Existing Users (Mobile Number OR Email Address + Password):
+     * Searches `users` collection for an existing account matching the phone or email,
+     * and ONLY logs the user in if BOTH the Mobile/Email AND the Password match their user document.
      */
     fun loginExistingUser(
         identifier: String,
@@ -1236,9 +1426,9 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        val cleanPin = loginPin.filter { it.isDigit() }.take(4)
-        if (cleanPin.length != 4) {
-            val msg = "Please enter your 4-Digit Secret Login PIN (or tap 'Forgot PIN? Verify via OTP')."
+        val cleanPassword = loginPin.trim()
+        if (cleanPassword.length < 4) {
+            val msg = "Please enter your account Password (or tap 'Forgot Password? Verify via OTP')."
             _authError.value = msg
             onError(msg)
             return
@@ -1247,7 +1437,7 @@ class TrimTimeRepository private constructor(context: Context) {
         val firestoreDb = firestore
         if (firestoreDb == null) {
             _isLoading.value = false
-            val msg = "Firestore database is not connected."
+            val msg = "Unable to connect to server. Please check your internet connection."
             _authError.value = msg
             onError(msg)
             return
@@ -1258,15 +1448,16 @@ class TrimTimeRepository private constructor(context: Context) {
         _showSha1FallbackDialog.value = false
 
         val verifyPinAndApplyDoc: (com.google.firebase.firestore.DocumentSnapshot) -> Unit = { matchedDoc ->
-            val savedPin = matchedDoc.getString("loginPin")?.trim().orEmpty()
-            if (savedPin.isBlank()) {
+            val savedPassword = matchedDoc.getString("password")?.trim()?.takeIf { it.isNotBlank() }
+                ?: matchedDoc.getString("loginPin")?.trim().orEmpty()
+            if (savedPassword.isBlank()) {
                 _isLoading.value = false
-                val msg = "No 4-Digit Login PIN is set on this account yet. Tap 'Forgot PIN? Verify via OTP' below to verify your number and set your PIN."
+                val msg = "No Password is set on this account yet. Tap 'Forgot Password? Verify via OTP' below to verify your number and set your Password."
                 _authError.value = msg
                 onError(msg)
-            } else if (savedPin != cleanPin) {
+            } else if (savedPassword != cleanPassword) {
                 _isLoading.value = false
-                val msg = "Incorrect 4-Digit Login PIN! Please enter your exact PIN or tap 'Forgot PIN? Verify via OTP'."
+                val msg = "Incorrect Password! Please enter your exact Password or tap 'Forgot Password? Verify via OTP'."
                 _authError.value = msg
                 onError(msg)
             } else {
@@ -1308,7 +1499,7 @@ class TrimTimeRepository private constructor(context: Context) {
                             }
                             .addOnFailureListener { err ->
                                 _isLoading.value = false
-                                val errMsg = "Failed to look up email in Firestore: ${err.localizedMessage}"
+                                val errMsg = "Failed to look up email: ${err.localizedMessage}"
                                 _authError.value = errMsg
                                 onError(errMsg)
                             }
@@ -1316,7 +1507,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
                 .addOnFailureListener { err ->
                     _isLoading.value = false
-                    val errMsg = "Failed to connect to Firestore: ${err.localizedMessage}"
+                    val errMsg = "Connection error: ${err.localizedMessage}"
                     _authError.value = errMsg
                     onError(errMsg)
                 }
@@ -1360,7 +1551,7 @@ class TrimTimeRepository private constructor(context: Context) {
                             }
                             .addOnFailureListener { err ->
                                 _isLoading.value = false
-                                val errMsg = "Failed to look up mobile number in Firestore: ${err.localizedMessage}"
+                                val errMsg = "Failed to look up mobile number: ${err.localizedMessage}"
                                 _authError.value = errMsg
                                 onError(errMsg)
                             }
@@ -1368,7 +1559,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
                 .addOnFailureListener { err ->
                     _isLoading.value = false
-                    val errMsg = "Failed to look up mobile number in Firestore: ${err.localizedMessage}"
+                    val errMsg = "Failed to look up mobile number: ${err.localizedMessage}"
                     _authError.value = errMsg
                     onError(errMsg)
                 }
@@ -1381,7 +1572,14 @@ class TrimTimeRepository private constructor(context: Context) {
     ) {
         val existingEmail = doc.getString("email") ?: ""
         val existingPhone = doc.getString("phone") ?: ""
-        val existingLoginPin = doc.getString("loginPin") ?: ""
+        val existingPassword = doc.getString("password")?.takeIf { it.isNotBlank() }
+            ?: doc.getString("loginPin") ?: ""
+        val existingQuickMpin = doc.getString("quickAccessMpin")
+            ?: sessionPrefs.getString("saved_quick_mpin", "") ?: ""
+        val existingBiometric = doc.getBoolean("biometricEnabled")
+            ?: sessionPrefs.getBoolean("saved_biometric_enabled", false)
+        val existingQuickEnabled = doc.getBoolean("isQuickAccessEnabled")
+            ?: sessionPrefs.getBoolean("saved_quick_access_enabled", false)
         val existingIsPhoneVerified = doc.getBoolean("isPhoneVerified") ?: existingPhone.isNotBlank()
         val rawDocId = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id
         val uid = if (rawDocId.isNotBlank() && rawDocId !in invalidSharedUserIds) {
@@ -1395,9 +1593,11 @@ class TrimTimeRepository private constructor(context: Context) {
                 ?: doc.getString("displayName")?.takeIf { it.isNotBlank() }
                 ?: "Customer"
         )
-        val existingRole = doc.getString("role") ?: "customer"
         val verifiedSalon = _salons.value.find {
-            (it.ownerId == uid || it.partnerId == uid) && it.isRegistrationCompleted
+            it.id !in seedSalonIds &&
+                (it.ownerId == uid || it.partnerId == uid) &&
+                it.isRegistrationCompleted &&
+                it.registrationFormSubmitted
         }
         val existingSalonId = verifiedSalon?.id
         val existingHasSalon = verifiedSalon != null
@@ -1411,12 +1611,17 @@ class TrimTimeRepository private constructor(context: Context) {
         val existingIsSuspended = doc.getBoolean("isSuspended") ?: (existingStrikes >= 3)
         val existingCreatedAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
 
+        // Every user MUST default to Customer Mode upon Login
         val userProfile = UserProfile(
             id = uid,
             name = existingName,
             email = existingEmail,
             phone = existingPhone,
-            loginPin = existingLoginPin,
+            password = existingPassword,
+            loginPin = existingPassword,
+            quickAccessMpin = existingQuickMpin,
+            biometricEnabled = existingBiometric,
+            isQuickAccessEnabled = existingQuickEnabled,
             isPhoneVerified = existingIsPhoneVerified,
             role = "customer",
             salonId = existingSalonId,
@@ -1433,16 +1638,21 @@ class TrimTimeRepository private constructor(context: Context) {
             .putString("saved_name", existingName)
             .putString("saved_email", existingEmail)
             .putString("saved_role", "customer")
+            .putString("saved_quick_mpin", existingQuickMpin)
+            .putBoolean("saved_biometric_enabled", existingBiometric)
+            .putBoolean("saved_quick_access_enabled", existingQuickEnabled)
             .apply()
 
         _currentUserProfile.value = userProfile
         attachCustomerBookingsListener(uid)
         _isLoading.value = false
+        _showPartnerOnboarding.value = false
+        _isSessionUnlocked.value = true
+        if (!userProfile.hasQuickAccessSetup) {
+            _showQuickAccessSetup.value = true
+        }
         _currentRole.value = UserRole.CUSTOMER
         _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
-        if (existingRole.equals("partner", ignoreCase = true)) {
-            verifyExistingPartnerSalonOrPromptOnboarding(userProfile, openOnboardingIfMissing = false)
-        }
         onSuccess(userProfile)
     }
 
@@ -1491,7 +1701,7 @@ class TrimTimeRepository private constructor(context: Context) {
         val firestoreDb = firestore
         if (firestoreDb == null) {
             _isLoading.value = false
-            val msg = "Firestore database is not connected."
+            val msg = "Unable to connect to server. Please check your internet connection."
             _authError.value = msg
             onError(msg)
             return
@@ -1505,13 +1715,19 @@ class TrimTimeRepository private constructor(context: Context) {
                     val existingName = existingDoc.getString("name") ?: displayName
                     val existingEmail = existingDoc.getString("email") ?: email
                     val existingPhone = existingDoc.getString("phone") ?: ""
-                    val existingLoginPin = existingDoc.getString("loginPin") ?: ""
+                    val existingPassword = existingDoc.getString("password")?.takeIf { it.isNotBlank() }
+                        ?: existingDoc.getString("loginPin") ?: ""
+                    val existingQuickMpin = existingDoc.getString("quickAccessMpin") ?: ""
+                    val existingBiometric = existingDoc.getBoolean("biometricEnabled") ?: false
+                    val existingQuickEnabled = existingDoc.getBoolean("isQuickAccessEnabled") ?: false
                     val existingIsPhoneVerified = existingDoc.getBoolean("isPhoneVerified") ?: existingPhone.isNotBlank()
                     val existingCancellationCount = existingDoc.getLong("cancellationCount")?.toInt() ?: 0
                     val existingIsSuspended = existingDoc.getBoolean("isSuspended") ?: (existingCancellationCount >= 3)
-                    val existingRole = existingDoc.getString("role") ?: "customer"
                     val verifiedSalon = _salons.value.find {
-                        (it.ownerId == uid || it.partnerId == uid) && it.isRegistrationCompleted
+                        it.id !in seedSalonIds &&
+                            (it.ownerId == uid || it.partnerId == uid) &&
+                            it.isRegistrationCompleted &&
+                            it.registrationFormSubmitted
                     }
                     val existingSalonId = verifiedSalon?.id
                     val existingHasSalon = verifiedSalon != null
@@ -1523,7 +1739,11 @@ class TrimTimeRepository private constructor(context: Context) {
                         name = existingName,
                         email = existingEmail,
                         phone = existingPhone,
-                        loginPin = existingLoginPin,
+                        password = existingPassword,
+                        loginPin = existingPassword,
+                        quickAccessMpin = existingQuickMpin,
+                        biometricEnabled = existingBiometric,
+                        isQuickAccessEnabled = existingQuickEnabled,
                         isPhoneVerified = existingIsPhoneVerified,
                         role = "customer",
                         salonId = existingSalonId,
@@ -1534,15 +1754,25 @@ class TrimTimeRepository private constructor(context: Context) {
                         createdAt = existingCreatedAt
                     )
 
-                    Log.d(tag, "Existing Firestore user verified: ${userProfile.name} (${userProfile.email}), Phone: '${userProfile.phone}', Strikes: ${userProfile.cancellationCount}")
+                    sessionPrefs.edit()
+                        .putString("saved_uid", uid)
+                        .putString("saved_name", existingName)
+                        .putString("saved_email", existingEmail)
+                        .putString("saved_role", "customer")
+                        .putString("saved_quick_mpin", existingQuickMpin)
+                        .putBoolean("saved_biometric_enabled", existingBiometric)
+                        .putBoolean("saved_quick_access_enabled", existingQuickEnabled)
+                        .apply()
                     _currentUserProfile.value = userProfile
                     attachCustomerBookingsListener(uid)
                     _isLoading.value = false
+                    _showPartnerOnboarding.value = false
+                    _isSessionUnlocked.value = true
+                    if (!userProfile.hasQuickAccessSetup) {
+                        _showQuickAccessSetup.value = true
+                    }
                     _currentRole.value = UserRole.CUSTOMER
                     _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
-                    if (existingRole.equals("partner", ignoreCase = true)) {
-                        verifyExistingPartnerSalonOrPromptOnboarding(userProfile, openOnboardingIfMissing = false)
-                    }
                     onSuccess()
                 } else {
                     // New User: Create document in Firestore
@@ -1551,6 +1781,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         name = displayName.ifBlank { "Customer" },
                         email = email,
                         phone = "",
+                        password = "",
                         loginPin = "",
                         isPhoneVerified = false,
                         role = "customer",
@@ -1564,17 +1795,18 @@ class TrimTimeRepository private constructor(context: Context) {
 
                     userDocRef.set(newProfile.toMap())
                         .addOnSuccessListener {
-                            Log.d(tag, "New user document successfully written to Firestore 'users' for uid: $uid")
                             _currentUserProfile.value = newProfile
                             attachCustomerBookingsListener(uid)
                             _currentRole.value = UserRole.CUSTOMER
+                            _isSessionUnlocked.value = true
+                            _showQuickAccessSetup.value = true
                             _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                             _isLoading.value = false
                             onSuccess()
                         }
                         .addOnFailureListener { setErr ->
                             _isLoading.value = false
-                            val errMsg = "Failed to write user to Firestore: ${setErr.localizedMessage}"
+                            val errMsg = "Failed to save account: ${setErr.localizedMessage}"
                             _authError.value = errMsg
                             Log.e(tag, errMsg, setErr)
                             onError(errMsg)
@@ -1583,7 +1815,7 @@ class TrimTimeRepository private constructor(context: Context) {
             }
             .addOnFailureListener { getErr ->
                 _isLoading.value = false
-                val errMsg = "Failed to verify user from Firestore: ${getErr.localizedMessage}"
+                val errMsg = "Failed to verify account: ${getErr.localizedMessage}"
                 _authError.value = errMsg
                 Log.e(tag, errMsg, getErr)
                 onError(errMsg)
@@ -1651,6 +1883,8 @@ class TrimTimeRepository private constructor(context: Context) {
         sessionPrefs.edit().clear().apply()
         _showSha1FallbackDialog.value = false
         _showPartnerOnboarding.value = false
+        _showQuickAccessSetup.value = false
+        _isSessionUnlocked.value = true
         _currentRole.value = UserRole.CUSTOMER
         _currentUserProfile.value = null
         _customerBookings.value = emptyList()
@@ -1714,14 +1948,9 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     fun setShowDemoSalons(show: Boolean) {
-        val updated = _appPreferences.value.copy(showDemoSalons = show)
+        val updated = _appPreferences.value.copy(showDemoSalons = false)
         _appPreferences.value = updated
-        settingsPrefs.edit().putBoolean("pref_show_demo_salons", show).apply()
-        val uid = _currentUserProfile.value?.id
-        if (!uid.isNullOrBlank()) {
-            firestore?.collection("users")?.document(uid)
-                ?.set(mapOf("showDemoSalons" to show), com.google.firebase.firestore.SetOptions.merge())
-        }
+        settingsPrefs.edit().putBoolean("pref_show_demo_salons", false).apply()
     }
 
     fun updatePersonalProfile(
@@ -1738,7 +1967,7 @@ class TrimTimeRepository private constructor(context: Context) {
         }
         val cleanName = SecurityValidator.sanitizeName(name, trimEdges = true)
         if (cleanName.length < 2) {
-            onError("Please enter a valid full name (2–60 characters, no HTML/script tags).")
+            onError("Please enter a valid full name (2–60 characters).")
             return
         }
         val phoneErr = SecurityValidator.validateIndianMobileError(phone)
@@ -1748,7 +1977,7 @@ class TrimTimeRepository private constructor(context: Context) {
         }
         val tenDigits = SecurityValidator.extractTenDigitMobile(phone)
         val formattedPhone = "+91 $tenDigits"
-        val cleanCity = SecurityValidator.sanitizeAddress(defaultCity, trimEdges = true).ifBlank { "Patna, Bihar" }
+        val cleanCity = SecurityValidator.sanitizeAddress(defaultCity, trimEdges = true).ifBlank { "Current Location" }
 
         val updatedProfile = current.copy(
             name = cleanName,
@@ -1793,7 +2022,7 @@ class TrimTimeRepository private constructor(context: Context) {
                     deletedCount++
                 }
             }
-            onComplete("App cache cleared ($deletedCount temporary files removed) & live Firestore sync refreshed.")
+            onComplete("Temporary app cache cleared ($deletedCount files removed).")
         } catch (e: Exception) {
             onComplete("Temporary app cache cleared.")
         }
@@ -1850,41 +2079,45 @@ class TrimTimeRepository private constructor(context: Context) {
         val uid = profile.id.trim()
         if (uid.isBlank()) return
 
-        // 1. Check in-memory loaded salons owned by this user ONLY if isRegistrationCompleted == true
-        val existingInMemory = _salons.value.find {
-            (it.ownerId == uid || it.partnerId == uid) && it.isRegistrationCompleted
-        }
-
-        if (existingInMemory != null) {
-            activatePartnerModeWithSalon(profile, existingInMemory.id, onSalonReady)
-            return
-        }
-
-        // Remove any legacy unregistered salons owned by this user from in-memory state
+        // Remove any legacy unregistered or dummy salons owned by this user from in-memory state
         _salons.value = _salons.value.filterNot {
-            (it.ownerId == uid || it.partnerId == uid) && !it.isRegistrationCompleted && it.id !in seedSalonIds
+            (it.ownerId == uid || it.partnerId == uid) &&
+                (!it.isRegistrationCompleted || !it.registrationFormSubmitted) &&
+                it.id !in seedSalonIds
         }
 
         val db = firestore
         if (db == null) {
-            resetUnregisteredPartnerState(profile, openOnboardingIfMissing, onRequireRegistration)
+            val existingInMemory = _salons.value.find {
+                it.id !in seedSalonIds &&
+                    (it.ownerId == uid || it.partnerId == uid) &&
+                    it.isRegistrationCompleted &&
+                    it.registrationFormSubmitted
+            }
+            if (existingInMemory != null) {
+                activatePartnerModeWithSalon(profile, existingInMemory.id, onSalonReady)
+            } else {
+                resetUnregisteredPartnerState(profile, openOnboardingIfMissing, onRequireRegistration)
+            }
             return
         }
 
-        // 2. Query Firestore 'salons' collection where ownerId == uid
+        // Query Firestore 'salons' collection where ownerId == uid to verify real registration wall
         db.collection("salons")
             .whereEqualTo("ownerId", uid)
             .get()
             .addOnSuccessListener { ownerQuery ->
                 val docs = ownerQuery?.documents.orEmpty()
-                // Purge any legacy auto-created documents that do NOT have isRegistrationCompleted == true
-                docs.filter { it.getBoolean("isRegistrationCompleted") != true && it.id !in seedSalonIds }
+                // Purge any legacy auto-created documents that fail isGenuinelyRegisteredSalonDoc
+                docs.filter { !isGenuinelyRegisteredSalonDoc(it) && it.id !in seedSalonIds }
                     .forEach { staleDoc ->
-                        Log.w(tag, "Deleting legacy unregistered salon doc for ownerId=$uid: ${staleDoc.id}")
+                        Log.w(tag, "Deleting legacy unregistered/dummy salon doc for ownerId=$uid: ${staleDoc.id}")
                         db.collection("salons").document(staleDoc.id).delete()
                     }
 
-                val verifiedDoc = docs.firstOrNull { it.exists() && it.getBoolean("isRegistrationCompleted") == true }
+                val verifiedDoc = docs.firstOrNull {
+                    it.exists() && it.id !in seedSalonIds && isGenuinelyRegisteredSalonDoc(it)
+                }
                 if (verifiedDoc != null) {
                     activatePartnerModeWithSalon(profile, verifiedDoc.id, onSalonReady)
                 } else {
@@ -1894,14 +2127,14 @@ class TrimTimeRepository private constructor(context: Context) {
                         .get()
                         .addOnSuccessListener { partnerQuery ->
                             val partnerDocs = partnerQuery?.documents.orEmpty()
-                            partnerDocs.filter { it.getBoolean("isRegistrationCompleted") != true && it.id !in seedSalonIds }
+                            partnerDocs.filter { !isGenuinelyRegisteredSalonDoc(it) && it.id !in seedSalonIds }
                                 .forEach { staleDoc ->
-                                    Log.w(tag, "Deleting legacy unregistered salon doc for partnerId=$uid: ${staleDoc.id}")
+                                    Log.w(tag, "Deleting legacy unregistered/dummy salon doc for partnerId=$uid: ${staleDoc.id}")
                                     db.collection("salons").document(staleDoc.id).delete()
                                 }
 
                             val verifiedPartnerDoc = partnerDocs.firstOrNull {
-                                it.exists() && it.getBoolean("isRegistrationCompleted") == true
+                                it.exists() && it.id !in seedSalonIds && isGenuinelyRegisteredSalonDoc(it)
                             }
                             if (verifiedPartnerDoc != null) {
                                 activatePartnerModeWithSalon(profile, verifiedPartnerDoc.id, onSalonReady)
@@ -2186,6 +2419,7 @@ class TrimTimeRepository private constructor(context: Context) {
             latitude = latitude,
             longitude = longitude,
             isRegistrationCompleted = true,
+            registrationFormSubmitted = true,
             isPhoneVerified = true
         )
 
@@ -2259,15 +2493,16 @@ class TrimTimeRepository private constructor(context: Context) {
         firestoreDb.collection("users").document(uid).get()
             .addOnSuccessListener { doc ->
                 if (doc != null && doc.exists()) {
-                    val savedRolePref = sessionPrefs.getString("saved_role", null)
-                    val roleStr = savedRolePref ?: doc.getString("role") ?: "customer"
                     val cancelCount = maxOf(
                         doc.getLong("cancellationStrikes")?.toInt() ?: 0,
                         doc.getLong("cancellationCount")?.toInt() ?: 0
                     )
                     val suspended = doc.getBoolean("isSuspended") ?: (cancelCount >= 3)
                     val verifiedSalon = _salons.value.find {
-                        (it.ownerId == uid || it.partnerId == uid) && it.isRegistrationCompleted
+                        it.id !in seedSalonIds &&
+                            (it.ownerId == uid || it.partnerId == uid) &&
+                            it.isRegistrationCompleted &&
+                            it.registrationFormSubmitted
                     }
                     val salonIdVal = verifiedSalon?.id
                     val hasRegisteredVal = verifiedSalon != null
@@ -2279,6 +2514,7 @@ class TrimTimeRepository private constructor(context: Context) {
                     val existingLoginPinVal = doc.getString("loginPin") ?: ""
                     val existingPhoneVerifiedVal = doc.getBoolean("isPhoneVerified") ?: existingPhoneVal.isNotBlank()
 
+                    // Every user MUST default to Customer Mode upon Login / Session Restore
                     val profile = UserProfile(
                         id = uid,
                         name = SecurityValidator.sanitizeName(doc.getString("name") ?: user?.displayName ?: "Customer"),
@@ -2295,13 +2531,12 @@ class TrimTimeRepository private constructor(context: Context) {
                         isSuspended = suspended,
                         createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
                     )
+                    sessionPrefs.edit().putString("saved_role", "customer").apply()
                     _currentUserProfile.value = profile
                     attachCustomerBookingsListener(uid)
+                    _showPartnerOnboarding.value = false
                     _currentRole.value = UserRole.CUSTOMER
                     _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
-                    if (roleStr.equals("partner", ignoreCase = true) || roleStr.equals("owner", ignoreCase = true)) {
-                        verifyExistingPartnerSalonOrPromptOnboarding(profile, openOnboardingIfMissing = false)
-                    }
                 } else {
                     // Document doesn't exist yet: write to Firestore
                     val newProfile = UserProfile(
@@ -2624,15 +2859,17 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     private fun resolveSalonOwnerMap(salonId: String): Map<String, Any> {
-        val salon = _salons.value.find { it.id == salonId }
-        val ownerId = salon?.ownerId?.ifBlank { salon.partnerId }
-            ?: _currentUserProfile.value?.id
-            ?: ""
-        return if (ownerId.isNotBlank()) {
-            mapOf("ownerId" to ownerId, "isRegistrationCompleted" to true)
-        } else {
-            mapOf("isRegistrationCompleted" to true)
+        val salon = _salons.value.find { it.id == salonId } ?: return emptyMap()
+        val ownerId = salon.ownerId.ifBlank { salon.partnerId }
+        val result = mutableMapOf<String, Any>()
+        if (ownerId.isNotBlank()) {
+            result["ownerId"] = ownerId
         }
+        if (salon.isRegistrationCompleted && salon.registrationFormSubmitted) {
+            result["isRegistrationCompleted"] = true
+            result["registrationFormSubmitted"] = true
+        }
+        return result
     }
 
     fun toggleSalonOpenStatus(salonId: String) {
@@ -3093,189 +3330,7 @@ class TrimTimeRepository private constructor(context: Context) {
             }
         }
 
-        fun getProductionSeedSalons(): List<Salon> = listOf(
-            Salon(
-                id = "salon_blade_comb",
-                name = "The Blade & Comb Studio",
-                location = "27th Main, Sector 1, HSR Layout",
-                distance = "0.3 km",
-                rating = 4.9,
-                reviewCount = 210,
-                partnerId = "partner_blade_comb",
-                isOpen = true,
-                isRegistrationCompleted = true,
-                tagline = "Instant grooming slots • Zero queue wait time",
-                nextSlotMinutes = 12,
-                services = listOf(
-                    SalonService(
-                        id = "srv_101",
-                        name = "Classic Executive Haircut",
-                        category = "Haircut",
-                        price = 120,
-                        durationMinutes = 20,
-                        description = "Precision scissor & clipper cut, neck shave, styling pomade",
-                        isPopular = true
-                    ),
-                    SalonService(
-                        id = "srv_102",
-                        name = "Royal Beard Sculpt & Hot Towel",
-                        category = "Beard",
-                        price = 80,
-                        durationMinutes = 15,
-                        description = "Hot towel steam, straight razor edge lineup, conditioning oil",
-                        isPopular = true
-                    ),
-                    SalonService(
-                        id = "srv_103",
-                        name = "Executive Cut + Beard Combo",
-                        category = "Combo",
-                        price = 180,
-                        durationMinutes = 30,
-                        description = "Complete grooming makeover with head wash & styling",
-                        isPopular = true
-                    ),
-                    SalonService(
-                        id = "srv_104",
-                        name = "Quick 10-Min Head Massage",
-                        category = "Massage",
-                        price = 70,
-                        durationMinutes = 10,
-                        description = "Almond oil acupressure relaxation massage"
-                    ),
-                    SalonService(
-                        id = "srv_105",
-                        name = "Charcoal Detan Face Pack",
-                        category = "Facial",
-                        price = 150,
-                        durationMinutes = 20,
-                        description = "Instant pollution removal, skin brightener, cooling toner"
-                    )
-                )
-            ),
-            Salon(
-                id = "salon_urban_cuts",
-                name = "Urban Cuts Barber Lounge",
-                location = "14th Main, 5th Cross, HSR Sector 2",
-                distance = "0.7 km",
-                rating = 4.7,
-                reviewCount = 145,
-                partnerId = "partner_urban",
-                isOpen = true,
-                isRegistrationCompleted = true,
-                tagline = "Modern fades, textured crops & zero-queue appointments",
-                nextSlotMinutes = 15,
-                services = listOf(
-                    SalonService(
-                        id = "srv_201",
-                        name = "Skin Fade / Taper Cut",
-                        category = "Haircut",
-                        price = 150,
-                        durationMinutes = 25,
-                        description = "Seamless zero-fade with textured fringe styling",
-                        isPopular = true
-                    ),
-                    SalonService(
-                        id = "srv_202",
-                        name = "Clean Charcoal Razor Shave",
-                        category = "Beard",
-                        price = 60,
-                        durationMinutes = 12,
-                        description = "Smooth single-blade shave with aftershave balm",
-                        isPopular = true
-                    ),
-                    SalonService(
-                        id = "srv_203",
-                        name = "Beard Color Touchup (Ammonia-Free)",
-                        category = "Beard",
-                        price = 100,
-                        durationMinutes = 15,
-                        description = "Natural dark brown / black root blend"
-                    )
-                )
-            ),
-            Salon(
-                id = "salon_velvet_shears",
-                name = "Velvet & Shears Luxury Unisex",
-                location = "Outer Ring Road, Near Bellandur Flyover",
-                distance = "1.2 km",
-                rating = 4.8,
-                reviewCount = 340,
-                partnerId = "partner_velvet",
-                isOpen = true,
-                isRegistrationCompleted = true,
-                tagline = "Premium styling & spa with sanitization certified chairs",
-                nextSlotMinutes = 25,
-                services = listOf(
-                    SalonService(
-                        id = "srv_301",
-                        name = "Senior Stylist Hair Makeover",
-                        category = "Haircut",
-                        price = 250,
-                        durationMinutes = 35,
-                        description = "Face shape consultation, wash, precision layer cut & blowdry",
-                        isPopular = true
-                    ),
-                    SalonService(
-                        id = "srv_302",
-                        name = "Beard Styling & Line Architecture",
-                        category = "Beard",
-                        price = 120,
-                        durationMinutes = 20,
-                        description = "Cheek & neck laser-like contouring with beard wax"
-                    ),
-                    SalonService(
-                        id = "srv_303",
-                        name = "Deep Glow Face Cleanse",
-                        category = "Facial",
-                        price = 350,
-                        durationMinutes = 30,
-                        description = "Herbal fruit scrub, ultrasonic cleansing, glow mask",
-                        isPopular = true
-                    )
-                )
-            ),
-            Salon(
-                id = "salon_express_trim",
-                name = "Express Groomers (Quick Slot)",
-                location = "Near BDA Complex, HSR 6th Sector",
-                distance = "0.5 km",
-                rating = 4.6,
-                reviewCount = 98,
-                partnerId = "partner_express",
-                isOpen = true,
-                isRegistrationCompleted = true,
-                tagline = "Pocket-friendly fast cuts • In and out in 15 minutes",
-                nextSlotMinutes = 10,
-                services = listOf(
-                    SalonService(
-                        id = "srv_401",
-                        name = "Fast Clipper Trim",
-                        category = "Haircut",
-                        price = 90,
-                        durationMinutes = 15,
-                        description = "Quick clean clipper cut and neck trim",
-                        isPopular = true
-                    ),
-                    SalonService(
-                        id = "srv_402",
-                        name = "Express Shave",
-                        category = "Beard",
-                        price = 50,
-                        durationMinutes = 10,
-                        description = "Clean foam shave & menthol splash",
-                        isPopular = true
-                    ),
-                    SalonService(
-                        id = "srv_403",
-                        name = "Moustache & Beard Shape",
-                        category = "Beard",
-                        price = 60,
-                        durationMinutes = 10,
-                        description = "Quick trim with trimmer number 1 to 4"
-                    )
-                )
-            )
-        )
+        fun getProductionSeedSalons(): List<Salon> = emptyList()
 
         fun calculateDistanceKm(
             lat1: Double,

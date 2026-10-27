@@ -80,15 +80,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.heightIn
+import coil.compose.AsyncImage
 import com.example.model.Booking
 import com.example.model.Salon
 import com.example.ui.components.CustomerSalonsOsmMapSection
@@ -96,6 +101,7 @@ import com.example.ui.components.PartnerLocationPickerOsmMap
 import com.example.ui.components.calculateDistanceKm
 import com.example.ui.components.fetchDeviceGpsLocation
 import com.example.ui.components.hasLocationPermission
+import com.example.ui.components.initOsmDroidConfig
 import com.example.ui.components.launchGeoDirections
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.AmberSecondary
@@ -105,6 +111,7 @@ import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
 import com.example.util.SalonImageUtils
+import org.osmdroid.config.Configuration
 
 /**
  * Frictionless, Blinkit-style Customer Home Screen in Jetpack Compose:
@@ -120,12 +127,13 @@ import com.example.util.SalonImageUtils
 @Composable
 fun CustomerHomeScreen(
     salons: List<Salon>,
+    currentUserId: String = "",
     searchQuery: String,
     onSearchChanged: (String) -> Unit,
     selectedCategory: String,
     onCategorySelected: (String) -> Unit,
     onSalonSelected: (Salon) -> Unit,
-    userLocationTitle: String = "Patna, Bihar",
+    userLocationTitle: String = "Current Location",
     userLocationSubtitle: String = "Tap to detect live GPS location",
     userLatitude: Double = 25.5941,
     userLongitude: Double = 85.1376,
@@ -138,6 +146,13 @@ fun CustomerHomeScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+
+    // Initialize OpenStreetMap Configuration (userAgentValue + internal tile cache) before MapView renders
+    remember(context) {
+        Configuration.getInstance().userAgentValue = context.packageName
+        initOsmDroidConfig(context)
+        true
+    }
 
     // Smart Filter state (Blinkit style)
     var selectedFilter by remember { mutableStateOf<String?>(null) }
@@ -328,8 +343,8 @@ fun CustomerHomeScreen(
             )
         }
 
-        // 3. Quick Re-book Section (Only shown when the logged-in customer actually has a past booking)
-        if (pastBooking != null) {
+        // 3. Quick Re-book Section (Strictly shown ONLY when the logged-in customer has a COMPLETED past booking)
+        if (pastBooking != null && pastBooking.status.equals("COMPLETED", ignoreCase = true)) {
             item {
                 QuickRebookSection(
                     pastBooking = pastBooking,
@@ -501,6 +516,7 @@ fun CustomerHomeScreen(
             ) { salon ->
                 BlinkitSalonCard(
                     salon = salon,
+                    currentUserId = currentUserId,
                     onBookClick = { onSalonSelected(salon) }
                 )
             }
@@ -1014,7 +1030,7 @@ fun QuickRebookSection(
     salons: List<Salon>,
     onRebookClick: (Booking) -> Unit
 ) {
-    val bookingToShow = pastBooking ?: return
+    val bookingToShow = pastBooking?.takeIf { it.status.equals("COMPLETED", ignoreCase = true) } ?: return
 
     Card(
         modifier = Modifier
@@ -1212,13 +1228,23 @@ data class FilterChipItem(
 @Composable
 fun BlinkitSalonCard(
     salon: Salon,
+    currentUserId: String = "",
     onBookClick: () -> Unit
 ) {
+    val isOwnSalon = currentUserId.isNotBlank() &&
+        (salon.ownerId == currentUserId || salon.partnerId == currentUserId)
     val minPrice = salon.services.minOfOrNull { it.price } ?: 80
     val isBusy = salon.isBusy
-    val salonCoverBitmap = remember(salon.resolvedPhotoData) {
-        SalonImageUtils.decodeBase64ToImageBitmap(salon.resolvedPhotoData)
+    val rawPhotoData = salon.resolvedPhotoData.trim()
+    val salonCoverBitmap = remember(rawPhotoData) {
+        SalonImageUtils.decodeBase64ToImageBitmap(rawPhotoData)
     }
+    val hasCustomPhoto = salonCoverBitmap != null || rawPhotoData.isNotBlank()
+    val highContrastTextShadow = Shadow(
+        color = Color.Black,
+        offset = Offset(0f, 2f),
+        blurRadius = 8f
+    )
 
     Card(
         modifier = Modifier
@@ -1236,10 +1262,11 @@ fun BlinkitSalonCard(
                 .fillMaxWidth()
                 .wrapContentHeight()
         ) {
-            // Top Salon Visual Banner with Compact Flexible Height & Uploaded Shop Photo
+            // Top Salon Visual Banner with Custom Cover Photo + Strong Dark Vertical Gradient Scrim
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(min = 122.dp)
                     .wrapContentHeight()
                     .background(
                         Brush.horizontalGradient(
@@ -1258,15 +1285,26 @@ fun BlinkitSalonCard(
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.matchParentSize()
                     )
-                    // Strong dark vertical gradient scrim (0.65f to 0.85f) so text & badges always have crisp contrast over any photo
+                } else if (rawPhotoData.isNotBlank()) {
+                    AsyncImage(
+                        model = rawPhotoData,
+                        contentDescription = "${salon.name} Cover Photo",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.matchParentSize()
+                    )
+                }
+
+                // Always apply a strong dark vertical gradient scrim over custom cover photos so white text is 100% readable
+                if (hasCustomPhoto) {
                     Box(
                         modifier = Modifier
                             .matchParentSize()
                             .background(
                                 Brush.verticalGradient(
-                                    listOf(
-                                        Color.Black.copy(alpha = 0.65f),
-                                        Color.Black.copy(alpha = 0.85f)
+                                    colorStops = arrayOf(
+                                        0.0f to Color.Black.copy(alpha = 0.65f),
+                                        0.50f to Color(0xD9090D16),
+                                        1.0f to Color(0xFA090D16)
                                     )
                                 )
                             )
@@ -1286,7 +1324,7 @@ fun BlinkitSalonCard(
                             .weight(1f)
                             .wrapContentHeight()
                             .padding(end = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         // Highly Visible Live Wait Time & Real-time Busy/Free Badge
                         Row(
@@ -1373,37 +1411,57 @@ fun BlinkitSalonCard(
                             }
                         }
 
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = salon.name,
-                                style = MaterialTheme.typography.titleMedium.copy(
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 16.sp,
-                                    lineHeight = 20.sp
+                        // Dedicated high-contrast text container so Salon Name & Tagline are 100% legible over any uploaded image
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(
+                                    if (hasCustomPhoto) {
+                                        Modifier
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(Color(0xB3090D16))
+                                            .padding(horizontal = 8.dp, vertical = 5.dp)
+                                    } else {
+                                        Modifier
+                                    }
                                 ),
-                                color = Color.White,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                            if (salon.isPhoneVerified) {
-                                com.example.ui.components.VerifiedNumberBadge(
-                                    text = "✓ Verified Number"
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = salon.name,
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 16.sp,
+                                        lineHeight = 20.sp,
+                                        shadow = highContrastTextShadow
+                                    ),
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false)
                                 )
+                                if (salon.isPhoneVerified) {
+                                    com.example.ui.components.VerifiedBlueTickIcon(size = 16.dp)
+                                }
                             }
-                        }
 
-                        Text(
-                            text = if (salon.tagline.isNotBlank()) salon.tagline else "Verified Grooming Partner",
-                            fontSize = 11.sp,
-                            lineHeight = 14.sp,
-                            color = Color(0xFFCBD5E1),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                            Text(
+                                text = if (salon.tagline.isNotBlank()) salon.tagline else "Verified Grooming Partner",
+                                style = TextStyle(
+                                    fontSize = 11.sp,
+                                    lineHeight = 14.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = Color(0xFFE2E8F0),
+                                    shadow = highContrastTextShadow
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
 
                     // Salon Scissors Badge Icon
@@ -1411,8 +1469,8 @@ fun BlinkitSalonCard(
                         modifier = Modifier
                             .size(44.dp)
                             .clip(CircleShape)
-                            .background(Color(0x33F59E0B))
-                            .border(1.dp, AmberPrimary.copy(alpha = 0.4f), CircleShape),
+                            .background(Color(0xD90F172A))
+                            .border(1.dp, AmberPrimary.copy(alpha = 0.6f), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
@@ -1621,26 +1679,46 @@ fun BlinkitSalonCard(
                             )
                         }
 
-                        // 6. Booking Action: "View & Book" or "Join Waitlist" if busy
-                        Button(
-                            onClick = onBookClick,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
-                                contentColor = if (isBusy) Color.White else Color(0xFF1E1402)
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
-                            modifier = Modifier.testTag("view_and_book_button_${salon.id}")
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        if (!isOwnSalon) {
+                            // 6. Booking Action: "View & Book" or "Join Waitlist" if busy
+                            Button(
+                                onClick = onBookClick,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
+                                    contentColor = if (isBusy) Color.White else Color(0xFF1E1402)
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
+                                modifier = Modifier.testTag("view_and_book_button_${salon.id}")
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = if (isBusy) "Join Waitlist" else "View & Book",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                }
+                            }
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color(0xFF1E293B))
+                                    .border(1.dp, AmberPrimary.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
                             ) {
                                 Text(
-                                    text = if (isBusy) "Join Waitlist" else "View & Book",
-                                    fontSize = 13.sp,
+                                    text = "Your Salon",
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
-                                    maxLines = 1
+                                    color = AmberPrimary,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }
@@ -1678,7 +1756,7 @@ fun EmptySalonsPlaceholder(
                 fontSize = 14.sp
             )
             Text(
-                text = "Register a real salon in Partner Mode or enable 'Show Demo Salons' in Profile → App Settings.",
+                text = "Register your salon in Partner Mode or reset filters to discover nearby grooming studios.",
                 color = Color(0xFF94A3B8),
                 fontSize = 12.sp,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
