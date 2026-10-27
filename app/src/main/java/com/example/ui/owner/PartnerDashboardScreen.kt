@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -36,7 +37,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.CurrencyRupee
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.LocationOn
@@ -154,19 +157,22 @@ fun PartnerDashboardScreen(
     onSubmitFeedback: (rating: Int, category: String, message: String, onDone: (Boolean, String) -> Unit) -> Unit = { _, _, _, onDone ->
         onDone(true, "Saved")
     },
+    onResetSalonRegistration: (String?) -> Unit = {},
     onExitPartnerMode: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Logged-in Partner manages only their own salon: match by ownerId / partnerId / profile.salonId first
+    // Logged-in Partner manages ONLY their own registered salon (strictly where isRegistrationCompleted == true)
     val currentSalon = salons.find {
         !partnerProfile?.id.isNullOrBlank() &&
-            (it.ownerId == partnerProfile?.id || it.partnerId == partnerProfile?.id || it.id == "salon_${partnerProfile?.id}")
+            (it.ownerId == partnerProfile?.id || it.partnerId == partnerProfile?.id || it.id == "salon_${partnerProfile?.id}") &&
+            it.isRegistrationCompleted
     }
         ?: salons.find {
-            !partnerProfile?.salonId.isNullOrBlank() && it.id == partnerProfile?.salonId
+            !partnerProfile?.salonId.isNullOrBlank() &&
+                it.id == partnerProfile?.salonId &&
+                it.isRegistrationCompleted
         }
-        ?: salons.find { it.id == selectedSalonId }
-        ?: salons.firstOrNull()
+        ?: salons.find { it.id == selectedSalonId && it.isRegistrationCompleted }
 
     // Filter bookings in real time strictly for this partner's salon (booking.salonId == currentSalon.id)
     val salonBookings = if (currentSalon != null) {
@@ -258,7 +264,8 @@ fun PartnerDashboardScreen(
                     onOpenSupportCenter = { showSupportDialog = true },
                     onOpenFeedbackForm = { showFeedbackDialog = true },
                     onOpenTerms = { activeLegalTab = LegalPolicyTab.TERMS },
-                    onOpenPrivacyPolicy = { activeLegalTab = LegalPolicyTab.PRIVACY }
+                    onOpenPrivacyPolicy = { activeLegalTab = LegalPolicyTab.PRIVACY },
+                    onResetSalonRegistration = { onResetSalonRegistration(currentSalon?.id) }
                 )
             }
         }
@@ -697,8 +704,9 @@ fun TheLiveSwitch(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(64.dp)
+                    .heightIn(min = 64.dp)
                     .testTag("massive_shop_toggle_button"),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (isOpen) GreenSuccess else RedAlert
                 ),
@@ -720,7 +728,10 @@ fun TheLiveSwitch(
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Black,
                             color = Color.White,
-                            letterSpacing = 0.5.sp
+                            letterSpacing = 0.5.sp,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = if (isOpen) {
@@ -731,7 +742,9 @@ fun TheLiveSwitch(
                                 "Currently: Marked offline on customer app"
                             },
                             fontSize = 11.sp,
-                            color = Color.White.copy(alpha = 0.85f)
+                            color = Color.White.copy(alpha = 0.85f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -834,8 +847,11 @@ fun BarberAvailabilityToggleCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -848,24 +864,30 @@ fun BarberAvailabilityToggleCard(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = Color(0xFF94A3B8),
-                        letterSpacing = 1.sp
+                        letterSpacing = 0.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
-                // Current State Badge
+                // Current State Badge ("4 CHAIRS FREE" / "CUTTING HAIR") - single-line non-wrapping
                 Box(
                     modifier = Modifier
+                        .heightIn(min = 26.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(statusBg)
                         .border(1.dp, statusBorder.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                        .padding(horizontal = 8.dp, vertical = 3.dp)
-                        .testTag("current_status_badge")
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .testTag("current_status_badge"),
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = if (isBusy) "🔴 CUTTING HAIR (${waitingTimeMinutes}m wait)" else "🟢 $availableChairs CHAIRS FREE",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Black,
-                        color = if (isBusy) RedAlert else GreenSuccess
+                        color = if (isBusy) RedAlert else GreenSuccess,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -891,8 +913,9 @@ fun BarberAvailabilityToggleCard(
                     onClick = { onStatusChange("FREE") },
                     modifier = Modifier
                         .weight(1f)
-                        .height(52.dp)
+                        .heightIn(min = 50.dp)
                         .testTag("status_free_button"),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (!isBusy) GreenSuccess else Color(0xFF1E293B),
                         contentColor = if (!isBusy) Color.White else Color(0xFF94A3B8)
@@ -902,16 +925,21 @@ fun BarberAvailabilityToggleCard(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         Text(
                             text = "🟢",
-                            fontSize = 14.sp
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            softWrap = false
                         )
                         Text(
                             text = "Free (Available)",
-                            fontSize = 13.sp,
-                            fontWeight = if (!isBusy) FontWeight.Black else FontWeight.SemiBold
+                            fontSize = 12.sp,
+                            fontWeight = if (!isBusy) FontWeight.Black else FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -921,8 +949,9 @@ fun BarberAvailabilityToggleCard(
                     onClick = { onStatusChange("BUSY") },
                     modifier = Modifier
                         .weight(1f)
-                        .height(52.dp)
+                        .heightIn(min = 50.dp)
                         .testTag("status_busy_button"),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (isBusy) RedAlert else Color(0xFF1E293B),
                         contentColor = if (isBusy) Color.White else Color(0xFF94A3B8)
@@ -932,16 +961,21 @@ fun BarberAvailabilityToggleCard(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         Text(
                             text = "✂️",
-                            fontSize = 14.sp
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            softWrap = false
                         )
                         Text(
                             text = "Busy (Cutting)",
-                            fontSize = 13.sp,
-                            fontWeight = if (isBusy) FontWeight.Black else FontWeight.SemiBold
+                            fontSize = 12.sp,
+                            fontWeight = if (isBusy) FontWeight.Black else FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -1370,8 +1404,9 @@ fun LiveQueueBookingCard(
                         onClick = onAcceptClick,
                         modifier = Modifier
                             .weight(1f)
-                            .height(40.dp)
+                            .heightIn(min = 44.dp)
                             .testTag("accept_booking_btn_${booking.id}"),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = GreenSuccess,
                             contentColor = Color.White
@@ -1381,13 +1416,16 @@ fun LiveQueueBookingCard(
                         Icon(
                             imageVector = Icons.Default.Check,
                             contentDescription = "Accept Booking",
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = "Accept Booking",
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -1396,8 +1434,9 @@ fun LiveQueueBookingCard(
                     onClick = onRejectClick,
                     modifier = Modifier
                         .weight(1f)
-                        .height(40.dp)
+                        .heightIn(min = 44.dp)
                         .testTag("reject_booking_btn_${booking.id}"),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
                     border = androidx.compose.foundation.BorderStroke(1.dp, RedAlert.copy(alpha = 0.7f)),
                     shape = RoundedCornerShape(10.dp)
@@ -1411,7 +1450,10 @@ fun LiveQueueBookingCard(
                     Text(
                         text = "Reject Slot",
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -1421,8 +1463,9 @@ fun LiveQueueBookingCard(
                 onClick = onVerifyPinClick,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
+                    .heightIn(min = 50.dp)
                     .testTag("enter_pin_to_complete_btn_${booking.id}"),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Color(0xFF2563EB),
                     contentColor = Color.White
@@ -1440,8 +1483,11 @@ fun LiveQueueBookingCard(
                     )
                     Text(
                         text = "Enter 4-digit PIN to Complete",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -1796,8 +1842,9 @@ fun PartnerMenuManagerTabContent(
                         enabled = newServiceName.isNotBlank() && parsedNewPrice != null && SecurityValidator.isValidServicePrice(parsedNewPrice),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(46.dp)
+                            .heightIn(min = 48.dp)
                             .testTag("add_service_button"),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = GreenSuccess,
                             contentColor = Color.White
@@ -1813,7 +1860,10 @@ fun PartnerMenuManagerTabContent(
                         Text(
                             text = "+ Add Service to Live Catalog",
                             fontSize = 13.sp,
-                            fontWeight = FontWeight.ExtraBold
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -2116,8 +2166,9 @@ fun PartnerMenuManagerTabContent(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp)
+                    .heightIn(min = 52.dp)
                     .testTag("save_menu_prices_button"),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = AmberPrimary,
                     contentColor = Color(0xFF1E1402)
@@ -2136,7 +2187,9 @@ fun PartnerMenuManagerTabContent(
                     Text(
                         text = if (isSaved) "Saved to Profile & Cloud!" else "Save to Profile",
                         fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -2252,7 +2305,8 @@ fun PartnerShopProfileTabContent(
     onOpenSupportCenter: () -> Unit = {},
     onOpenFeedbackForm: () -> Unit = {},
     onOpenTerms: () -> Unit = {},
-    onOpenPrivacyPolicy: () -> Unit = {}
+    onOpenPrivacyPolicy: () -> Unit = {},
+    onResetSalonRegistration: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -2402,15 +2456,41 @@ fun PartnerShopProfileTabContent(
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()
                             )
+                            // Strong dark vertical gradient scrim (0.65f to 0.85f) for crisp white text contrast
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .background(
                                         Brush.verticalGradient(
-                                            listOf(Color(0x33000000), Color(0xCC090D16))
+                                            listOf(
+                                                Color.Black.copy(alpha = 0.65f),
+                                                Color.Black.copy(alpha = 0.85f)
+                                            )
                                         )
                                     )
                             )
+                            Column(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = shopName.ifBlank { salon?.name ?: "Your Grooming Studio" },
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = shopTagline.ifBlank { "Instant grooming slots • Zero queue wait time" },
+                                    fontSize = 11.sp,
+                                    color = Color(0xFFE2E8F0),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                             Row(
                                 modifier = Modifier
                                     .align(Alignment.BottomEnd)
@@ -2468,6 +2548,38 @@ fun PartnerShopProfileTabContent(
                                     textAlign = TextAlign.Center
                                 )
                             }
+                        }
+                    }
+
+                    // Remove Custom Photo button when a custom/preset photo is active
+                    if (localPhotoDataUrl.isNotBlank() || decodedShopBitmap != null) {
+                        OutlinedButton(
+                            onClick = {
+                                localPhotoDataUrl = ""
+                                if (salon != null) {
+                                    onSaveShopPhoto(salon.id, "")
+                                    uploadStatusMessage = "Custom cover photo removed. Reverted to clean default dark header."
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 44.dp)
+                                .testTag("remove_custom_photo_button"),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, RedAlert.copy(alpha = 0.6f)),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFCA5A5))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteOutline,
+                                contentDescription = "Remove Custom Photo",
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Remove Custom Photo",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
 
@@ -2809,6 +2921,7 @@ fun PartnerShopProfileTabContent(
                     HorizontalDivider(color = Color(0xFF1E293B))
 
                     // GPS Auto-Fetch + OpenStreetMap Pin Picker
+                    val gpsScope = androidx.compose.runtime.rememberCoroutineScope()
                     val gpsPermissionLauncher = rememberLauncherForActivityResult(
                         contract = ActivityResultContracts.RequestMultiplePermissions()
                     ) { permissions ->
@@ -2821,11 +2934,11 @@ fun PartnerShopProfileTabContent(
                                 isGpsFetched = true
                                 isFetchingGps = false
                                 locationSaveSuccess = false
-                                if (fullAddress.isBlank()) {
-                                    fullAddress = "Shop #4, Kankarbagh Main Road, Near Central Park"
-                                }
-                                if (landmark.isBlank()) {
-                                    landmark = "Opposite Metro Pillar #42"
+                                gpsScope.launch {
+                                    val (revTitle, revSub) = com.example.ui.components.reverseGeocodeLocation(context, lat, lng)
+                                    if (fullAddress.isBlank() && revSub.isNotBlank()) {
+                                        fullAddress = "$revTitle ($revSub)"
+                                    }
                                 }
                             }
                         } else {
@@ -2843,11 +2956,11 @@ fun PartnerShopProfileTabContent(
                                     isGpsFetched = true
                                     isFetchingGps = false
                                     locationSaveSuccess = false
-                                    if (fullAddress.isBlank()) {
-                                        fullAddress = "Shop #4, Kankarbagh Main Road, Near Central Park"
-                                    }
-                                    if (landmark.isBlank()) {
-                                        landmark = "Opposite Metro Pillar #42"
+                                    gpsScope.launch {
+                                        val (revTitle, revSub) = com.example.ui.components.reverseGeocodeLocation(context, lat, lng)
+                                        if (fullAddress.isBlank() && revSub.isNotBlank()) {
+                                            fullAddress = "$revTitle ($revSub)"
+                                        }
                                     }
                                 }
                             } else {
@@ -2861,8 +2974,9 @@ fun PartnerShopProfileTabContent(
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
+                            .heightIn(min = 48.dp)
                             .testTag("gps_auto_fetch_button"),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xFF1E3A8A)
                         ),
@@ -2882,7 +2996,10 @@ fun PartnerShopProfileTabContent(
                                 text = if (isFetchingGps) "Acquiring Satellites..." else "📍 Use Current GPS Location",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color.White
+                                color = Color.White,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -2944,8 +3061,9 @@ fun PartnerShopProfileTabContent(
                         enabled = fullAddress.isNotBlank() && shopName.isNotBlank(),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(50.dp)
+                            .heightIn(min = 50.dp)
                             .testTag("save_shop_location_button"),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = AmberPrimary,
                             disabledContainerColor = Color(0xFF475569)
@@ -2966,7 +3084,9 @@ fun PartnerShopProfileTabContent(
                                 text = "Save Changes",
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = DarkBackground
+                                color = DarkBackground,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -3011,6 +3131,74 @@ fun PartnerShopProfileTabContent(
                 onOpenTerms = onOpenTerms,
                 onOpenPrivacyPolicy = onOpenPrivacyPolicy
             )
+        }
+
+        // 4. Unregister / Reset Salon Profile Option (Danger Zone)
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Color(0xFFEF4444).copy(alpha = 0.45f), RoundedCornerShape(16.dp)),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1F1218))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = null,
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            text = "Unregister / Reset Salon Profile",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                            color = Color(0xFFFCA5A5)
+                        )
+                    }
+                    Text(
+                        text = "Deletes your current salon registration (${salon?.name ?: "My Salon"}) from Cloud Firestore so you can test the fresh Customer → Partner Registration Form flow from scratch.",
+                        fontSize = 11.sp,
+                        color = Color(0xFFE2E8F0),
+                        lineHeight = 15.sp
+                    )
+                    OutlinedButton(
+                        onClick = onResetSalonRegistration,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .testTag("reset_delete_salon_registration_btn"),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFFEF4444))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Reset / Delete Salon Registration",
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(17.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Reset / Delete Salon Registration",
+                            color = Color(0xFFEF4444),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
         }
     }
 }

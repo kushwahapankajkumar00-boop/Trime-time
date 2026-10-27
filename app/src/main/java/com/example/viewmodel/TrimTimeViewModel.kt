@@ -53,11 +53,18 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val showPartnerOnboarding: StateFlow<Boolean> = repository.showPartnerOnboarding
     val appPreferences: StateFlow<AppPreferences> = repository.appPreferences
 
+    // Live Customer GPS Coordinates & Reverse-Geocoded Location Display
+    val userLatitude: StateFlow<Double> = repository.userLatitude
+    val userLongitude: StateFlow<Double> = repository.userLongitude
+    val userLocationTitle: StateFlow<String> = repository.userLocationTitle
+    val userLocationSubtitle: StateFlow<String> = repository.userLocationSubtitle
+    val isLiveGpsActive: StateFlow<Boolean> = repository.isLiveGpsActive
+
     // Real-Time Salons & Bookings from Firestore
     val allSalons = repository.salons
     val allBookings = repository.bookings
 
-    // Whether the currently logged-in user already owns a registered salon in Firestore
+    // Whether the currently logged-in user already owns a registered salon in Firestore (strictly isRegistrationCompleted == true)
     val hasRegisteredPartnerSalon: StateFlow<Boolean> = combine(
         allSalons,
         currentUserProfile
@@ -66,8 +73,9 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         if (uid.isBlank()) {
             false
         } else {
-            profile?.hasRegisteredSalon == true ||
-                salons.any { it.ownerId == uid || it.partnerId == uid }
+            salons.any {
+                (it.ownerId == uid || it.partnerId == uid) && it.isRegistrationCompleted
+            }
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
@@ -94,22 +102,26 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     private val _selectedCategory = MutableStateFlow("All")
     val selectedCategory: StateFlow<String> = _selectedCategory.asStateFlow()
 
-    // Filtered Salons for Customer View
+    // Filtered Salons for Customer View: dynamically calculates distance from live (userLatitude, userLongitude),
+    // prioritizes real Firestore-registered salons at the top, and hides Demo Salons unless showDemoSalons is enabled!
     val filteredSalons: StateFlow<List<Salon>> = combine(
-        allSalons,
-        _searchQuery,
-        _selectedCategory
-    ) { salons, query, category ->
-        salons.filter { salon ->
+        combine(allSalons, _searchQuery, _selectedCategory) { s, q, c -> Triple(s, q, c) },
+        combine(userLatitude, userLongitude, appPreferences) { lat, lng, prefs -> Triple(lat, lng, prefs) }
+    ) { (salons, query, category), (uLat, uLng, prefs) ->
+        val recalculated = repository.recalculateAndSortSalons(salons, uLat, uLng)
+        recalculated.filter { salon ->
+            val includeByDemoSetting = prefs.showDemoSalons || !repository.isDemoSalon(salon.id)
+
             val matchesQuery = query.isBlank() ||
                     salon.name.contains(query, ignoreCase = true) ||
                     salon.location.contains(query, ignoreCase = true) ||
+                    salon.shopAddress.contains(query, ignoreCase = true) ||
                     salon.services.any { it.name.contains(query, ignoreCase = true) }
 
             val matchesCategory = category == "All" ||
                     salon.services.any { it.category.equals(category, ignoreCase = true) }
 
-            matchesQuery && matchesCategory
+            includeByDemoSetting && matchesQuery && matchesCategory
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -179,6 +191,14 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun setServiceToBook(service: SalonService?) {
+        if (service != null) {
+            val currentUid = currentUserProfile.value?.id?.trim().orEmpty()
+            val salon = _selectedSalon.value
+            if (currentUid.isNotBlank() && salon != null && (salon.ownerId == currentUid || salon.partnerId == currentUid)) {
+                _userMessage.value = "This is your own registered salon. Manage it in Partner Mode."
+                return
+            }
+        }
         _serviceToBook.value = service
     }
 
@@ -186,17 +206,79 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         _selectedTimeSlot.value = slot
     }
 
-    // Rule 1: Mandatory Phone Collection (No OTP)
-    fun savePhoneNumber(phone: String, onSuccess: () -> Unit = {}) {
+    // Rule 1: Mandatory Phone Collection with 2-Step OTP Verification
+    fun savePhoneNumber(
+        phone: String,
+        isPhoneVerified: Boolean = true,
+        onSuccess: () -> Unit = {}
+    ) {
         repository.updateUserPhone(
             phone = phone,
             onSuccess = {
-                _userMessage.value = "Contact number saved successfully."
+                _userMessage.value = "✓ Mobile number verified & saved to your profile!"
                 onSuccess()
             },
             onError = { err ->
                 _userMessage.value = err
             }
+        )
+    }
+
+    fun generateFourDigitOtp(): String = repository.generateFourDigitOtp()
+
+    fun requestPhoneVerificationOtp(
+        rawPhone: String,
+        excludeUserId: String? = null,
+        onOtpGenerated: (cleanTenDigits: String, otpCode: String) -> Unit,
+        onError: (String) -> Unit = { _userMessage.value = it }
+    ) {
+        repository.requestPhoneVerificationOtp(
+            phone = rawPhone,
+            excludeUserId = excludeUserId,
+            onOtpGenerated = onOtpGenerated,
+            onError = onError
+        )
+    }
+
+    fun requestForgotPinOtp(
+        rawIdentifier: String,
+        onOtpGenerated: (cleanTenDigits: String, otpCode: String, userId: String) -> Unit,
+        onError: (String) -> Unit = { _userMessage.value = it }
+    ) {
+        repository.requestForgotPinOtp(
+            identifier = rawIdentifier,
+            onOtpReady = { matchedUid, phoneTenDigits, otpCode ->
+                onOtpGenerated(phoneTenDigits, otpCode, matchedUid)
+            },
+            onError = onError
+        )
+    }
+
+    fun resetLoginPinAndAuthenticate(
+        rawIdentifier: String,
+        newPin: String,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = { _userMessage.value = it }
+    ) {
+        repository.requestForgotPinOtp(
+            identifier = rawIdentifier,
+            onOtpReady = { matchedUid, _, _ ->
+                repository.resetLoginPinAndAuthenticate(
+                    uid = matchedUid,
+                    newLoginPin = newPin,
+                    onSuccess = { profile ->
+                        _userMessage.value = "✓ 4-Digit Login PIN updated! Welcome back, ${profile.name}."
+                        if (profile.role.equals("partner", ignoreCase = true)) {
+                            profile.salonId?.let { _partnerSelectedSalonId.value = it }
+                        } else {
+                            _currentNavTab.value = CustomerNavTab.SALONS
+                        }
+                        onSuccess()
+                    },
+                    onError = onError
+                )
+            },
+            onError = onError
         )
     }
 
@@ -230,13 +312,20 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
+        val salon = _selectedSalon.value ?: return
+
+        // Rule 4: Prevent Self-Booking (Owner Booking Their Own Salon)
+        if (custId.isNotBlank() && (salon.ownerId == custId || salon.partnerId == custId)) {
+            _userMessage.value = "This is your own registered salon. Manage it in Partner Mode."
+            return
+        }
+
         // Rule 2 One Active Booking check (PENDING, ACCEPTED, IN_PROGRESS)
         if (hasActivePendingBooking.value) {
             _userMessage.value = "You already have an active booking (Pending/Accepted/In Progress). Please complete or cancel it first."
             return
         }
 
-        val salon = _selectedSalon.value ?: return
         val service = _serviceToBook.value ?: return
         val slot = _selectedTimeSlot.value
 
@@ -287,13 +376,15 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Direct Firestore Account Sign-In / Registration (Works on ANY APK without SHA-1 restrictions):
+     * Direct Firestore Account Sign-In / Registration with 2-Step Phone OTP & 4-Digit Login PIN:
      */
     fun signInWithRealIdentity(
         name: String,
         email: String,
         phone: String = "",
         asPartner: Boolean = false,
+        loginPin: String = "",
+        isPhoneVerified: Boolean = true,
         onSuccess: () -> Unit = {}
     ) {
         repository.signInWithRealIdentity(
@@ -301,8 +392,10 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             email = email,
             phone = phone,
             asPartner = asPartner,
+            loginPin = loginPin,
+            isPhoneVerified = isPhoneVerified,
             onSuccess = {
-                _userMessage.value = "Signed in as $name"
+                _userMessage.value = "✓ Phone verified & account created for $name"
                 if (asPartner) {
                     currentUserProfile.value?.salonId?.let { _partnerSelectedSalonId.value = it }
                 } else {
@@ -317,15 +410,17 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Simple 1-Identifier Login for Existing Users (Mobile Number OR Email Address):
+     * Login for Existing Users (Mobile Number OR Email Address + Mandatory 4-Digit Secret Login PIN):
      */
     fun loginExistingUser(
         identifier: String,
+        loginPin: String = "",
         onAccountNotFound: (prefillEmail: String, prefillPhone: String) -> Unit = { _, _ -> },
         onSuccess: () -> Unit = {}
     ) {
         repository.loginExistingUser(
             identifier = identifier,
+            loginPin = loginPin,
             onSuccess = { profile ->
                 _userMessage.value = "Welcome back, ${profile.name}!"
                 if (profile.role.equals("partner", ignoreCase = true)) {
@@ -376,13 +471,27 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
 
     fun switchToPartnerRole() {
         _authMode.value = AuthMode.NONE
+        _selectedSalon.value = null
+        _serviceToBook.value = null
         repository.switchToPartnerRole(
             onSalonReady = { salonId ->
                 _partnerSelectedSalonId.value = salonId
-                _userMessage.value = "Switched to Partner / Salon Owner Mode"
             },
             onRequireRegistration = {
-                _userMessage.value = "Please register your salon details to unlock Partner Dashboard."
+                _userMessage.value = "Please complete the Salon Partner Registration Form to unlock Partner Dashboard."
+            }
+        )
+    }
+
+    fun resetPartnerSalonRegistration(salonId: String? = null) {
+        _partnerSelectedSalonId.value = null
+        repository.resetOrDeletePartnerSalon(
+            salonId = salonId,
+            onSuccess = {
+                _userMessage.value = "Salon registration reset & deleted from Firestore! Fill the registration form to register a new salon."
+            },
+            onError = { err ->
+                _userMessage.value = err
             }
         )
     }
@@ -402,6 +511,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         initialServices: List<SalonService>,
         latitude: Double,
         longitude: Double,
+        isPhoneVerified: Boolean = true,
         onSuccess: () -> Unit = {}
     ) {
         repository.registerPartnerSalon(
@@ -433,7 +543,6 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     fun switchToCustomerRole() {
         repository.switchToCustomerRole()
         _currentNavTab.value = CustomerNavTab.SALONS
-        _userMessage.value = "Switched to Customer Mode"
     }
 
     // ==========================================
@@ -466,10 +575,20 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
+    fun setShowDemoSalons(show: Boolean) {
+        repository.setShowDemoSalons(show)
+        _userMessage.value = if (show) {
+            "Demo salons enabled"
+        } else {
+            "Demo salons hidden (showing only real registered salons)"
+        }
+    }
+
     fun updatePersonalProfile(
         name: String,
         phone: String,
         defaultCity: String,
+        isPhoneVerified: Boolean = true,
         onSuccess: () -> Unit = {}
     ) {
         repository.updatePersonalProfile(
@@ -477,13 +596,111 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             phone = phone,
             defaultCity = defaultCity,
             onSuccess = {
-                _userMessage.value = "Personal profile & location updated in Firestore!"
+                viewModelScope.launch {
+                    val geo = com.example.ui.components.forwardGeocodeLocation(getApplication(), defaultCity)
+                    if (geo != null) {
+                        repository.updateUserGpsLocation(
+                            latitude = geo.first,
+                            longitude = geo.second,
+                            title = defaultCity,
+                            subtitle = geo.third,
+                            isLiveGps = false
+                        )
+                    }
+                }
+                _userMessage.value = "Personal profile & verified phone updated in Firestore!"
                 onSuccess()
             },
             onError = { err ->
                 _userMessage.value = err
             }
         )
+    }
+
+    /**
+     * Called when Customer Mode detects live GPS coordinates (automatically on launch or via "Use My Current GPS Location").
+     * Immediately updates userLatitude & userLongitude, recalculates all salon distances, and reverse-geocodes the town/road name.
+     */
+    fun onLiveGpsDetected(
+        latitude: Double,
+        longitude: Double,
+        showConfirmationToast: Boolean = false
+    ) {
+        if (latitude == 0.0 || longitude == 0.0) return
+        val coordLabel = String.format(java.util.Locale.US, "%.4f, %.4f", latitude, longitude)
+        repository.updateUserGpsLocation(
+            latitude = latitude,
+            longitude = longitude,
+            subtitle = "Live GPS ($coordLabel) • Calculating nearest salons...",
+            isLiveGps = true
+        )
+        viewModelScope.launch {
+            val (resolvedTitle, resolvedSubtitle) = com.example.ui.components.reverseGeocodeLocation(
+                context = getApplication(),
+                latitude = latitude,
+                longitude = longitude
+            )
+            repository.updateUserGpsLocation(
+                latitude = latitude,
+                longitude = longitude,
+                title = resolvedTitle,
+                subtitle = resolvedSubtitle,
+                isLiveGps = true
+            )
+            if (showConfirmationToast) {
+                _userMessage.value = "📍 Live GPS location set to $resolvedTitle"
+            }
+        }
+    }
+
+    /**
+     * Called when the customer manually enters a City/Area or picks a custom pin on the OpenStreetMap in the Location Sheet.
+     */
+    fun updateCustomerLocationManually(
+        cityOrAreaInput: String,
+        pickedLatitude: Double? = null,
+        pickedLongitude: Double? = null
+    ) {
+        val cleanInput = cityOrAreaInput.trim()
+        viewModelScope.launch {
+            if (pickedLatitude != null && pickedLongitude != null && pickedLatitude != 0.0 && pickedLongitude != 0.0) {
+                val (revTitle, revSub) = com.example.ui.components.reverseGeocodeLocation(
+                    context = getApplication(),
+                    latitude = pickedLatitude,
+                    longitude = pickedLongitude
+                )
+                val finalTitle = cleanInput.ifBlank { revTitle }
+                repository.updateUserGpsLocation(
+                    latitude = pickedLatitude,
+                    longitude = pickedLongitude,
+                    title = finalTitle,
+                    subtitle = revSub,
+                    isLiveGps = true
+                )
+                _userMessage.value = "📍 Location updated to $finalTitle"
+            } else if (cleanInput.isNotBlank()) {
+                val geo = com.example.ui.components.forwardGeocodeLocation(getApplication(), cleanInput)
+                if (geo != null) {
+                    repository.updateUserGpsLocation(
+                        latitude = geo.first,
+                        longitude = geo.second,
+                        title = cleanInput,
+                        subtitle = geo.third,
+                        isLiveGps = false
+                    )
+                    _userMessage.value = "📍 Location set to $cleanInput"
+                } else {
+                    repository.updateUserGpsLocation(
+                        latitude = userLatitude.value,
+                        longitude = userLongitude.value,
+                        title = cleanInput,
+                        subtitle = "$cleanInput • Custom Location",
+                        isLiveGps = false
+                    )
+                    _userMessage.value = "📍 Location set to $cleanInput"
+                }
+            }
+        }
     }
 
     fun clearAppCache() {

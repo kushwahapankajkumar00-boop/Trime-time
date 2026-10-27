@@ -163,21 +163,24 @@ fun hasLocationPermission(context: Context): Boolean {
 /**
  * Fetches the device's real GPS / Network location using Android's native LocationManager
  * (zero billing, no Play Services key needed). Calls `onLocationResult(lat, lng, isLiveGps)`.
+ * Immediately returns the best lastKnownLocation if available AND requests a fresh live GPS update.
  */
 @SuppressLint("MissingPermission")
 fun fetchDeviceGpsLocation(
     context: Context,
+    fallbackLat: Double = DEFAULT_PATNA_LAT,
+    fallbackLng: Double = DEFAULT_PATNA_LNG,
     onLocationResult: (Double, Double, Boolean) -> Unit
 ) {
     if (!hasLocationPermission(context)) {
-        onLocationResult(DEFAULT_PATNA_LAT, DEFAULT_PATNA_LNG, false)
+        onLocationResult(fallbackLat, fallbackLng, false)
         return
     }
 
     try {
         val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         if (locationManager == null) {
-            onLocationResult(DEFAULT_PATNA_LAT, DEFAULT_PATNA_LNG, false)
+            onLocationResult(fallbackLat, fallbackLng, false)
             return
         }
 
@@ -189,33 +192,39 @@ fun fetchDeviceGpsLocation(
 
         var bestLocation: Location? = null
         for (provider in providers) {
-            if (locationManager.isProviderEnabled(provider)) {
+            val isEnabled = runCatching { locationManager.isProviderEnabled(provider) }.getOrDefault(false)
+            if (isEnabled || provider == LocationManager.PASSIVE_PROVIDER) {
                 val loc = runCatching { locationManager.getLastKnownLocation(provider) }.getOrNull()
-                if (loc != null) {
-                    if (bestLocation == null || loc.accuracy < bestLocation.accuracy) {
+                if (loc != null && loc.latitude != 0.0 && loc.longitude != 0.0) {
+                    if (bestLocation == null ||
+                        loc.time > bestLocation.time + 120_000L ||
+                        (kotlin.math.abs(loc.time - bestLocation.time) <= 120_000L && loc.accuracy < bestLocation.accuracy)
+                    ) {
                         bestLocation = loc
                     }
                 }
             }
         }
 
-        if (bestLocation != null && bestLocation.latitude != 0.0 && bestLocation.longitude != 0.0) {
+        val emittedCachedFix = if (bestLocation != null) {
             onLocationResult(bestLocation.latitude, bestLocation.longitude, true)
-            return
+            true
+        } else {
+            false
         }
 
-        // Request a fresh single location update if no cached location exists
-        val activeProvider = providers.firstOrNull {
+        // Also request a fresh live location fix from active GPS/Network provider
+        val activeProviders = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).filter {
             runCatching { locationManager.isProviderEnabled(it) }.getOrDefault(false)
         }
-        if (activeProvider != null) {
+        if (activeProviders.isNotEmpty()) {
             val listener = object : LocationListener {
                 override fun onLocationChanged(location: Location) {
-                    locationManager.removeUpdates(this)
+                    runCatching { locationManager.removeUpdates(this) }
                     if (location.latitude != 0.0 && location.longitude != 0.0) {
                         onLocationResult(location.latitude, location.longitude, true)
-                    } else {
-                        onLocationResult(DEFAULT_PATNA_LAT, DEFAULT_PATNA_LNG, false)
+                    } else if (!emittedCachedFix) {
+                        onLocationResult(fallbackLat, fallbackLng, false)
                     }
                 }
 
@@ -224,15 +233,208 @@ fun fetchDeviceGpsLocation(
                 override fun onProviderEnabled(provider: String) {}
                 override fun onProviderDisabled(provider: String) {}
             }
-            locationManager.requestSingleUpdate(activeProvider, listener, Looper.getMainLooper())
-            // Provide immediate fallback while waiting or if indoor emulator has no satellite fix
-            onLocationResult(DEFAULT_PATNA_LAT, DEFAULT_PATNA_LNG, false)
-        } else {
-            onLocationResult(DEFAULT_PATNA_LAT, DEFAULT_PATNA_LNG, false)
+            for (prov in activeProviders) {
+                runCatching {
+                    locationManager.requestSingleUpdate(prov, listener, Looper.getMainLooper())
+                }
+            }
+        } else if (!emittedCachedFix) {
+            onLocationResult(fallbackLat, fallbackLng, false)
         }
     } catch (_: Exception) {
-        onLocationResult(DEFAULT_PATNA_LAT, DEFAULT_PATNA_LNG, false)
+        onLocationResult(fallbackLat, fallbackLng, false)
     }
+}
+
+/**
+ * Reverse-geocodes live GPS coordinates `(latitude, longitude)` into:
+ * - `first`: Primary Header Title (e.g. `"Bakhraur, Gopalganj"` or `"Kankarbagh, Patna"`)
+ * - `second`: Subtitle / Road / Area details (e.g. `"Main Road, Bihar • Live GPS"`)
+ * Uses Android's native `Geocoder` first, with an automatic fallback to OpenStreetMap Nominatim.
+ */
+suspend fun reverseGeocodeLocation(
+    context: Context,
+    latitude: Double,
+    longitude: Double
+): Pair<String, String> = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    val coordLabel = String.format(java.util.Locale.US, "%.4f, %.4f", latitude, longitude)
+
+    // 1. Try Android native Geocoder first
+    try {
+        if (android.location.Geocoder.isPresent()) {
+            val geocoder = android.location.Geocoder(context, java.util.Locale.getDefault())
+            @Suppress("DEPRECATION")
+            val addresses = geocoder.getFromLocation(latitude, longitude, 1)
+            val addr = addresses?.firstOrNull()
+            if (addr != null) {
+                val subLocality = addr.subLocality?.trim().orEmpty()
+                val locality = addr.locality?.trim().orEmpty()
+                val subAdmin = addr.subAdminArea?.trim().orEmpty()
+                val admin = addr.adminArea?.trim().orEmpty()
+                val thoroughfare = addr.thoroughfare?.trim().orEmpty()
+                val feature = addr.featureName?.trim().orEmpty()
+
+                val primaryParts = listOf(subLocality, locality, subAdmin, admin)
+                    .filter { it.isNotBlank() }
+                    .distinctBy { it.lowercase() }
+
+                if (primaryParts.isNotEmpty()) {
+                    val title = if (primaryParts.size >= 2) {
+                        "${primaryParts[0]}, ${primaryParts[1]}"
+                    } else {
+                        primaryParts[0]
+                    }
+                    val roadOrArea = thoroughfare
+                        .ifBlank { subLocality }
+                        .ifBlank { feature.takeIf { it.length > 2 && !it.contains("+") } ?: "" }
+                        .ifBlank { admin }
+                    val subtitle = if (roadOrArea.isNotBlank()) {
+                        "$roadOrArea • Live GPS ($coordLabel)"
+                    } else {
+                        "Live GPS ($coordLabel)"
+                    }
+                    return@withContext Pair(title, subtitle)
+                }
+            }
+        }
+    } catch (_: Exception) {
+        // Proceed to OpenStreetMap Nominatim fallback
+    }
+
+    // 2. Fallback to OpenStreetMap Nominatim reverse geocoding
+    try {
+        val urlStr = "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=$latitude&lon=$longitude&zoom=16&addressdetails=1"
+        val conn = (java.net.URL(urlStr).openConnection() as java.net.HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 4500
+            readTimeout = 4500
+            setRequestProperty("User-Agent", "${context.packageName} TrimTime/1.0")
+            setRequestProperty("Accept-Language", "en")
+        }
+        if (conn.responseCode == 200) {
+            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+            val json = org.json.JSONObject(responseText)
+            val addressObj = json.optJSONObject("address")
+            if (addressObj != null) {
+                val townOrVillage = listOf(
+                    addressObj.optString("village"),
+                    addressObj.optString("town"),
+                    addressObj.optString("suburb"),
+                    addressObj.optString("neighbourhood"),
+                    addressObj.optString("city_district"),
+                    addressObj.optString("hamlet"),
+                    addressObj.optString("city")
+                ).firstOrNull { it.isNotBlank() }.orEmpty()
+
+                val districtOrState = listOf(
+                    addressObj.optString("city"),
+                    addressObj.optString("state_district"),
+                    addressObj.optString("county"),
+                    addressObj.optString("state")
+                ).firstOrNull { it.isNotBlank() && !it.equals(townOrVillage, ignoreCase = true) }.orEmpty()
+
+                val roadName = listOf(
+                    addressObj.optString("road"),
+                    addressObj.optString("neighbourhood"),
+                    addressObj.optString("suburb"),
+                    addressObj.optString("state")
+                ).firstOrNull { it.isNotBlank() }.orEmpty()
+
+                val title = when {
+                    townOrVillage.isNotBlank() && districtOrState.isNotBlank() -> "$townOrVillage, $districtOrState"
+                    townOrVillage.isNotBlank() -> townOrVillage
+                    districtOrState.isNotBlank() -> districtOrState
+                    else -> ""
+                }
+                if (title.isNotBlank()) {
+                    val subtitle = if (roadName.isNotBlank()) {
+                        "$roadName • Live GPS ($coordLabel)"
+                    } else {
+                        "Live GPS ($coordLabel)"
+                    }
+                    return@withContext Pair(title, subtitle)
+                }
+            }
+        }
+    } catch (_: Exception) {
+        // Fallback below
+    }
+
+    Pair("GPS ($coordLabel)", "Live GPS Location • Nearby Salons")
+}
+
+/**
+ * Forward-geocodes a manually typed City/Town/Area string into `(latitude, longitude, displaySubtitle)`
+ * so manual location changes in Customer Mode or Profile also recalculate nearby salon distances.
+ */
+suspend fun forwardGeocodeLocation(
+    context: Context,
+    locationQuery: String
+): Triple<Double, Double, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    val cleanQuery = locationQuery.trim()
+    if (cleanQuery.length < 2) return@withContext null
+
+    // 1. Try Android native Geocoder first
+    try {
+        if (android.location.Geocoder.isPresent()) {
+            val geocoder = android.location.Geocoder(context, java.util.Locale.getDefault())
+            @Suppress("DEPRECATION")
+            val results = geocoder.getFromLocationName("$cleanQuery, India", 1)
+                ?.takeIf { it.isNotEmpty() }
+                ?: geocoder.getFromLocationName(cleanQuery, 1)
+            val match = results?.firstOrNull()
+            if (match != null && match.hasLatitude() && match.hasLongitude()) {
+                val lat = match.latitude
+                val lng = match.longitude
+                val sub = listOfNotNull(match.subAdminArea, match.adminArea)
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .joinToString(", ")
+                    .ifBlank { "Custom Location" }
+                return@withContext Triple(
+                    lat,
+                    lng,
+                    "$sub • (${String.format(java.util.Locale.US, "%.4f, %.4f", lat, lng)})"
+                )
+            }
+        }
+    } catch (_: Exception) {
+        // Fallback to Nominatim search
+    }
+
+    // 2. Fallback to OpenStreetMap Nominatim search
+    try {
+        val encoded = Uri.encode("$cleanQuery, India")
+        val urlStr = "https://nominatim.openstreetmap.org/search?format=jsonv2&q=$encoded&limit=1&addressdetails=1"
+        val conn = (java.net.URL(urlStr).openConnection() as java.net.HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 4500
+            readTimeout = 4500
+            setRequestProperty("User-Agent", "${context.packageName} TrimTime/1.0")
+            setRequestProperty("Accept-Language", "en")
+        }
+        if (conn.responseCode == 200) {
+            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+            val arr = org.json.JSONArray(responseText)
+            if (arr.length() > 0) {
+                val obj = arr.getJSONObject(0)
+                val lat = obj.optString("lat").toDoubleOrNull()
+                val lng = obj.optString("lon").toDoubleOrNull()
+                val displayName = obj.optString("display_name").split(",").take(3).joinToString(",").trim()
+                if (lat != null && lng != null && lat != 0.0 && lng != 0.0) {
+                    return@withContext Triple(
+                        lat,
+                        lng,
+                        "${displayName.ifBlank { cleanQuery }} • (${String.format(java.util.Locale.US, "%.4f, %.4f", lat, lng)})"
+                    )
+                }
+            }
+        }
+    } catch (_: Exception) {
+        // Ignore
+    }
+
+    null
 }
 
 /**
@@ -344,6 +546,9 @@ fun createMapPinDrawable(
 @Composable
 fun CustomerSalonsOsmMapSection(
     salons: List<Salon>,
+    userLatitude: Double = DEFAULT_PATNA_LAT,
+    userLongitude: Double = DEFAULT_PATNA_LNG,
+    onGpsLocationDetected: (Double, Double) -> Unit = { _, _ -> },
     onSalonSelected: (Salon) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -356,8 +561,12 @@ fun CustomerSalonsOsmMapSection(
         true
     }
 
-    var userLat by remember { mutableDoubleStateOf(DEFAULT_PATNA_LAT) }
-    var userLng by remember { mutableDoubleStateOf(DEFAULT_PATNA_LNG) }
+    var userLat by remember(userLatitude) {
+        mutableDoubleStateOf(if (userLatitude != 0.0) userLatitude else DEFAULT_PATNA_LAT)
+    }
+    var userLng by remember(userLongitude) {
+        mutableDoubleStateOf(if (userLongitude != 0.0) userLongitude else DEFAULT_PATNA_LNG)
+    }
     var hasLiveGps by remember { mutableStateOf(hasLocationPermission(context)) }
     var selectedMapSalon by remember(salons) { mutableStateOf(salons.firstOrNull()) }
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
@@ -368,29 +577,43 @@ fun CustomerSalonsOsmMapSection(
         val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
             permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
         if (granted) {
-            fetchDeviceGpsLocation(context) { lat, lng, isLive ->
+            fetchDeviceGpsLocation(
+                context = context,
+                fallbackLat = userLat,
+                fallbackLng = userLng
+            ) { lat, lng, isLive ->
                 userLat = lat
                 userLng = lng
                 hasLiveGps = isLive
+                if (isLive) {
+                    onGpsLocationDetected(lat, lng)
+                }
                 mapViewRef?.controller?.animateTo(GeoPoint(lat, lng))
                 mapViewRef?.controller?.setZoom(15.0)
             }
         } else {
             Toast.makeText(
                 context,
-                "Using default Patna location (GPS permission denied)",
+                "GPS permission denied. Tap top location bar to set your location manually.",
                 Toast.LENGTH_SHORT
             ).show()
-            mapViewRef?.controller?.animateTo(GeoPoint(DEFAULT_PATNA_LAT, DEFAULT_PATNA_LNG))
+            mapViewRef?.controller?.animateTo(GeoPoint(userLat, userLng))
         }
     }
 
     LaunchedEffect(Unit) {
         if (hasLocationPermission(context)) {
-            fetchDeviceGpsLocation(context) { lat, lng, isLive ->
+            fetchDeviceGpsLocation(
+                context = context,
+                fallbackLat = userLat,
+                fallbackLng = userLng
+            ) { lat, lng, isLive ->
                 userLat = lat
                 userLng = lng
                 hasLiveGps = isLive
+                if (isLive) {
+                    onGpsLocationDetected(lat, lng)
+                }
                 mapViewRef?.controller?.setCenter(GeoPoint(lat, lng))
             }
         } else {
@@ -400,6 +623,14 @@ fun CustomerSalonsOsmMapSection(
                     Manifest.permission.ACCESS_COARSE_LOCATION
                 )
             )
+        }
+    }
+
+    LaunchedEffect(userLatitude, userLongitude) {
+        if (userLatitude != 0.0 && userLongitude != 0.0) {
+            userLat = userLatitude
+            userLng = userLongitude
+            mapViewRef?.controller?.animateTo(GeoPoint(userLatitude, userLongitude))
         }
     }
 
@@ -446,13 +677,15 @@ fun CustomerSalonsOsmMapSection(
                         MapView(ctx).apply {
                             setTileSource(TileSourceFactory.MAPNIK)
                             setMultiTouchControls(true)
-                            zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
+                            minZoomLevel = 4.0
+                            maxZoomLevel = 17.5
+                            zoomController.setVisibility(CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT)
                             overlays.removeAll { it is org.osmdroid.views.overlay.CopyrightOverlay }
                             setOnTouchListener { v, _ ->
                                 v.parent?.requestDisallowInterceptTouchEvent(true)
                                 false
                             }
-                            controller.setZoom(14.5)
+                            controller.setZoom(15.5)
                             controller.setCenter(GeoPoint(userLat, userLng))
                             mapViewRef = this
                         }
@@ -464,7 +697,7 @@ fun CustomerSalonsOsmMapSection(
                         // 1. User's current GPS Location Marker
                         val userMarker = Marker(mapView).apply {
                             position = GeoPoint(userLat, userLng)
-                            title = if (hasLiveGps) "Your Live GPS Location" else "Default Location (Patna)"
+                            title = if (hasLiveGps) "Your Live GPS Location" else "Your Selected Location"
                             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                             icon = createMapPinDrawable(
                                 context = mapView.context,
@@ -484,8 +717,8 @@ fun CustomerSalonsOsmMapSection(
                             // Offset slightly if multiple salons share default coordinates so all markers are clickable
                             val sLat = salon.latitude
                             val sLng = salon.longitude
-                            val rawLat = if (sLat != null && sLat != 0.0) sLat else DEFAULT_PATNA_LAT + (index * 0.0022)
-                            val rawLng = if (sLng != null && sLng != 0.0) sLng else DEFAULT_PATNA_LNG + (index * 0.0022)
+                            val rawLat = if (sLat != null && sLat != 0.0) sLat else userLat + (index * 0.0022)
+                            val rawLng = if (sLng != null && sLng != 0.0) sLng else userLng + (index * 0.0022)
                             val isSelected = selectedMapSalon?.id == salon.id
 
                             val fillColor = when {
@@ -559,10 +792,17 @@ fun CustomerSalonsOsmMapSection(
                 FloatingActionButton(
                     onClick = {
                         if (hasLocationPermission(context)) {
-                            fetchDeviceGpsLocation(context) { lat, lng, isLive ->
+                            fetchDeviceGpsLocation(
+                                context = context,
+                                fallbackLat = userLat,
+                                fallbackLng = userLng
+                            ) { lat, lng, isLive ->
                                 userLat = lat
                                 userLng = lng
                                 hasLiveGps = isLive
+                                if (isLive) {
+                                    onGpsLocationDetected(lat, lng)
+                                }
                                 mapViewRef?.controller?.animateTo(GeoPoint(lat, lng))
                                 mapViewRef?.controller?.setZoom(15.5)
                             }
@@ -599,10 +839,10 @@ fun CustomerSalonsOsmMapSection(
                 val sLat = salon.latitude
                 val sLng = salon.longitude
                 if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
-                    val km = calculateDistanceKm(userLat, userLng, sLat, sLng)
-                    "${"%.1f".format(km)} km"
+                    val km = calculateDistanceKm(userLat, userLng, sLat, sLng).coerceAtLeast(0.1)
+                    "${"%.1f".format(java.util.Locale.US, km)} km"
                 } else {
-                    salon.distance.ifBlank { "1.2 km" }
+                    salon.distance.ifBlank { "0.5 km" }
                 }
             }
             val isBusy = salon.isBusy
@@ -841,6 +1081,15 @@ fun PartnerLocationPickerOsmMap(
         }
     }
 
+    // Automatically re-center and set zoom to 15.5 whenever GPS lock or parent updates latitude/longitude
+    LaunchedEffect(latitude, longitude) {
+        if (latitude != 0.0 && longitude != 0.0) {
+            mapViewRef?.controller?.setZoom(15.5)
+            mapViewRef?.controller?.animateTo(GeoPoint(latitude, longitude))
+            mapViewRef?.invalidate()
+        }
+    }
+
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -857,7 +1106,7 @@ fun PartnerLocationPickerOsmMap(
                 modifier = Modifier.size(16.dp)
             )
             Text(
-                text = "Tap map or drag pin to set exact shop location",
+                text = "Tap map, pinch to zoom, or drag pin to set shop location",
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Color(0xFFE2E8F0),
@@ -883,7 +1132,9 @@ fun PartnerLocationPickerOsmMap(
                     MapView(ctx).apply {
                         setTileSource(TileSourceFactory.MAPNIK)
                         setMultiTouchControls(true)
-                        zoomController.setVisibility(CustomZoomButtonsController.Visibility.NEVER)
+                        minZoomLevel = 4.0
+                        maxZoomLevel = 17.5
+                        zoomController.setVisibility(CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT)
                         overlays.removeAll { it is org.osmdroid.views.overlay.CopyrightOverlay }
                         setOnTouchListener { v, _ ->
                             v.parent?.requestDisallowInterceptTouchEvent(true)
@@ -893,7 +1144,7 @@ fun PartnerLocationPickerOsmMap(
                             if (latitude != 0.0) latitude else DEFAULT_PATNA_LAT,
                             if (longitude != 0.0) longitude else DEFAULT_PATNA_LNG
                         )
-                        controller.setZoom(16.0)
+                        controller.setZoom(15.5)
                         controller.setCenter(startPoint)
                         mapViewRef = this
                     }
@@ -961,8 +1212,8 @@ fun PartnerLocationPickerOsmMap(
                         if (latitude != 0.0) latitude else DEFAULT_PATNA_LAT,
                         if (longitude != 0.0) longitude else DEFAULT_PATNA_LNG
                     )
+                    mapViewRef?.controller?.setZoom(15.5)
                     mapViewRef?.controller?.animateTo(target)
-                    mapViewRef?.controller?.setZoom(16.5)
                 },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)

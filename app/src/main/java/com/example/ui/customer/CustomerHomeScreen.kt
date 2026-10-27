@@ -1,5 +1,10 @@
 package com.example.ui.customer
 
+import android.Manifest
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -24,12 +29,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.CurrencyRupee
 import androidx.compose.material.icons.filled.Directions
@@ -38,6 +45,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Navigation
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Person
@@ -46,19 +54,25 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -78,6 +92,10 @@ import androidx.compose.ui.unit.sp
 import com.example.model.Booking
 import com.example.model.Salon
 import com.example.ui.components.CustomerSalonsOsmMapSection
+import com.example.ui.components.PartnerLocationPickerOsmMap
+import com.example.ui.components.calculateDistanceKm
+import com.example.ui.components.fetchDeviceGpsLocation
+import com.example.ui.components.hasLocationPermission
 import com.example.ui.components.launchGeoDirections
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.AmberSecondary
@@ -90,12 +108,13 @@ import com.example.util.SalonImageUtils
 
 /**
  * Frictionless, Blinkit-style Customer Home Screen in Jetpack Compose:
- * 1. Auto-Location Header: GPS location (e.g., "Patna, Bihar 📍") with profile avatar icon.
+ * 1. Interactive Live GPS Location Header: Auto-fetches real GPS coordinates and reverse-geocodes
+ *    into actual City/Town & Road/Area name; tapping opens the "Change / Detect Location" bottom sheet.
  * 2. Quick Re-book Section: Top horizontal card showing user's past booking with 1-tap "Book Again".
  * 3. Smart Filter Chips: "Open Now", "Under ₹150", "Top Rated", "A/C Salons".
- * 4. Nearby Salons Feed (Geolocation Discovery): Vertical list of salon cards.
- * 5. Salon Card UI: Salon Name, Distance (e.g. "1.2 km"), Price starting from (e.g. "Starts at ₹100"),
- *    and highly visible Live Wait Time badge (e.g. "🟢 No Wait" or "🔴 15 Min Wait").
+ * 4. Nearby Salons Feed (Geolocation Discovery): Vertical list of salon cards sorted by nearest distance first.
+ * 5. Salon Card UI: Salon Name, Live Haversine Distance (e.g. "0.1 km"), Price starting from,
+ *    and highly visible Live Wait Time badge.
  * 6. Booking Action: Clear "View & Book" button on each card.
  */
 @Composable
@@ -106,34 +125,158 @@ fun CustomerHomeScreen(
     selectedCategory: String,
     onCategorySelected: (String) -> Unit,
     onSalonSelected: (Salon) -> Unit,
+    userLocationTitle: String = "Patna, Bihar",
+    userLocationSubtitle: String = "Tap to detect live GPS location",
+    userLatitude: Double = 25.5941,
+    userLongitude: Double = 85.1376,
+    isLiveGpsActive: Boolean = false,
+    onDetectGpsLocation: (Double, Double, Boolean) -> Unit = { _, _, _ -> },
+    onManualLocationSelected: (String, Double?, Double?) -> Unit = { _, _, _ -> },
     pastBooking: Booking? = null,
     onRebook: (Booking) -> Unit = {},
     onProfileClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+
     // Smart Filter state (Blinkit style)
     var selectedFilter by remember { mutableStateOf<String?>(null) }
     // Toggle between "List View" and "Live Map View" (OpenStreetMap)
     var isMapView by remember { mutableStateOf(false) }
+    // Interactive "Change / Detect Location" Bottom Sheet state
+    var showLocationSheet by remember { mutableStateOf(false) }
+    var isDetectingGps by remember { mutableStateOf(false) }
 
-    // Filter salons according to selected Smart Filter
-    val displayedSalons = remember(salons, selectedFilter) {
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+            permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (granted) {
+            isDetectingGps = true
+            fetchDeviceGpsLocation(
+                context = context,
+                fallbackLat = userLatitude,
+                fallbackLng = userLongitude
+            ) { lat, lng, isLive ->
+                isDetectingGps = false
+                if (isLive && lat != 0.0 && lng != 0.0) {
+                    onDetectGpsLocation(lat, lng, true)
+                }
+            }
+        } else {
+            isDetectingGps = false
+            Toast.makeText(
+                context,
+                "Location permission denied. Tap the top location bar to set your City/Area manually.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    // 1. Auto-Fetch Real GPS Location as soon as CustomerHomeScreen opens
+    LaunchedEffect(Unit) {
+        if (hasLocationPermission(context)) {
+            isDetectingGps = true
+            fetchDeviceGpsLocation(
+                context = context,
+                fallbackLat = userLatitude,
+                fallbackLng = userLongitude
+            ) { lat, lng, isLive ->
+                isDetectingGps = false
+                if (isLive && lat != 0.0 && lng != 0.0) {
+                    onDetectGpsLocation(lat, lng, false)
+                }
+            }
+        } else {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
+    // Filter salons according to selected Smart Filter, dynamically recalculate live Haversine distance
+    // from (userLatitude, userLongitude), and sort by shortest distance first!
+    val displayedSalons = remember(salons, selectedFilter, userLatitude, userLongitude) {
+        val withLiveDistances = salons.map { salon ->
+            val sLat = salon.latitude
+            val sLng = salon.longitude
+            if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
+                val km = calculateDistanceKm(userLatitude, userLongitude, sLat, sLng).coerceAtLeast(0.1)
+                salon.copy(distance = String.format(java.util.Locale.US, "%.1f km", km))
+            } else {
+                salon
+            }
+        }.sortedBy { salon ->
+            val sLat = salon.latitude
+            val sLng = salon.longitude
+            if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
+                calculateDistanceKm(userLatitude, userLongitude, sLat, sLng).coerceAtLeast(0.1)
+            } else {
+                salon.distance.replace("km", "", ignoreCase = true).trim().toDoubleOrNull() ?: 999.0
+            }
+        }
+
         val baseList = when (selectedFilter) {
-            "Open Now" -> salons.filter { it.isOpen }
-            "Under ₹150" -> salons.filter { salon ->
+            "Open Now" -> withLiveDistances.filter { it.isOpen }
+            "Under ₹150" -> withLiveDistances.filter { salon ->
                 val minPrice = salon.services.minOfOrNull { it.price } ?: 100
                 minPrice <= 150
             }
-            "Top Rated" -> salons.filter { it.rating >= 4.7 }
-            "A/C Salons" -> salons.filter { salon ->
+            "Top Rated" -> withLiveDistances.filter { it.rating >= 4.7 }
+            "A/C Salons" -> withLiveDistances.filter { salon ->
                 salon.tagline.contains("AC", ignoreCase = true) ||
                 salon.tagline.contains("Luxury", ignoreCase = true) ||
                 salon.name.contains("Unisex", ignoreCase = true) ||
                 salon.rating >= 4.7
             }
-            else -> salons
+            else -> withLiveDistances
         }
         baseList.distinctBy { it.id.ifBlank { it.name } }
+    }
+
+    if (showLocationSheet) {
+        CustomerLocationBottomSheet(
+            currentLocationTitle = userLocationTitle,
+            currentLocationSubtitle = userLocationSubtitle,
+            currentLatitude = userLatitude,
+            currentLongitude = userLongitude,
+            isLiveGpsActive = isLiveGpsActive,
+            isDetectingGps = isDetectingGps,
+            onDismiss = { showLocationSheet = false },
+            onUseCurrentGpsClick = {
+                if (hasLocationPermission(context)) {
+                    isDetectingGps = true
+                    fetchDeviceGpsLocation(
+                        context = context,
+                        fallbackLat = userLatitude,
+                        fallbackLng = userLongitude
+                    ) { lat, lng, isLive ->
+                        isDetectingGps = false
+                        if (lat != 0.0 && lng != 0.0) {
+                            onDetectGpsLocation(lat, lng, true)
+                            if (isLive) {
+                                showLocationSheet = false
+                            }
+                        }
+                    }
+                } else {
+                    locationPermissionLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION
+                        )
+                    )
+                }
+            },
+            onApplyManualOrPinLocation = { cityText, pickedLat, pickedLng ->
+                onManualLocationSelected(cityText, pickedLat, pickedLng)
+                showLocationSheet = false
+            }
+        )
     }
 
     LazyColumn(
@@ -143,11 +286,36 @@ fun CustomerHomeScreen(
             .testTag("salons_list"),
         contentPadding = PaddingValues(bottom = 16.dp)
     ) {
-        // 1. Auto-Location Header: "Patna, Bihar 📍" with Profile Icon
+        // 1. Interactive Live GPS Location Header with Profile Icon
         item {
             BlinkitAutoLocationHeader(
-                currentLocation = "Patna, Bihar",
-                subLocation = "Kankarbagh Main Rd • 1.2 km radius",
+                currentLocation = userLocationTitle,
+                subLocation = userLocationSubtitle,
+                isLiveGpsActive = isLiveGpsActive,
+                isDetectingGps = isDetectingGps,
+                onLocationClick = { showLocationSheet = true },
+                onQuickGpsClick = {
+                    if (hasLocationPermission(context)) {
+                        isDetectingGps = true
+                        fetchDeviceGpsLocation(
+                            context = context,
+                            fallbackLat = userLatitude,
+                            fallbackLng = userLongitude
+                        ) { lat, lng, _ ->
+                            isDetectingGps = false
+                            if (lat != 0.0 && lng != 0.0) {
+                                onDetectGpsLocation(lat, lng, true)
+                            }
+                        }
+                    } else {
+                        locationPermissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.ACCESS_FINE_LOCATION,
+                                Manifest.permission.ACCESS_COARSE_LOCATION
+                            )
+                        )
+                    }
+                },
                 onProfileClick = onProfileClick
             )
         }
@@ -306,6 +474,11 @@ fun CustomerHomeScreen(
             item {
                 CustomerSalonsOsmMapSection(
                     salons = displayedSalons,
+                    userLatitude = userLatitude,
+                    userLongitude = userLongitude,
+                    onGpsLocationDetected = { lat, lng ->
+                        onDetectGpsLocation(lat, lng, true)
+                    },
                     onSalonSelected = onSalonSelected
                 )
             }
@@ -336,13 +509,18 @@ fun CustomerHomeScreen(
 }
 
 /**
- * 1. Auto-Location Header:
- * Displays dummy GPS location (e.g. "Patna, Bihar 📍") with delivery badge & profile icon
+ * 1. Interactive Live GPS Location Header:
+ * Displays live reverse-geocoded GPS location (e.g., "Bakhraur, Gopalganj 📍") with 1-tap location sheet trigger,
+ * live GPS detect button, and profile icon.
  */
 @Composable
 fun BlinkitAutoLocationHeader(
     currentLocation: String,
     subLocation: String,
+    isLiveGpsActive: Boolean = false,
+    isDetectingGps: Boolean = false,
+    onLocationClick: () -> Unit = {},
+    onQuickGpsClick: () -> Unit = {},
     onProfileClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -357,11 +535,16 @@ fun BlinkitAutoLocationHeader(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Location Pin + Details
+            // Clickable Location Pin + Details (Opens Change / Detect Location Bottom Sheet)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.weight(1f)
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onLocationClick() }
+                    .padding(vertical = 4.dp, horizontal = 4.dp)
+                    .testTag("customer_location_header_button")
             ) {
                 Box(
                     modifier = Modifier
@@ -370,49 +553,92 @@ fun BlinkitAutoLocationHeader(
                         .background(
                             Brush.linearGradient(listOf(Color(0xFF451A03), Color(0xFF1E293B)))
                         )
-                        .border(1.dp, AmberPrimary.copy(alpha = 0.5f), CircleShape),
+                        .border(
+                            1.dp,
+                            if (isLiveGpsActive) GreenSuccess.copy(alpha = 0.7f) else AmberPrimary.copy(alpha = 0.5f),
+                            CircleShape
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.LocationOn,
-                        contentDescription = "GPS Location",
-                        tint = AmberPrimary,
-                        modifier = Modifier.size(22.dp)
-                    )
+                    if (isDetectingGps) {
+                        CircularProgressIndicator(
+                            color = AmberPrimary,
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = "GPS Location",
+                            tint = if (isLiveGpsActive) GreenSuccess else AmberPrimary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
 
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
                             text = currentLocation,
-                            fontSize = 16.sp,
+                            fontSize = 15.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                         Text(
                             text = "📍",
-                            fontSize = 14.sp
+                            fontSize = 13.sp,
+                            maxLines = 1
                         )
                         Icon(
                             imageVector = Icons.Default.KeyboardArrowDown,
                             contentDescription = "Change Location",
-                            tint = Color(0xFF94A3B8),
-                            modifier = Modifier.size(16.dp)
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
 
                     Text(
                         text = subLocation,
                         fontSize = 11.sp,
-                        color = Color(0xFF94A3B8),
+                        color = if (isLiveGpsActive) Color(0xFFA7F3D0) else Color(0xFF94A3B8),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            // 1-Tap Quick GPS Detect Icon Button
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF1E293B))
+                    .border(
+                        1.dp,
+                        if (isLiveGpsActive) GreenSuccess.copy(alpha = 0.5f) else Color(0xFF334155),
+                        CircleShape
+                    )
+                    .clickable { onQuickGpsClick() }
+                    .testTag("home_quick_gps_button"),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MyLocation,
+                    contentDescription = "Use Current GPS Location",
+                    tint = if (isLiveGpsActive) GreenSuccess else AmberPrimary,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
 
             // Profile Icon button
             Box(
@@ -430,6 +656,293 @@ fun BlinkitAutoLocationHeader(
                     contentDescription = "User Profile",
                     tint = AmberPrimary,
                     modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Interactive "Change / Detect Location" Modal Bottom Sheet for Customer Mode:
+ * - "🎯 Use My Current GPS Location" button (requests location permission if needed, fetches live GPS, reverse-geocodes, recalculates distances)
+ * - Manual City / Town / Area text input with "Apply Location"
+ * - Interactive OpenStreetMap Pin Picker so the customer can tap/drag on the map to set their exact coordinates
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CustomerLocationBottomSheet(
+    currentLocationTitle: String,
+    currentLocationSubtitle: String,
+    currentLatitude: Double,
+    currentLongitude: Double,
+    isLiveGpsActive: Boolean,
+    isDetectingGps: Boolean,
+    onDismiss: () -> Unit,
+    onUseCurrentGpsClick: () -> Unit,
+    onApplyManualOrPinLocation: (String, Double?, Double?) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var manualCityInput by remember(currentLocationTitle) { mutableStateOf(currentLocationTitle) }
+    var pickedLat by remember(currentLatitude) { mutableDoubleStateOf(currentLatitude) }
+    var pickedLng by remember(currentLongitude) { mutableDoubleStateOf(currentLongitude) }
+    var hasMovedMapPin by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Color(0xFF0F172A),
+        contentColor = Color.White
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 18.dp, vertical = 8.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // Sheet Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.LocationOn,
+                        contentDescription = null,
+                        tint = AmberPrimary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Column {
+                        Text(
+                            text = "Change / Detect Your Location",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "Salon distances (km) are calculated from this location",
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = Color(0xFF94A3B8)
+                    )
+                }
+            }
+
+            // Current Active Location Status Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
+                border = BorderStroke(
+                    1.dp,
+                    if (isLiveGpsActive) GreenSuccess.copy(alpha = 0.5f) else Color(0xFF334155)
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (isLiveGpsActive) "🟢 ACTIVE LIVE GPS LOCATION" else "📍 CURRENT SELECTED LOCATION",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (isLiveGpsActive) GreenSuccess else AmberPrimary
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = currentLocationTitle,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = currentLocationSubtitle,
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                    Text(
+                        text = String.format(java.util.Locale.US, "%.4f,\n%.4f", currentLatitude, currentLongitude),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFCBD5E1)
+                    )
+                }
+            }
+
+            // 1. Primary Action: "🎯 Use My Current GPS Location"
+            Button(
+                onClick = onUseCurrentGpsClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .testTag("use_current_gps_location_btn"),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AmberPrimary,
+                    contentColor = Color(0xFF1E1402)
+                )
+            ) {
+                if (isDetectingGps) {
+                    CircularProgressIndicator(
+                        color = Color(0xFF1E1402),
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Detecting Live GPS...",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.MyLocation,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "🎯 Use My Current GPS Location",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+            }
+
+            HorizontalDivider(color = Color(0xFF1E293B))
+
+            // 2. Manual City / Town / Area Input
+            Text(
+                text = "OR ENTER CITY / TOWN / AREA MANUALLY",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(0xFF94A3B8),
+                letterSpacing = 0.5.sp
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = manualCityInput,
+                    onValueChange = { manualCityInput = it },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("manual_location_city_input"),
+                    placeholder = {
+                        Text(
+                            text = "e.g. Bakhraur, Gopalganj",
+                            fontSize = 12.sp,
+                            color = Color(0xFF64748B)
+                        )
+                    },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AmberPrimary,
+                        unfocusedBorderColor = Color(0xFF334155),
+                        focusedContainerColor = DarkSurface,
+                        unfocusedContainerColor = DarkSurface,
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                Button(
+                    onClick = {
+                        if (manualCityInput.isNotBlank()) {
+                            onApplyManualOrPinLocation(manualCityInput.trim(), null, null)
+                        }
+                    },
+                    modifier = Modifier
+                        .height(52.dp)
+                        .testTag("apply_manual_location_btn"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF1E293B),
+                        contentColor = AmberPrimary
+                    ),
+                    border = BorderStroke(1.dp, AmberPrimary)
+                ) {
+                    Text(
+                        text = "Apply",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+
+            HorizontalDivider(color = Color(0xFF1E293B))
+
+            // 3. Interactive OpenStreetMap Pin Picker
+            Text(
+                text = "OR PICK EXACT LOCATION PIN ON MAP",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(0xFF94A3B8),
+                letterSpacing = 0.5.sp
+            )
+
+            PartnerLocationPickerOsmMap(
+                latitude = pickedLat,
+                longitude = pickedLng,
+                salonName = "My Location Pin",
+                onLocationPicked = { newLat, newLng ->
+                    pickedLat = newLat
+                    pickedLng = newLng
+                    hasMovedMapPin = true
+                }
+            )
+
+            OutlinedButton(
+                onClick = {
+                    onApplyManualOrPinLocation(
+                        if (hasMovedMapPin) "" else manualCityInput,
+                        pickedLat,
+                        pickedLng
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag("confirm_customer_map_pin_btn"),
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, GreenSuccess),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenSuccess)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Confirm Selected Map Pin (${String.format(java.util.Locale.US, "%.4f, %.4f", pickedLat, pickedLng)})",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
@@ -745,15 +1258,15 @@ fun BlinkitSalonCard(
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.matchParentSize()
                     )
-                    // Dark gradient overlay so text & badges stay sharp over any photo
+                    // Strong dark vertical gradient scrim (0.65f to 0.85f) so text & badges always have crisp contrast over any photo
                     Box(
                         modifier = Modifier
                             .matchParentSize()
                             .background(
                                 Brush.verticalGradient(
                                     listOf(
-                                        Color(0xB3090D16),
-                                        Color(0xE60F172A)
+                                        Color.Black.copy(alpha = 0.65f),
+                                        Color.Black.copy(alpha = 0.85f)
                                     )
                                 )
                             )
@@ -860,17 +1373,28 @@ fun BlinkitSalonCard(
                             }
                         }
 
-                        Text(
-                            text = salon.name,
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 16.sp,
-                                lineHeight = 20.sp
-                            ),
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = salon.name,
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 16.sp,
+                                    lineHeight = 20.sp
+                                ),
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            if (salon.isPhoneVerified) {
+                                com.example.ui.components.VerifiedNumberBadge(
+                                    text = "✓ Verified Number"
+                                )
+                            }
+                        }
 
                         Text(
                             text = if (salon.tagline.isNotBlank()) salon.tagline else "Verified Grooming Partner",
@@ -1148,9 +1672,16 @@ fun EmptySalonsPlaceholder(
                 modifier = Modifier.size(42.dp)
             )
             Text(
-                text = "No salons match your selected filters.",
-                color = Color(0xFF94A3B8),
+                text = "No nearby registered salons match your filters.",
+                color = Color(0xFFE2E8F0),
+                fontWeight = FontWeight.Bold,
                 fontSize = 14.sp
+            )
+            Text(
+                text = "Register a real salon in Partner Mode or enable 'Show Demo Salons' in Profile → App Settings.",
+                color = Color(0xFF94A3B8),
+                fontSize = 12.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
             Button(
                 onClick = onClearFilters,

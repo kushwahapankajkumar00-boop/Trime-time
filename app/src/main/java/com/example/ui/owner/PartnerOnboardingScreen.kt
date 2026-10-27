@@ -96,6 +96,15 @@ fun PartnerOnboardingScreen(
     userProfile: UserProfile?,
     isLoading: Boolean,
     onCancel: () -> Unit,
+    onRequestPhoneOtp: (
+        rawPhone: String,
+        onOtpGenerated: (cleanTenDigits: String, otpCode: String) -> Unit,
+        onError: (String) -> Unit
+    ) -> Unit = { phone, onOtp, _ ->
+        val clean = phone.filter { it.isDigit() }.takeLast(10)
+        onOtp(clean, (1000..9999).random().toString())
+    },
+    onGenerateNewOtpCode: () -> String = { (1000..9999).random().toString() },
     onSubmitRegistration: (
         salonName: String,
         ownerName: String,
@@ -127,11 +136,24 @@ fun PartnerOnboardingScreen(
             userProfile?.name?.takeIf { it.isNotBlank() && it != "Customer" } ?: ""
         )
     }
-    var businessPhone by remember(userProfile?.phone) {
+    val initialProfileTenDigits = remember(userProfile?.phone) {
         val digits = userProfile?.phone?.filter { it.isDigit() }.orEmpty()
-        val ten = if (digits.length > 10 && digits.startsWith("91")) digits.drop(2).take(10) else digits.takeLast(10)
-        mutableStateOf(ten)
+        if (digits.length > 10 && digits.startsWith("91")) digits.drop(2).take(10) else digits.takeLast(10)
     }
+    var businessPhone by remember(initialProfileTenDigits) {
+        mutableStateOf(initialProfileTenDigits)
+    }
+    var verifiedBusinessPhone by remember(initialProfileTenDigits, userProfile?.isPhoneVerified) {
+        mutableStateOf(if (userProfile?.isPhoneVerified == true && initialProfileTenDigits.length == 10) initialProfileTenDigits else "")
+    }
+    val isBusinessPhoneVerified = businessPhone.length == 10 && businessPhone == verifiedBusinessPhone
+
+    // 2-Step OTP states for Partner Registration
+    var showTopSmsBanner by remember { mutableStateOf(false) }
+    var activeOtpPhone by remember { mutableStateOf("") }
+    var activeOtpCode by remember { mutableStateOf("") }
+    var showPartnerOtpModal by remember { mutableStateOf(false) }
+    var autoSubmitAfterOtp by remember { mutableStateOf(false) }
 
     // 2. Full Shop Address, City/Area, Pincode & Landmark
     var shopAddress by remember { mutableStateOf("") }
@@ -257,7 +279,7 @@ fun PartnerOnboardingScreen(
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Become a Salon Partner",
+                            text = "Become a Salon Partner - Registration Form",
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.ExtraBold),
                             color = Color.White,
                             maxLines = 1,
@@ -282,6 +304,17 @@ fun PartnerOnboardingScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            if (showTopSmsBanner && activeOtpCode.length == 4) {
+                item {
+                    com.example.ui.components.TopSmsOtpBanner(
+                        visible = true,
+                        phoneTenDigits = activeOtpPhone,
+                        otpCode = activeOtpCode,
+                        onDismiss = { showTopSmsBanner = false }
+                    )
+                }
+            }
+
             // Banner Card
             item {
                 Card(
@@ -401,7 +434,19 @@ fun PartnerOnboardingScreen(
                             label = { Text("10-Digit Business Phone Number *") },
                             placeholder = { Text("9876543210", color = Color(0xFF64748B)) },
                             leadingIcon = {
-                                Icon(Icons.Default.Phone, contentDescription = null, tint = AmberPrimary)
+                                Icon(
+                                    Icons.Default.Phone,
+                                    contentDescription = null,
+                                    tint = if (isBusinessPhoneVerified) GreenSuccess else AmberPrimary
+                                )
+                            },
+                            trailingIcon = {
+                                if (isBusinessPhoneVerified) {
+                                    com.example.ui.components.VerifiedNumberBadge(
+                                        text = "✓ Verified Number",
+                                        modifier = Modifier.padding(end = 8.dp)
+                                    )
+                                }
                             },
                             prefix = { Text("+91 ", color = AmberPrimary, fontWeight = FontWeight.Bold) },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
@@ -412,6 +457,49 @@ fun PartnerOnboardingScreen(
                                 .fillMaxWidth()
                                 .testTag("partner_reg_phone_input")
                         )
+
+                        if (!isBusinessPhoneVerified) {
+                            OutlinedButton(
+                                onClick = {
+                                    validationError = null
+                                    autoSubmitAfterOtp = false
+                                    onRequestPhoneOtp(
+                                        businessPhone,
+                                        { cleanTen, otp ->
+                                            activeOtpPhone = cleanTen
+                                            activeOtpCode = otp
+                                            showTopSmsBanner = true
+                                            com.example.ui.components.triggerAndroidSmsNotification(context, cleanTen, otp)
+                                            showPartnerOtpModal = true
+                                        },
+                                        { err ->
+                                            validationError = err
+                                        }
+                                    )
+                                },
+                                enabled = businessPhone.length == 10,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(42.dp)
+                                    .testTag("partner_reg_send_otp_btn"),
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(1.dp, AmberPrimary)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VerifiedUser,
+                                    contentDescription = null,
+                                    tint = AmberPrimary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Send Verification OTP for +91 $businessPhone",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AmberPrimary
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -495,8 +583,11 @@ fun PartnerOnboardingScreen(
 
                         OutlinedTextField(
                             value = landmark,
-                            onValueChange = { landmark = it },
-                            label = { Text("Nearby Landmark (Optional)") },
+                            onValueChange = {
+                                landmark = it
+                                validationError = null
+                            },
+                            label = { Text("Nearby Landmark *") },
                             placeholder = { Text("Opposite Metro Pillar 42 / Near Central Mall", color = Color(0xFF64748B)) },
                             singleLine = true,
                             colors = textFieldColors,
@@ -1121,12 +1212,33 @@ fun PartnerOnboardingScreen(
             item {
                 Button(
                     onClick = {
+                        // If the user typed a new service in the input boxes without tapping "+ Add Service", include it automatically
+                        val pendingSrvName = newServiceName.trim()
+                        val pendingSrvPrice = newServicePrice.toIntOrNull() ?: 0
+                        val pendingSrvDur = (newServiceDuration.toIntOrNull() ?: 20).coerceIn(5, 180)
+                        if (pendingSrvName.isNotBlank() && pendingSrvPrice >= 10) {
+                            initialServices.add(
+                                SalonService(
+                                    id = "init_srv_${System.currentTimeMillis()}",
+                                    name = pendingSrvName,
+                                    category = newServiceCategory,
+                                    price = pendingSrvPrice,
+                                    durationMinutes = pendingSrvDur,
+                                    description = "$pendingSrvName ($pendingSrvDur mins)",
+                                    isPopular = true
+                                )
+                            )
+                            newServiceName = ""
+                            newServicePrice = ""
+                        }
+
                         val cleanShop = salonName.trim()
                         val cleanOwner = ownerName.trim()
                         val phoneDigits = businessPhone.filter { it.isDigit() }
                         val cleanAddr = shopAddress.trim()
                         val cleanCity = cityArea.trim()
                         val cleanPin = pincode.filter { it.isDigit() }
+                        val cleanLandmark = landmark.trim()
 
                         when {
                             cleanShop.length < 3 -> {
@@ -1140,6 +1252,9 @@ fun PartnerOnboardingScreen(
                             }
                             cleanAddr.length < 5 -> {
                                 validationError = "Please enter the full Shop Street Address."
+                            }
+                            cleanLandmark.length < 2 -> {
+                                validationError = "Please enter a Nearby Landmark for your shop."
                             }
                             cleanCity.length < 2 -> {
                                 validationError = "Please enter your City / Area."
@@ -1159,6 +1274,23 @@ fun PartnerOnboardingScreen(
                             !termsAccepted -> {
                                 validationError = "Please accept the TrimTime Partner Terms & Conditions."
                             }
+                            !isBusinessPhoneVerified -> {
+                                validationError = null
+                                autoSubmitAfterOtp = true
+                                onRequestPhoneOtp(
+                                    phoneDigits,
+                                    { cleanTen, otp ->
+                                        activeOtpPhone = cleanTen
+                                        activeOtpCode = otp
+                                        showTopSmsBanner = true
+                                        com.example.ui.components.triggerAndroidSmsNotification(context, cleanTen, otp)
+                                        showPartnerOtpModal = true
+                                    },
+                                    { err ->
+                                        validationError = err
+                                    }
+                                )
+                            }
                             else -> {
                                 validationError = null
                                 onSubmitRegistration(
@@ -1168,7 +1300,7 @@ fun PartnerOnboardingScreen(
                                     cleanAddr,
                                     cleanCity,
                                     cleanPin,
-                                    landmark.trim(),
+                                    cleanLandmark,
                                     selectedCategory,
                                     availableChairs,
                                     openingTime.trim(),
@@ -1212,7 +1344,7 @@ fun PartnerOnboardingScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Register Salon & Launch Partner Dashboard",
+                            text = if (isBusinessPhoneVerified) "Submit & Register Salon" else "Verify OTP & Register Salon",
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 14.sp
                         )
@@ -1222,6 +1354,51 @@ fun PartnerOnboardingScreen(
                 Spacer(modifier = Modifier.height(20.dp))
             }
         }
+    }
+
+    if (showPartnerOtpModal && activeOtpCode.length == 4) {
+        com.example.ui.components.VerifyMobileOtpDialog(
+            phoneTenDigits = activeOtpPhone,
+            expectedOtp = activeOtpCode,
+            title = "Verify Business Mobile Number",
+            subtitle = "Enter the 4-digit OTP sent to +91 $activeOtpPhone to verify your salon's contact number.",
+            requireNewLoginPin = false,
+            onResendOtp = {
+                val refreshed = onGenerateNewOtpCode()
+                activeOtpCode = refreshed
+                showTopSmsBanner = true
+                com.example.ui.components.triggerAndroidSmsNotification(context, activeOtpPhone, refreshed)
+            },
+            onVerified = { _ ->
+                showPartnerOtpModal = false
+                showTopSmsBanner = false
+                verifiedBusinessPhone = activeOtpPhone
+                businessPhone = activeOtpPhone
+                if (autoSubmitAfterOtp) {
+                    autoSubmitAfterOtp = false
+                    onSubmitRegistration(
+                        salonName.trim(),
+                        ownerName.trim(),
+                        activeOtpPhone,
+                        shopAddress.trim(),
+                        cityArea.trim(),
+                        pincode.filter { it.isDigit() },
+                        landmark.trim(),
+                        selectedCategory,
+                        availableChairs,
+                        openingTime.trim(),
+                        closingTime.trim(),
+                        initialServices.toList(),
+                        latitude,
+                        longitude
+                    )
+                }
+            },
+            onDismiss = {
+                showPartnerOtpModal = false
+                autoSubmitAfterOtp = false
+            }
+        )
     }
 }
 

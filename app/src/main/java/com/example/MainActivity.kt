@@ -58,6 +58,8 @@ import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.TrimTimeTheme
 import com.example.viewmodel.CustomerNavTab
 import com.example.viewmodel.TrimTimeViewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -87,6 +89,12 @@ fun TrimTimeApp(
     val appPreferences by viewModel.appPreferences.collectAsState()
     val hasRegisteredPartnerSalon by viewModel.hasRegisteredPartnerSalon.collectAsState()
     val showPartnerOnboarding by viewModel.showPartnerOnboarding.collectAsState()
+
+    val userLatitude by viewModel.userLatitude.collectAsState()
+    val userLongitude by viewModel.userLongitude.collectAsState()
+    val userLocationTitle by viewModel.userLocationTitle.collectAsState()
+    val userLocationSubtitle by viewModel.userLocationSubtitle.collectAsState()
+    val isLiveGpsActive by viewModel.isLiveGpsActive.collectAsState()
 
     val currentNavTab by viewModel.currentNavTab.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
@@ -119,9 +127,14 @@ fun TrimTimeApp(
     var showHelpDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(userMessage) {
-        userMessage?.let {
-            snackbarHostState.showSnackbar(it)
+        userMessage?.let { msg ->
             viewModel.clearUserMessage()
+            val snackbarJob = launch {
+                snackbarHostState.showSnackbar(msg)
+            }
+            delay(1300L)
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarJob.cancel()
         }
     }
 
@@ -174,14 +187,48 @@ fun TrimTimeApp(
                     onDismissSha1FallbackDialog = {
                         viewModel.dismissSha1FallbackDialog()
                     },
-                    onLoginExistingUser = { identifier, onNotFound ->
+                    onLoginExistingUser = { identifier, loginPin, onNotFound ->
                         viewModel.loginExistingUser(
                             identifier = identifier,
+                            loginPin = loginPin,
                             onAccountNotFound = onNotFound
                         )
                     },
-                    onSignInWithRealIdentity = { name, email, phone, asPartner ->
-                        viewModel.signInWithRealIdentity(name, email, phone, asPartner)
+                    onSignInWithRealIdentity = { name, email, phone, asPartner, loginPin, isPhoneVerified ->
+                        viewModel.signInWithRealIdentity(
+                            name = name,
+                            email = email,
+                            phone = phone,
+                            asPartner = asPartner,
+                            loginPin = loginPin,
+                            isPhoneVerified = isPhoneVerified
+                        )
+                    },
+                    onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
+                        viewModel.requestPhoneVerificationOtp(
+                            rawPhone = rawPhone,
+                            excludeUserId = null,
+                            onOtpGenerated = onOtpGenerated,
+                            onError = onError
+                        )
+                    },
+                    onRequestForgotPinOtp = { rawIdentifier, onOtpGenerated, onError ->
+                        viewModel.requestForgotPinOtp(
+                            rawIdentifier = rawIdentifier,
+                            onOtpGenerated = onOtpGenerated,
+                            onError = onError
+                        )
+                    },
+                    onResetLoginPin = { rawIdentifier, newPin, onSuccess, onError ->
+                        viewModel.resetLoginPinAndAuthenticate(
+                            rawIdentifier = rawIdentifier,
+                            newPin = newPin,
+                            onSuccess = onSuccess,
+                            onError = onError
+                        )
+                    },
+                    onGenerateNewOtpCode = {
+                        viewModel.generateFourDigitOtp()
                     },
                     onContinueWithGoogle = {
                         viewModel.signInWithGoogle(context)
@@ -206,15 +253,25 @@ fun TrimTimeApp(
                         val needsPhone = currentProfile == null || tenDigits.length != 10
 
                         if (needsPhone) {
-                            // Rule 1: Mandatory Phone Collection (No OTP)
-                            // User must save a 10-digit number before accessing the Home Screen
+                            // Rule 1: Mandatory Phone Collection with 2-Step OTP Verification
                             MandatoryPhoneScreen(
                                 userName = currentProfile?.name ?: "Customer",
                                 userEmail = currentProfile?.email ?: "",
                                 isLoading = isAuthLoading,
                                 errorMessage = authError,
+                                onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
+                                    viewModel.requestPhoneVerificationOtp(
+                                        rawPhone = rawPhone,
+                                        excludeUserId = currentProfile?.id,
+                                        onOtpGenerated = onOtpGenerated,
+                                        onError = onError
+                                    )
+                                },
+                                onGenerateNewOtpCode = {
+                                    viewModel.generateFourDigitOtp()
+                                },
                                 onSavePhone = { validPhone ->
-                                    viewModel.savePhoneNumber(validPhone) {
+                                    viewModel.savePhoneNumber(validPhone, isPhoneVerified = true) {
                                         viewModel.setNavTab(CustomerNavTab.SALONS)
                                         viewModel.selectSalon(null)
                                     }
@@ -234,6 +291,17 @@ fun TrimTimeApp(
                                     userProfile = currentProfile,
                                     isLoading = isAuthLoading,
                                     onCancel = { viewModel.dismissPartnerOnboarding() },
+                                    onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
+                                        viewModel.requestPhoneVerificationOtp(
+                                            rawPhone = rawPhone,
+                                            excludeUserId = currentProfile.id,
+                                            onOtpGenerated = onOtpGenerated,
+                                            onError = onError
+                                        )
+                                    },
+                                    onGenerateNewOtpCode = {
+                                        viewModel.generateFourDigitOtp()
+                                    },
                                     onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
                                         viewModel.registerPartnerSalon(
                                             salonName = salonName,
@@ -249,7 +317,8 @@ fun TrimTimeApp(
                                             closingTime = closingTime,
                                             initialServices = initialServices,
                                             latitude = latitude,
-                                            longitude = longitude
+                                            longitude = longitude,
+                                            isPhoneVerified = true
                                         )
                                     },
                                     modifier = Modifier.padding(onboardingPadding)
@@ -287,11 +356,14 @@ fun TrimTimeApp(
                                         .padding(innerPadding)
                                         .background(MaterialTheme.colorScheme.background)
                                 ) {
-                                    val activeSalon = selectedSalon
+                                    val activeSalon = selectedSalon?.let { sel ->
+                                        filteredSalons.find { it.id == sel.id } ?: sel
+                                    }
                                     if (activeSalon != null) {
                                         // Salon Detail & Catalog View
                                         SalonDetailScreen(
                                             salon = activeSalon,
+                                            currentUserId = currentCustomerUid,
                                             hasActiveBooking = hasActivePendingBooking,
                                             isSuspended = isUserSuspended,
                                             onBack = { viewModel.selectSalon(null) },
@@ -300,6 +372,9 @@ fun TrimTimeApp(
                                             },
                                             onBookingBlocked = { reason ->
                                                 viewModel.clearUserMessage()
+                                            },
+                                            onSwitchToPartnerMode = {
+                                                viewModel.switchToPartnerRole()
                                             }
                                         )
                                     } else {
@@ -321,6 +396,17 @@ fun TrimTimeApp(
                                                     selectedCategory = selectedCategory,
                                                     onCategorySelected = { viewModel.selectCategory(it) },
                                                     onSalonSelected = { viewModel.selectSalon(it) },
+                                                    userLocationTitle = userLocationTitle,
+                                                    userLocationSubtitle = userLocationSubtitle,
+                                                    userLatitude = userLatitude,
+                                                    userLongitude = userLongitude,
+                                                    isLiveGpsActive = isLiveGpsActive,
+                                                    onDetectGpsLocation = { lat, lng, showToast ->
+                                                        viewModel.onLiveGpsDetected(lat, lng, showToast)
+                                                    },
+                                                    onManualLocationSelected = { cityText, pickedLat, pickedLng ->
+                                                        viewModel.updateCustomerLocationManually(cityText, pickedLat, pickedLng)
+                                                    },
                                                     pastBooking = pastBooking,
                                                     onRebook = { booking ->
                                                         val targetSalon = allSalons.find { it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true) }
@@ -347,7 +433,8 @@ fun TrimTimeApp(
                                             CustomerNavTab.PROFILE -> {
                                                 val ownedSalon = allSalons.find {
                                                     currentCustomerUid.isNotBlank() &&
-                                                        (it.ownerId == currentCustomerUid || it.partnerId == currentCustomerUid || it.id == currentUserProfile?.salonId)
+                                                        (it.ownerId == currentCustomerUid || it.partnerId == currentCustomerUid) &&
+                                                        it.isRegistrationCompleted
                                                 }
                                                 ProfileScreen(
                                                     userProfile = currentUserProfile,
@@ -357,15 +444,29 @@ fun TrimTimeApp(
                                                     onOpenAuth = { viewModel.openAuth(it) },
                                                     onSwitchToPartner = { viewModel.switchToPartnerRole() },
                                                     onUpdatePersonalProfile = { name, phone, city ->
-                                                        viewModel.updatePersonalProfile(name, phone, city)
+                                                        viewModel.updatePersonalProfile(name, phone, city, isPhoneVerified = true)
                                                     },
                                                     onUpdateAccountIdentity = { name, email, phone, asPartner ->
                                                         viewModel.signInWithRealIdentity(name, email, phone, asPartner)
+                                                    },
+                                                    onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
+                                                        viewModel.requestPhoneVerificationOtp(
+                                                            rawPhone = rawPhone,
+                                                            excludeUserId = currentCustomerUid,
+                                                            onOtpGenerated = onOtpGenerated,
+                                                            onError = onError
+                                                        )
+                                                    },
+                                                    onGenerateNewOtpCode = {
+                                                        viewModel.generateFourDigitOtp()
                                                     },
                                                     onThemeModeChange = { viewModel.setThemeMode(it) },
                                                     onLanguageChange = { viewModel.setLanguage(it) },
                                                     onNotificationPreferencesChange = { bookingAlerts, queueReminders, offersDiscounts ->
                                                         viewModel.setNotificationPreferences(bookingAlerts, queueReminders, offersDiscounts)
+                                                    },
+                                                    onShowDemoSalonsChange = { showDemo ->
+                                                        viewModel.setShowDemoSalons(showDemo)
                                                     },
                                                     onClearCache = { viewModel.clearAppCache() },
                                                     onOpenHelp = { showHelpDialog = true },
@@ -383,54 +484,103 @@ fun TrimTimeApp(
                     }
 
                     UserRole.PARTNER -> {
-                        // Partner Mode App (Accessible with 1-tap switcher between Customer & Partner)
-                        Scaffold(
-                            modifier = Modifier.fillMaxSize(),
-                            containerColor = DarkBackground,
-                            snackbarHost = { SnackbarHost(snackbarHostState) }
-                        ) { innerPadding ->
-                            PartnerDashboardScreen(
-                                salons = allSalons,
-                                partnerProfile = currentUserProfile,
-                                selectedSalonId = partnerSelectedSalonId,
-                                onSelectSalonId = { viewModel.setPartnerSelectedSalonId(it) },
-                                allBookings = allBookings,
-                                activeFilter = partnerBookingFilter,
-                                onFilterChange = { viewModel.setPartnerBookingFilter(it) },
-                                onOpenPinVerification = { viewModel.openPinVerificationDialog(it) },
-                                onAcceptBooking = { viewModel.acceptBooking(it) },
-                                onRejectBooking = { viewModel.rejectBooking(it) },
-                                onToggleSalonOpen = { viewModel.toggleSalonOpenStatus(it) },
-                                onSetSalonOpen = { id, isOpen -> viewModel.setSalonOpenStatus(id, isOpen) },
-                                onSetSalonBusyStatus = { id, status -> viewModel.setSalonBusyStatus(id, status) },
-                                onUpdateChairAvailability = { id, currentStatus, chairs, waitMins ->
-                                    viewModel.updateSalonChairAvailability(id, currentStatus, chairs, waitMins)
-                                },
-                                onSaveMenuPrices = { id, h, s, f, m -> viewModel.saveSalonMenuPrices(id, h, s, f, m) },
-                                onAddService = { id, name, category, price, duration, description ->
-                                    viewModel.addSalonService(id, name, category, price, duration, description)
-                                },
-                                onEditService = { id, updatedService ->
-                                    viewModel.editSalonService(id, updatedService)
-                                },
-                                onDeleteService = { id, serviceId, serviceName ->
-                                    viewModel.deleteSalonService(id, serviceId, serviceName)
-                                },
-                                onSaveShopLocation = { id, address, landmark, lat, lng ->
-                                    viewModel.saveSalonLocation(id, address, landmark, lat, lng)
-                                },
-                                onSaveFullProfile = { id, name, phone, tagline, address, landmark, lat, lng, availableChairs ->
-                                    viewModel.saveSalonFullProfile(id, name, phone, tagline, address, landmark, lat, lng, availableChairs)
-                                },
-                                onSaveShopPhoto = { id, photoDataUrl ->
-                                    viewModel.saveSalonPhoto(id, photoDataUrl)
-                                },
-                                onSubmitFeedback = { rating, category, msg, onDone ->
-                                    viewModel.submitFeedback(rating, category, msg, onDone)
-                                },
-                                onExitPartnerMode = { viewModel.switchToCustomerRole() },
-                                modifier = Modifier.padding(innerPadding)
-                            )
+                        if (!hasRegisteredPartnerSalon) {
+                            // Strict Guard: Never allow access to PartnerDashboardScreen unless a salon with isRegistrationCompleted == true exists
+                            Scaffold(
+                                modifier = Modifier.fillMaxSize(),
+                                containerColor = DarkBackground,
+                                snackbarHost = { SnackbarHost(snackbarHostState) }
+                            ) { onboardingPadding ->
+                                PartnerOnboardingScreen(
+                                    userProfile = currentUserProfile,
+                                    isLoading = isAuthLoading,
+                                    onCancel = { viewModel.switchToCustomerRole() },
+                                    onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
+                                        viewModel.requestPhoneVerificationOtp(
+                                            rawPhone = rawPhone,
+                                            excludeUserId = currentUserProfile?.id,
+                                            onOtpGenerated = onOtpGenerated,
+                                            onError = onError
+                                        )
+                                    },
+                                    onGenerateNewOtpCode = {
+                                        viewModel.generateFourDigitOtp()
+                                    },
+                                    onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
+                                        viewModel.registerPartnerSalon(
+                                            salonName = salonName,
+                                            ownerName = ownerName,
+                                            businessPhone = businessPhone,
+                                            shopAddress = shopAddress,
+                                            cityArea = cityArea,
+                                            pincode = pincode,
+                                            landmark = landmark,
+                                            shopCategory = shopCategory,
+                                            availableChairs = availableChairs,
+                                            openingTime = openingTime,
+                                            closingTime = closingTime,
+                                            initialServices = initialServices,
+                                            latitude = latitude,
+                                            longitude = longitude,
+                                            isPhoneVerified = true
+                                        )
+                                    },
+                                    modifier = Modifier.padding(onboardingPadding)
+                                )
+                            }
+                        } else {
+                            // Partner Mode App (Accessible ONLY after completing Partner Salon Registration)
+                            Scaffold(
+                                modifier = Modifier.fillMaxSize(),
+                                containerColor = DarkBackground,
+                                snackbarHost = { SnackbarHost(snackbarHostState) }
+                            ) { innerPadding ->
+                                PartnerDashboardScreen(
+                                    salons = allSalons,
+                                    partnerProfile = currentUserProfile,
+                                    selectedSalonId = partnerSelectedSalonId,
+                                    onSelectSalonId = { viewModel.setPartnerSelectedSalonId(it) },
+                                    allBookings = allBookings,
+                                    activeFilter = partnerBookingFilter,
+                                    onFilterChange = { viewModel.setPartnerBookingFilter(it) },
+                                    onOpenPinVerification = { viewModel.openPinVerificationDialog(it) },
+                                    onAcceptBooking = { viewModel.acceptBooking(it) },
+                                    onRejectBooking = { viewModel.rejectBooking(it) },
+                                    onToggleSalonOpen = { viewModel.toggleSalonOpenStatus(it) },
+                                    onSetSalonOpen = { id, isOpen -> viewModel.setSalonOpenStatus(id, isOpen) },
+                                    onSetSalonBusyStatus = { id, status -> viewModel.setSalonBusyStatus(id, status) },
+                                    onUpdateChairAvailability = { id, currentStatus, chairs, waitMins ->
+                                        viewModel.updateSalonChairAvailability(id, currentStatus, chairs, waitMins)
+                                    },
+                                    onSaveMenuPrices = { id, h, s, f, m -> viewModel.saveSalonMenuPrices(id, h, s, f, m) },
+                                    onAddService = { id, name, category, price, duration, description ->
+                                        viewModel.addSalonService(id, name, category, price, duration, description)
+                                    },
+                                    onEditService = { id, updatedService ->
+                                        viewModel.editSalonService(id, updatedService)
+                                    },
+                                    onDeleteService = { id, serviceId, serviceName ->
+                                        viewModel.deleteSalonService(id, serviceId, serviceName)
+                                    },
+                                    onSaveShopLocation = { id, address, landmark, lat, lng ->
+                                        viewModel.saveSalonLocation(id, address, landmark, lat, lng)
+                                    },
+                                    onSaveFullProfile = { id, name, phone, tagline, address, landmark, lat, lng, availableChairs ->
+                                        viewModel.saveSalonFullProfile(id, name, phone, tagline, address, landmark, lat, lng, availableChairs)
+                                    },
+                                    onSaveShopPhoto = { id, photoDataUrl ->
+                                        viewModel.saveSalonPhoto(id, photoDataUrl)
+                                    },
+                                    onSubmitFeedback = { rating, category, msg, onDone ->
+                                        viewModel.submitFeedback(rating, category, msg, onDone)
+                                    },
+                                    onResetSalonRegistration = { salonId ->
+                                        viewModel.resetPartnerSalonRegistration(salonId)
+                                    },
+                                    onExitPartnerMode = { viewModel.switchToCustomerRole() },
+                                    modifier = Modifier.padding(innerPadding)
+                                )
+                            }
                         }
                     }
                 }

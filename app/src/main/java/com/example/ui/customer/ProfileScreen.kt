@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -60,6 +61,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -90,9 +92,19 @@ fun ProfileScreen(
     onSwitchToPartner: () -> Unit = {},
     onUpdatePersonalProfile: (name: String, phone: String, defaultCity: String) -> Unit = { _, _, _ -> },
     onUpdateAccountIdentity: (name: String, email: String, phone: String, asPartner: Boolean) -> Unit = { _, _, _, _ -> },
+    onRequestPhoneOtp: (
+        rawPhone: String,
+        onOtpGenerated: (cleanTenDigits: String, otpCode: String) -> Unit,
+        onError: (String) -> Unit
+    ) -> Unit = { phone, onOtp, _ ->
+        val clean = phone.filter { it.isDigit() }.takeLast(10)
+        onOtp(clean, (1000..9999).random().toString())
+    },
+    onGenerateNewOtpCode: () -> String = { (1000..9999).random().toString() },
     onThemeModeChange: (AppThemeMode) -> Unit = {},
     onLanguageChange: (AppLanguage) -> Unit = {},
     onNotificationPreferencesChange: (bookingAlerts: Boolean, queueReminders: Boolean, offersDiscounts: Boolean) -> Unit = { _, _, _ -> },
+    onShowDemoSalonsChange: (Boolean) -> Unit = {},
     onClearCache: () -> Unit = {},
     onOpenHelp: () -> Unit = {},
     onSubmitFeedback: (rating: Int, category: String, message: String, onDone: (Boolean, String) -> Unit) -> Unit = { _, _, _, onDone ->
@@ -101,11 +113,19 @@ fun ProfileScreen(
     onLogout: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var showEditPersonalDialog by remember { mutableStateOf(false) }
     var showSwitchIdentityDialog by remember { mutableStateOf(false) }
     var showSupportDialog by remember { mutableStateOf(false) }
     var showFeedbackDialog by remember { mutableStateOf(false) }
     var activeLegalTab by remember { mutableStateOf<LegalPolicyTab?>(null) }
+
+    // 2-Step Phone OTP state for Profile Phone Verification / Edit
+    var showTopSmsBanner by remember { mutableStateOf(false) }
+    var activeOtpPhone by remember { mutableStateOf("") }
+    var activeOtpCode by remember { mutableStateOf("") }
+    var showPhoneOtpModal by remember { mutableStateOf(false) }
+    var pendingProfileSave by remember { mutableStateOf<Triple<String, String, String>?>(null) }
 
     val isHinglish = appPreferences.language == AppLanguage.HINDI_HINGLISH
     val bgColor = MaterialTheme.colorScheme.background
@@ -121,6 +141,17 @@ fun ProfileScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        if (showTopSmsBanner && activeOtpCode.length == 4) {
+            item {
+                com.example.ui.components.TopSmsOtpBanner(
+                    visible = true,
+                    phoneTenDigits = activeOtpPhone,
+                    otpCode = activeOtpCode,
+                    onDismiss = { showTopSmsBanner = false }
+                )
+            }
+        }
+
         // 1. User Account Info Card
         item {
             Card(
@@ -171,12 +202,25 @@ fun ProfileScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             if (!userProfile?.phone.isNullOrBlank()) {
-                                Text(
-                                    text = userProfile?.phone ?: "",
-                                    fontSize = 11.sp,
-                                    color = AmberPrimary,
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)
+                                ) {
+                                    Text(
+                                        text = userProfile?.phone ?: "",
+                                        fontSize = 11.sp,
+                                        color = AmberPrimary,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                    if (userProfile?.isPhoneVerified == true) {
+                                        com.example.ui.components.VerifiedNumberBadge(
+                                            text = "✓ Verified Number"
+                                        )
+                                    }
+                                }
                             }
                             val displayCity = userProfile?.defaultCity?.ifBlank { appPreferences.defaultCity }
                                 ?: appPreferences.defaultCity
@@ -225,8 +269,9 @@ fun ProfileScreen(
                             onClick = { showEditPersonalDialog = true },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(40.dp)
+                                .heightIn(min = 44.dp)
                                 .testTag("edit_personal_profile_btn"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             shape = RoundedCornerShape(10.dp),
                             border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.7f))
                         ) {
@@ -243,6 +288,7 @@ fun ProfileScreen(
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
+                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -251,8 +297,9 @@ fun ProfileScreen(
                             onClick = { showSwitchIdentityDialog = true },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(40.dp)
+                                .heightIn(min = 44.dp)
                                 .testTag("edit_account_identity_btn"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             shape = RoundedCornerShape(10.dp),
                             border = BorderStroke(1.dp, Color(0xFF64748B))
                         ) {
@@ -269,6 +316,7 @@ fun ProfileScreen(
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
+                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
@@ -361,8 +409,9 @@ fun ProfileScreen(
                         onClick = onSwitchToPartner,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(48.dp)
+                            .heightIn(min = 50.dp)
                             .testTag("login_as_partner_btn"),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (hasRegisteredSalon) Color(0xFF2563EB) else AmberPrimary,
                             contentColor = if (hasRegisteredSalon) Color.White else Color.Black
@@ -383,8 +432,11 @@ fun ProfileScreen(
                                 if (isHinglish) "सैलून पार्टनर बनें (Register Your Salon)" else "Become a Salon Partner (Register Shop)"
                             },
                             fontWeight = FontWeight.ExtraBold,
-                            fontSize = 13.sp,
-                            color = if (hasRegisteredSalon) Color.White else Color.Black
+                            fontSize = 12.sp,
+                            color = if (hasRegisteredSalon) Color.White else Color.Black,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -621,6 +673,21 @@ fun ProfileScreen(
 
                     HorizontalDivider(color = Color(0xFF334155).copy(alpha = 0.5f))
 
+                    // Real Production Mode: Hide Dummy HSR Layout / Bangalore Salons by default ("Show Demo Salons" OFF)
+                    NotificationToggleRow(
+                        title = if (isHinglish) "डेमो सैलून दिखाएं (Show Demo Salons)" else "Show Demo Salons",
+                        subtitle = "Keep OFF in production so only real Firestore-registered salons are shown",
+                        checked = appPreferences.showDemoSalons,
+                        onCheckedChange = { checked ->
+                            onShowDemoSalonsChange(checked)
+                        },
+                        primaryTextColor = primaryTextColor,
+                        secondaryTextColor = secondaryTextColor,
+                        testTag = "settings_toggle_show_demo_salons"
+                    )
+
+                    HorizontalDivider(color = Color(0xFF334155).copy(alpha = 0.5f))
+
                     // (d) & (e) Edit Personal Profile, Clear Cache & Help & Support Quick Links
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -630,8 +697,9 @@ fun ProfileScreen(
                             onClick = onClearCache,
                             modifier = Modifier
                                 .weight(1f)
-                                .height(42.dp)
+                                .heightIn(min = 44.dp)
                                 .testTag("settings_clear_cache_btn"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             shape = RoundedCornerShape(10.dp),
                             border = BorderStroke(1.dp, Color(0xFF475569))
                         ) {
@@ -647,7 +715,9 @@ fun ProfileScreen(
                                 color = primaryTextColor,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                maxLines = 1
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
@@ -655,8 +725,9 @@ fun ProfileScreen(
                             onClick = { showSupportDialog = true },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(42.dp)
+                                .heightIn(min = 44.dp)
                                 .testTag("settings_help_support_btn"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             shape = RoundedCornerShape(10.dp),
                             border = BorderStroke(1.dp, Color(0xFF475569))
                         ) {
@@ -672,7 +743,9 @@ fun ProfileScreen(
                                 color = primaryTextColor,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                maxLines = 1
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -700,8 +773,9 @@ fun ProfileScreen(
                 onClick = onLogout,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(46.dp)
+                    .heightIn(min = 48.dp)
                     .testTag("customer_logout_btn"),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 shape = RoundedCornerShape(12.dp),
                 border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.6f))
             ) {
@@ -716,13 +790,16 @@ fun ProfileScreen(
                     text = if (isHinglish) "लॉग आउट / अकाउंट बदलें (Log Out)" else "Log Out / Switch Account",
                     color = Color(0xFFEF4444),
                     fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
     }
 
-    // Dialog 1: Edit Personal Profile (Name, Phone Number, Default City/Location)
+    // Dialog 1: Edit Personal Profile (Name, Phone Number, Default City/Location) with 2-Step Phone OTP
     if (showEditPersonalDialog) {
         val rawDigits = userProfile?.phone?.filter { it.isDigit() }.orEmpty()
         val initialPhone = if (rawDigits.length > 10 && rawDigits.startsWith("91")) {
@@ -736,13 +813,60 @@ fun ProfileScreen(
             initialCity = userProfile?.defaultCity?.ifBlank { appPreferences.defaultCity } ?: appPreferences.defaultCity,
             onDismiss = { showEditPersonalDialog = false },
             onSave = { updatedName, updatedPhone, updatedCity ->
-                showEditPersonalDialog = false
-                onUpdatePersonalProfile(updatedName, updatedPhone, updatedCity)
+                val cleanNewDigits = updatedPhone.filter { it.isDigit() }.takeLast(10)
+                val phoneChanged = cleanNewDigits != initialPhone || userProfile?.isPhoneVerified != true
+                if (phoneChanged) {
+                    onRequestPhoneOtp(
+                        cleanNewDigits,
+                        { verifiedDigits, otp ->
+                            showEditPersonalDialog = false
+                            pendingProfileSave = Triple(updatedName, verifiedDigits, updatedCity)
+                            activeOtpPhone = verifiedDigits
+                            activeOtpCode = otp
+                            showTopSmsBanner = true
+                            com.example.ui.components.triggerAndroidSmsNotification(context, verifiedDigits, otp)
+                            showPhoneOtpModal = true
+                        },
+                        { err ->
+                            android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
+                        }
+                    )
+                } else {
+                    showEditPersonalDialog = false
+                    onUpdatePersonalProfile(updatedName, updatedPhone, updatedCity)
+                }
             }
         )
     }
 
-    // Dialog 2: Switch Account Identity (Name + Email + Phone)
+    if (showPhoneOtpModal && activeOtpCode.length == 4) {
+        com.example.ui.components.VerifyMobileOtpDialog(
+            phoneTenDigits = activeOtpPhone,
+            expectedOtp = activeOtpCode,
+            title = "Verify Updated Mobile Number",
+            subtitle = "Enter the 4-digit OTP sent to +91 $activeOtpPhone to verify and save your updated mobile number.",
+            requireNewLoginPin = false,
+            onResendOtp = {
+                val refreshed = onGenerateNewOtpCode()
+                activeOtpCode = refreshed
+                showTopSmsBanner = true
+                com.example.ui.components.triggerAndroidSmsNotification(context, activeOtpPhone, refreshed)
+            },
+            onVerified = { _ ->
+                showPhoneOtpModal = false
+                showTopSmsBanner = false
+                pendingProfileSave?.let { (uName, uPhone, uCity) ->
+                    onUpdatePersonalProfile(uName, uPhone, uCity)
+                }
+                pendingProfileSave = null
+            },
+            onDismiss = {
+                showPhoneOtpModal = false
+            }
+        )
+    }
+
+    // Dialog 2: Switch Account Identity (Name + Email + Phone + PIN)
     if (showSwitchIdentityDialog) {
         val initialPhoneDigits = userProfile?.phone?.filter { it.isDigit() }?.takeLast(10) ?: ""
         Sha1RealAccountLoginDialog(
@@ -750,7 +874,7 @@ fun ProfileScreen(
             initialEmail = if (userProfile?.email == "devtester@trimtime.local") "" else (userProfile?.email ?: ""),
             initialPhone = initialPhoneDigits,
             onDismiss = { showSwitchIdentityDialog = false },
-            onConfirmSignIn = { name, email, phone, asPartner ->
+            onConfirmSignIn = { name, email, phone, asPartner, _ ->
                 showSwitchIdentityDialog = false
                 onUpdateAccountIdentity(name, email, phone, asPartner)
             }

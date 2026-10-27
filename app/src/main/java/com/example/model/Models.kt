@@ -32,7 +32,8 @@ data class AppPreferences(
     val bookingStatusAlerts: Boolean = true,
     val queueTurnReminders: Boolean = true,
     val salonOffersDiscounts: Boolean = false,
-    val defaultCity: String = "Patna, Bihar"
+    val defaultCity: String = "Patna, Bihar",
+    val showDemoSalons: Boolean = false
 )
 
 sealed class AppAuthState {
@@ -46,6 +47,8 @@ data class UserProfile(
     val name: String = "",
     val email: String = "",
     val phone: String = "",
+    val loginPin: String = "",
+    val isPhoneVerified: Boolean = false,
     val role: String = "customer", // "customer" or "partner"
     val salonId: String? = null,
     val hasRegisteredSalon: Boolean = false,
@@ -63,6 +66,8 @@ data class UserProfile(
         "name" to name,
         "email" to email,
         "phone" to phone,
+        "loginPin" to loginPin,
+        "isPhoneVerified" to isPhoneVerified,
         "role" to role,
         "salonId" to salonId,
         "hasRegisteredSalon" to hasRegisteredSalon,
@@ -121,7 +126,9 @@ data class Salon(
     val openingTime: String = "9:00 AM",
     val closingTime: String = "9:00 PM",
     val latitude: Double? = null,
-    val longitude: Double? = null
+    val longitude: Double? = null,
+    val isRegistrationCompleted: Boolean = false,
+    val isPhoneVerified: Boolean = true
 ) {
     val isBusy: Boolean
         get() = currentStatus.equals("BUSY", ignoreCase = true)
@@ -164,6 +171,8 @@ data class Salon(
         "closingTime" to closingTime,
         "latitude" to latitude,
         "longitude" to longitude,
+        "isRegistrationCompleted" to isRegistrationCompleted,
+        "isPhoneVerified" to isPhoneVerified,
         "coordinates" to if (latitude != null && longitude != null) mapOf(
             "lat" to latitude,
             "lng" to longitude

@@ -82,15 +82,33 @@ import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
 import com.example.util.SecurityValidator
 
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Sms
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import com.example.ui.components.TopSmsOtpBanner
+import com.example.ui.components.VerifiedNumberBadge
+import com.example.ui.components.VerifyMobileOtpDialog
+import com.example.ui.components.triggerAndroidSmsNotification
+
 /**
- * Physical-Device Compatible Authentication Screen with separated "Login" and "Sign Up" tabs:
- * 1. Top Mode Switcher: "Login (Existing User)" vs "Sign Up (New Account)".
- * 2. Simple "Login" Tab: Asks ONLY for "Mobile Number OR Email Address", looks up the account in
- *    Firestore `users` collection, and logs the user in with their saved Name, Role (Customer/Partner),
- *    and profile data. If not found, shows "Account not found. Switching to Sign Up..." and switches
- *    to the Sign Up tab with the phone/email pre-filled.
- * 3. Full "Sign Up" Tab: Shows Role Selector ("Customer" / "Partner / Salon"), "Full Name",
- *    "Email Address", and "10-Digit Mobile Number" with a "Create Account" button.
+ * Upgraded Authentication & Phone Number Verification Screen:
+ * 1. Top Mode Switcher: "Login" vs "Sign Up".
+ * 2. "Login" Tab: Requires BOTH:
+ *    - "Mobile Number OR Email Address"
+ *    - "4-Digit Login PIN" (with a "Forgot PIN? Verify via OTP" option that sends the in-app OTP banner to reset their PIN).
+ * 3. "Sign Up" Tab: Requires Role Selector ("Customer" / "Partner / Salon"), "Full Name", "Email Address",
+ *    "10-Digit Mobile Number", and "4-Digit Secret Login PIN / Password".
+ *    Clicking "Send Verification OTP" validates the Indian mobile number (^[6-9][0-9]{9}$), checks Firestore
+ *    `users` uniqueness, triggers the realistic Top SMS-style Banner & Android Notification:
+ *    "💬 TrimTime Verification OTP for +91 XXXXXXXXXX is: 4829", and opens the 4-box OTP verification dialog
+ *    with a 30-second "Resend OTP" timer before creating the verified account (`isPhoneVerified = true`).
  */
 @Composable
 fun AuthFullScreen(
@@ -100,25 +118,67 @@ fun AuthFullScreen(
     onDismissSha1FallbackDialog: () -> Unit = {},
     onLoginExistingUser: (
         identifier: String,
+        loginPin: String,
         onAccountNotFound: (prefillEmail: String, prefillPhone: String) -> Unit
-    ) -> Unit = { _, _ -> },
-    onSignInWithRealIdentity: (name: String, email: String, phone: String, asPartner: Boolean) -> Unit = { _, _, _, _ -> },
+    ) -> Unit = { _, _, _ -> },
+    onSignInWithRealIdentity: (
+        name: String,
+        email: String,
+        phone: String,
+        asPartner: Boolean,
+        loginPin: String,
+        isPhoneVerified: Boolean
+    ) -> Unit = { _, _, _, _, _, _ -> },
+    onRequestPhoneOtp: (
+        rawPhone: String,
+        onOtpGenerated: (cleanTenDigits: String, otpCode: String) -> Unit,
+        onError: (String) -> Unit
+    ) -> Unit = { _, _, _ -> },
+    onRequestForgotPinOtp: (
+        rawIdentifier: String,
+        onOtpGenerated: (cleanTenDigits: String, otpCode: String, userId: String) -> Unit,
+        onError: (String) -> Unit
+    ) -> Unit = { _, _, _ -> },
+    onResetLoginPin: (
+        rawIdentifier: String,
+        newPin: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) -> Unit = { _, _, _, _ -> },
+    onGenerateNewOtpCode: () -> String = { (1000..9999).random().toString() },
     onContinueWithGoogle: () -> Unit,
     onDeveloperTestLogin: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+
     // Tab state: true = "Login (Existing User)", false = "Sign Up (New Account)"
     var isLoginTab by remember { mutableStateOf(true) }
 
-    // Simple Login Tab state
+    // Login Tab state (Requires BOTH Identifier AND 4-Digit Login PIN)
     var loginIdentifier by remember { mutableStateOf("") }
+    var loginPin by remember { mutableStateOf("") }
+    var showLoginPinDigits by remember { mutableStateOf(false) }
     var infoBannerMessage by remember { mutableStateOf<String?>(null) }
+    var localValidationError by remember { mutableStateOf<String?>(null) }
 
-    // Full Sign Up Tab states
+    // Sign Up Tab states
     var fullName by remember { mutableStateOf("") }
     var emailAddress by remember { mutableStateOf("") }
     var phoneDigits by remember { mutableStateOf("") }
+    var signUpPin by remember { mutableStateOf("") }
+    var showSignUpPinDigits by remember { mutableStateOf(false) }
     var loginAsPartner by remember { mutableStateOf(false) }
+
+    // 2-Step OTP Verification & Top SMS Banner states
+    var showTopSmsBanner by remember { mutableStateOf(false) }
+    var activeOtpPhone by remember { mutableStateOf("") }
+    var activeOtpCode by remember { mutableStateOf("") }
+    var showSignUpOtpModal by remember { mutableStateOf(false) }
+    var showForgotPinOtpModal by remember { mutableStateOf(false) }
+    var isCheckingOtpRequest by remember { mutableStateOf(false) }
+
+    val activeError = localValidationError ?: errorMessage
 
     Box(
         modifier = modifier
@@ -139,10 +199,18 @@ fun AuthFullScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(start = 20.dp, end = 20.dp, top = 28.dp, bottom = 24.dp),
+                .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(10.dp))
+            // Top SMS-Style OTP Banner (Spark-Plan Friendly In-App SMS Notification)
+            TopSmsOtpBanner(
+                visible = showTopSmsBanner && activeOtpCode.length == 4,
+                phoneTenDigits = activeOtpPhone,
+                otpCode = activeOtpCode,
+                onDismiss = { showTopSmsBanner = false }
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Brand Header with generous top clearance so the Scissors circle is never cut off
             Box(
@@ -188,7 +256,7 @@ fun AuthFullScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
                 text = "TrimTime",
@@ -207,7 +275,7 @@ fun AuthFullScreen(
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             // Primary Auth Card with Top Mode Switcher ("Login" vs "Sign Up" Tabs)
             Card(
@@ -244,6 +312,7 @@ fun AuthFullScreen(
                                 .clickable {
                                     isLoginTab = true
                                     infoBannerMessage = null
+                                    localValidationError = null
                                 }
                                 .padding(horizontal = 8.dp)
                                 .testTag("tab_login_existing_user"),
@@ -277,6 +346,7 @@ fun AuthFullScreen(
                                 .background(if (!isLoginTab) AmberPrimary else Color.Transparent)
                                 .clickable {
                                     isLoginTab = false
+                                    localValidationError = null
                                 }
                                 .padding(horizontal = 8.dp)
                                 .testTag("tab_signup_new_account"),
@@ -334,13 +404,13 @@ fun AuthFullScreen(
                         }
                     }
 
-                    // Inline validation message inside the Auth Card (only for form validation)
+                    // Inline validation message inside the Auth Card
                     AnimatedVisibility(
-                        visible = !errorMessage.isNullOrBlank(),
+                        visible = !activeError.isNullOrBlank(),
                         enter = fadeIn(),
                         exit = fadeOut()
                     ) {
-                        errorMessage?.let { errorText ->
+                        activeError?.let { errorText ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -369,31 +439,64 @@ fun AuthFullScreen(
 
                     if (isLoginTab) {
                         // ====================================================
-                        // 2. Simple "Login" Tab (For Existing Users)
+                        // 2. Protected "Login" Tab (Mobile/Email + 4-Digit Login PIN)
                         // ====================================================
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Welcome Back!",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50))
+                                    .background(GreenSuccess.copy(alpha = 0.14f))
+                                    .border(1.dp, GreenSuccess.copy(alpha = 0.4f), RoundedCornerShape(50))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = GreenSuccess,
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Text(
+                                    text = "PIN Protected",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = GreenSuccess,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+
                         Text(
-                            text = "Welcome Back!",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
-                        )
-                        Text(
-                            text = "Enter your registered 10-Digit Mobile Number OR Email Address. We'll restore your saved Name, Role (Customer/Partner), and bookings automatically.",
+                            text = "Enter your registered Mobile Number OR Email Address and your 4-Digit Secret Login PIN to access your account.",
                             fontSize = 11.sp,
                             color = Color(0xFF94A3B8),
                             lineHeight = 15.sp
                         )
 
+                        // Input 1: Mobile Number OR Email Address
                         OutlinedTextField(
                             value = loginIdentifier,
                             onValueChange = {
                                 loginIdentifier = SecurityValidator.sanitizeInput(it, maxLength = 80, trimEdges = false)
                                 infoBannerMessage = null
+                                localValidationError = null
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("login_identifier_input"),
-                            label = { Text("Mobile Number OR Email Address", fontSize = 12.sp) },
+                            label = { Text("1. Mobile Number OR Email Address", fontSize = 12.sp) },
                             placeholder = {
                                 Text(
                                     "e.g. 9876543210 or yourname@gmail.com",
@@ -412,7 +515,7 @@ fun AuthFullScreen(
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(
                                 keyboardType = KeyboardType.Email,
-                                imeAction = ImeAction.Done
+                                imeAction = ImeAction.Next
                             ),
                             shape = RoundedCornerShape(12.dp),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -425,11 +528,136 @@ fun AuthFullScreen(
                             )
                         )
 
+                        // Input 2: Mandatory 4-Digit Login PIN
+                        OutlinedTextField(
+                            value = loginPin,
+                            onValueChange = { input ->
+                                loginPin = input.filter { it.isDigit() }.take(4)
+                                localValidationError = null
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("login_pin_input"),
+                            label = { Text("2. 4-Digit Login PIN", fontSize = 12.sp) },
+                            placeholder = {
+                                Text(
+                                    "Enter 4-digit secret PIN (e.g. 1234)",
+                                    fontSize = 13.sp,
+                                    color = Color(0xFF64748B)
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Key,
+                                    contentDescription = "4-Digit Login PIN",
+                                    tint = if (loginPin.length == 4) GreenSuccess else AmberPrimary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            trailingIcon = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(end = 6.dp)
+                                ) {
+                                    Text(
+                                        text = "${loginPin.length}/4",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (loginPin.length == 4) GreenSuccess else Color(0xFF94A3B8)
+                                    )
+                                    IconButton(
+                                        onClick = { showLoginPinDigits = !showLoginPinDigits },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (showLoginPinDigits) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                            contentDescription = "Toggle PIN Visibility",
+                                            tint = Color(0xFF94A3B8),
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            visualTransformation = if (showLoginPinDigits) VisualTransformation.None else PasswordVisualTransformation(),
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.NumberPassword,
+                                imeAction = ImeAction.Done
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = if (loginPin.length == 4) GreenSuccess else AmberPrimary,
+                                unfocusedBorderColor = Color(0xFF334155),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedLabelColor = AmberPrimary,
+                                unfocusedLabelColor = Color(0xFF94A3B8)
+                            )
+                        )
+
+                        // "Forgot PIN? Verify via OTP" row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    localValidationError = null
+                                    if (loginIdentifier.trim().isBlank()) {
+                                        localValidationError = "Enter your registered Mobile Number or Email above first, then tap 'Forgot PIN? Verify via OTP'."
+                                    } else {
+                                        isCheckingOtpRequest = true
+                                        onRequestForgotPinOtp(
+                                            loginIdentifier.trim(),
+                                            { cleanPhone, otpCode, _ ->
+                                                isCheckingOtpRequest = false
+                                                activeOtpPhone = cleanPhone
+                                                activeOtpCode = otpCode
+                                                showTopSmsBanner = true
+                                                triggerAndroidSmsNotification(context, cleanPhone, otpCode)
+                                                showForgotPinOtpModal = true
+                                            },
+                                            { err ->
+                                                isCheckingOtpRequest = false
+                                                localValidationError = err
+                                            }
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.testTag("forgot_pin_otp_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Sms,
+                                    contentDescription = null,
+                                    tint = AmberPrimary,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Forgot PIN? Verify via OTP",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AmberPrimary
+                                )
+                            }
+                        }
+
                         Button(
                             onClick = {
                                 infoBannerMessage = null
-                                onLoginExistingUser(loginIdentifier) { prefillEmail, prefillPhone ->
-                                    // Account not found -> prefill Sign Up fields and switch tab automatically
+                                localValidationError = null
+                                val cleanId = loginIdentifier.trim()
+                                val cleanPin = loginPin.filter { it.isDigit() }
+                                if (cleanId.isBlank()) {
+                                    localValidationError = "Please enter your registered 10-Digit Mobile Number or Email Address."
+                                    return@Button
+                                }
+                                if (cleanPin.length != 4) {
+                                    localValidationError = "Please enter your 4-Digit Secret Login PIN (or tap 'Forgot PIN? Verify via OTP' to reset it)."
+                                    return@Button
+                                }
+                                onLoginExistingUser(cleanId, cleanPin) { prefillEmail, prefillPhone ->
                                     if (prefillEmail.isNotBlank()) {
                                         emailAddress = prefillEmail
                                     }
@@ -440,7 +668,7 @@ fun AuthFullScreen(
                                     isLoginTab = false
                                 }
                             },
-                            enabled = !isLoading,
+                            enabled = !isLoading && !isCheckingOtpRequest,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(50.dp)
@@ -451,7 +679,7 @@ fun AuthFullScreen(
                                 contentColor = Color.Black
                             )
                         ) {
-                            if (isLoading) {
+                            if (isLoading || isCheckingOtpRequest) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(20.dp),
                                     strokeWidth = 2.dp,
@@ -459,13 +687,19 @@ fun AuthFullScreen(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "Checking Firestore Account...",
+                                    text = "Verifying Account & PIN...",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 14.sp
                                 )
                             } else {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "Login",
+                                    text = "Verify PIN & Login",
                                     fontWeight = FontWeight.ExtraBold,
                                     fontSize = 15.sp
                                 )
@@ -473,16 +707,23 @@ fun AuthFullScreen(
                         }
                     } else {
                         // ====================================================
-                        // 3. Full "Sign Up" Tab (For New Users)
+                        // 3. Full "Sign Up" Tab (With 2-Step Phone OTP + 4-Digit Login PIN)
                         // ====================================================
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Create Verified Account",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.White
+                            )
+                            VerifiedNumberBadge(text = "2-Step OTP")
+                        }
                         Text(
-                            text = "Create New Account",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
-                        )
-                        Text(
-                            text = "Choose your account type and fill in your details once to register in Cloud Firestore.",
+                            text = "Fill in your details, set a 4-Digit Login PIN, and verify your mobile number via instant 4-digit OTP.",
                             fontSize = 11.sp,
                             color = Color(0xFF94A3B8),
                             lineHeight = 15.sp
@@ -559,7 +800,10 @@ fun AuthFullScreen(
                         // Full Name Input (Sanitized, max 60 chars)
                         OutlinedTextField(
                             value = fullName,
-                            onValueChange = { fullName = SecurityValidator.sanitizeName(it, trimEdges = false) },
+                            onValueChange = {
+                                fullName = SecurityValidator.sanitizeName(it, trimEdges = false)
+                                localValidationError = null
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("auth_name_input"),
@@ -592,7 +836,10 @@ fun AuthFullScreen(
                         // Email Address Input (Sanitized)
                         OutlinedTextField(
                             value = emailAddress,
-                            onValueChange = { emailAddress = SecurityValidator.sanitizeInput(it, maxLength = 80, trimEdges = false) },
+                            onValueChange = {
+                                emailAddress = SecurityValidator.sanitizeInput(it, maxLength = 80, trimEdges = false)
+                                localValidationError = null
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("auth_email_input"),
@@ -627,6 +874,7 @@ fun AuthFullScreen(
                             value = phoneDigits,
                             onValueChange = { input ->
                                 phoneDigits = SecurityValidator.extractTenDigitMobile(input).take(10)
+                                localValidationError = null
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -641,10 +889,19 @@ fun AuthFullScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                             },
+                            trailingIcon = {
+                                Text(
+                                    text = "${phoneDigits.length}/10",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (phoneDigits.length == 10) GreenSuccess else Color(0xFF94A3B8),
+                                    modifier = Modifier.padding(end = 10.dp)
+                                )
+                            },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(
                                 keyboardType = KeyboardType.Number,
-                                imeAction = ImeAction.Done
+                                imeAction = ImeAction.Next
                             ),
                             shape = RoundedCornerShape(12.dp),
                             colors = OutlinedTextFieldDefaults.colors(
@@ -669,12 +926,112 @@ fun AuthFullScreen(
                             )
                         }
 
+                        // Mandatory 4-Digit Secret Login PIN / Password Input
+                        OutlinedTextField(
+                            value = signUpPin,
+                            onValueChange = { input ->
+                                signUpPin = input.filter { it.isDigit() }.take(4)
+                                localValidationError = null
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("auth_signup_pin_input"),
+                            label = { Text("4-Digit Secret Login PIN / Password", fontSize = 12.sp) },
+                            placeholder = { Text("Set a 4-digit PIN (e.g. 2580)", fontSize = 13.sp, color = Color(0xFF64748B)) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Key,
+                                    contentDescription = "Secret Login PIN",
+                                    tint = if (signUpPin.length == 4) GreenSuccess else AmberPrimary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            trailingIcon = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(end = 6.dp)
+                                ) {
+                                    Text(
+                                        text = "${signUpPin.length}/4",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (signUpPin.length == 4) GreenSuccess else Color(0xFF94A3B8)
+                                    )
+                                    IconButton(
+                                        onClick = { showSignUpPinDigits = !showSignUpPinDigits },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (showSignUpPinDigits) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                            contentDescription = "Toggle PIN Visibility",
+                                            tint = Color(0xFF94A3B8),
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                    }
+                                }
+                            },
+                            visualTransformation = if (showSignUpPinDigits) VisualTransformation.None else PasswordVisualTransformation(),
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.NumberPassword,
+                                imeAction = ImeAction.Done
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = if (signUpPin.length == 4) GreenSuccess else AmberPrimary,
+                                unfocusedBorderColor = Color(0xFF334155),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                focusedLabelColor = AmberPrimary,
+                                unfocusedLabelColor = Color(0xFF94A3B8)
+                            )
+                        )
+
                         Button(
                             onClick = {
                                 infoBannerMessage = null
-                                onSignInWithRealIdentity(fullName, emailAddress, phoneDigits, loginAsPartner)
+                                localValidationError = null
+
+                                val cleanName = SecurityValidator.sanitizeName(fullName)
+                                val cleanEmail = emailAddress.trim()
+                                val phoneErr = SecurityValidator.validateIndianMobileError(phoneDigits)
+                                val cleanPin = signUpPin.filter { it.isDigit() }
+
+                                if (cleanName.length < 2) {
+                                    localValidationError = "Please enter your full name (2–60 characters)."
+                                    return@Button
+                                }
+                                if (!cleanEmail.contains("@") || !cleanEmail.contains(".")) {
+                                    localValidationError = "Please enter a valid email address."
+                                    return@Button
+                                }
+                                if (phoneErr != null) {
+                                    localValidationError = phoneErr
+                                    return@Button
+                                }
+                                if (cleanPin.length != 4) {
+                                    localValidationError = "Please set a 4-Digit Secret Login PIN (4 digits, e.g. 2580) to protect your account."
+                                    return@Button
+                                }
+
+                                isCheckingOtpRequest = true
+                                onRequestPhoneOtp(
+                                    phoneDigits,
+                                    { verifiedTenDigits, generatedOtp ->
+                                        isCheckingOtpRequest = false
+                                        activeOtpPhone = verifiedTenDigits
+                                        activeOtpCode = generatedOtp
+                                        showTopSmsBanner = true
+                                        triggerAndroidSmsNotification(context, verifiedTenDigits, generatedOtp)
+                                        showSignUpOtpModal = true
+                                    },
+                                    { err ->
+                                        isCheckingOtpRequest = false
+                                        localValidationError = err
+                                    }
+                                )
                             },
-                            enabled = !isLoading,
+                            enabled = !isLoading && !isCheckingOtpRequest,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(50.dp)
@@ -685,7 +1042,7 @@ fun AuthFullScreen(
                                 contentColor = Color.Black
                             )
                         ) {
-                            if (isLoading) {
+                            if (isLoading || isCheckingOtpRequest) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(20.dp),
                                     strokeWidth = 2.dp,
@@ -693,15 +1050,21 @@ fun AuthFullScreen(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "Creating Account...",
+                                    text = "Sending Verification OTP...",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 14.sp
                                 )
                             } else {
+                                Icon(
+                                    imageVector = Icons.Default.VerifiedUser,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "Create Account",
+                                    text = "Send Verification OTP",
                                     fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 15.sp
+                                    fontSize = 14.sp
                                 )
                             }
                         }
@@ -709,6 +1072,71 @@ fun AuthFullScreen(
                 }
             }
         }
+    }
+
+    // 2-Step Sign Up OTP Verification Modal
+    if (showSignUpOtpModal && activeOtpCode.length == 4) {
+        VerifyMobileOtpDialog(
+            phoneTenDigits = activeOtpPhone,
+            expectedOtp = activeOtpCode,
+            title = "Verify Your Mobile Number",
+            subtitle = "Enter the 4-digit OTP sent to +91 $activeOtpPhone to verify your number and create your account.",
+            requireNewLoginPin = false,
+            onResendOtp = {
+                val refreshedOtp = onGenerateNewOtpCode()
+                activeOtpCode = refreshedOtp
+                showTopSmsBanner = true
+                triggerAndroidSmsNotification(context, activeOtpPhone, refreshedOtp)
+            },
+            onVerified = { _ ->
+                showSignUpOtpModal = false
+                showTopSmsBanner = false
+                onSignInWithRealIdentity(
+                    fullName,
+                    emailAddress,
+                    activeOtpPhone,
+                    loginAsPartner,
+                    signUpPin.filter { it.isDigit() },
+                    true
+                )
+            },
+            onDismiss = {
+                showSignUpOtpModal = false
+            }
+        )
+    }
+
+    // "Forgot PIN? Verify via OTP" Reset Modal
+    if (showForgotPinOtpModal && activeOtpCode.length == 4) {
+        VerifyMobileOtpDialog(
+            phoneTenDigits = activeOtpPhone,
+            expectedOtp = activeOtpCode,
+            title = "Reset 4-Digit Login PIN via OTP",
+            subtitle = "Enter the 4-digit OTP shown in the top SMS banner for +91 $activeOtpPhone and choose your new 4-Digit Secret Login PIN.",
+            requireNewLoginPin = true,
+            onResendOtp = {
+                val refreshedOtp = onGenerateNewOtpCode()
+                activeOtpCode = refreshedOtp
+                showTopSmsBanner = true
+                triggerAndroidSmsNotification(context, activeOtpPhone, refreshedOtp)
+            },
+            onVerified = { newLoginPin ->
+                showForgotPinOtpModal = false
+                showTopSmsBanner = false
+                if (!newLoginPin.isNullOrBlank()) {
+                    loginPin = newLoginPin
+                    onResetLoginPin(
+                        loginIdentifier.trim(),
+                        newLoginPin,
+                        {},
+                        { err -> localValidationError = err }
+                    )
+                }
+            },
+            onDismiss = {
+                showForgotPinOtpModal = false
+            }
+        )
     }
 
     // Helpful Dialog when Google Sign-In fails on physical APK due to SHA-1 fingerprint mismatch
@@ -719,8 +1147,8 @@ fun AuthFullScreen(
             initialPhone = phoneDigits,
             isLoading = isLoading,
             onDismiss = onDismissSha1FallbackDialog,
-            onLoginExisting = { identifier ->
-                onLoginExistingUser(identifier) { prefillEmail, prefillPhone ->
+            onLoginExisting = { identifier, pin ->
+                onLoginExistingUser(identifier, pin) { prefillEmail, prefillPhone ->
                     if (prefillEmail.isNotBlank()) emailAddress = prefillEmail
                     if (prefillPhone.isNotBlank()) phoneDigits = prefillPhone
                     infoBannerMessage = "Account not found. Switching to Sign Up..."
@@ -728,8 +1156,26 @@ fun AuthFullScreen(
                     onDismissSha1FallbackDialog()
                 }
             },
-            onConfirmSignIn = { name, email, phone, isPartner ->
-                onSignInWithRealIdentity(name, email, phone, isPartner)
+            onConfirmSignIn = { name, email, phone, isPartner, pin ->
+                onDismissSha1FallbackDialog()
+                onRequestPhoneOtp(
+                    phone,
+                    { cleanPhone, otp ->
+                        fullName = name
+                        emailAddress = email
+                        phoneDigits = cleanPhone
+                        loginAsPartner = isPartner
+                        signUpPin = pin
+                        activeOtpPhone = cleanPhone
+                        activeOtpCode = otp
+                        showTopSmsBanner = true
+                        triggerAndroidSmsNotification(context, cleanPhone, otp)
+                        showSignUpOtpModal = true
+                    },
+                    { err ->
+                        localValidationError = err
+                    }
+                )
             }
         )
     }
@@ -742,14 +1188,16 @@ fun Sha1RealAccountLoginDialog(
     initialPhone: String = "",
     isLoading: Boolean = false,
     onDismiss: () -> Unit,
-    onLoginExisting: (identifier: String) -> Unit = {},
-    onConfirmSignIn: (name: String, email: String, phone: String, asPartner: Boolean) -> Unit
+    onLoginExisting: (identifier: String, loginPin: String) -> Unit = { _, _ -> },
+    onConfirmSignIn: (name: String, email: String, phone: String, asPartner: Boolean, loginPin: String) -> Unit
 ) {
     var dialogIsLoginTab by remember { mutableStateOf(true) }
     var dialogIdentifier by remember { mutableStateOf(initialEmail.ifBlank { initialPhone }) }
+    var dialogLoginPin by remember { mutableStateOf("") }
     var name by remember { mutableStateOf(initialName) }
     var email by remember { mutableStateOf(initialEmail) }
     var phone by remember { mutableStateOf(initialPhone) }
+    var newPin by remember { mutableStateOf("") }
     var asPartner by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
 
@@ -875,6 +1323,26 @@ fun Sha1RealAccountLoginDialog(
                         )
                     )
 
+                    OutlinedTextField(
+                        value = dialogLoginPin,
+                        onValueChange = {
+                            dialogLoginPin = it.filter { ch -> ch.isDigit() }.take(4)
+                            localError = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("4-Digit Login PIN", fontSize = 12.sp) },
+                        placeholder = { Text("Enter 4-digit PIN", fontSize = 13.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF334155),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+
                     localError?.let { err ->
                         Text(
                             text = err,
@@ -888,8 +1356,10 @@ fun Sha1RealAccountLoginDialog(
                         onClick = {
                             if (dialogIdentifier.trim().isBlank()) {
                                 localError = "Please enter your Mobile Number or Email."
+                            } else if (dialogLoginPin.length != 4) {
+                                localError = "Please enter your 4-Digit Login PIN."
                             } else {
-                                onLoginExisting(dialogIdentifier.trim())
+                                onLoginExisting(dialogIdentifier.trim(), dialogLoginPin)
                             }
                         },
                         enabled = !isLoading,
@@ -903,7 +1373,7 @@ fun Sha1RealAccountLoginDialog(
                         )
                     ) {
                         Text(
-                            text = "Login",
+                            text = "Verify PIN & Login",
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 14.sp
                         )
@@ -968,6 +1438,26 @@ fun Sha1RealAccountLoginDialog(
                         )
                     )
 
+                    OutlinedTextField(
+                        value = newPin,
+                        onValueChange = { input ->
+                            newPin = input.filter { it.isDigit() }.take(4)
+                            localError = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("4-Digit Secret Login PIN", fontSize = 12.sp) },
+                        placeholder = { Text("e.g. 2580", fontSize = 13.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF334155),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+
                     // Role toggle inside dialog
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1016,8 +1506,10 @@ fun Sha1RealAccountLoginDialog(
                                 localError = "Please enter a valid email address."
                             } else if (phoneError != null) {
                                 localError = phoneError
+                            } else if (newPin.length != 4) {
+                                localError = "Please set a 4-Digit Secret Login PIN."
                             } else {
-                                onConfirmSignIn(cleanName, email.trim(), phone.trim(), asPartner)
+                                onConfirmSignIn(cleanName, email.trim(), phone.trim(), asPartner, newPin)
                             }
                         },
                         enabled = !isLoading,
@@ -1031,7 +1523,7 @@ fun Sha1RealAccountLoginDialog(
                         )
                     ) {
                         Text(
-                            text = "Create Account",
+                            text = "Send Verification OTP",
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 14.sp
                         )

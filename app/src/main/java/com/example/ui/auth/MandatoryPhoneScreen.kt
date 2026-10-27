@@ -62,11 +62,18 @@ import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
 import com.example.util.SecurityValidator
 
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.ui.platform.LocalContext
+import com.example.ui.components.TopSmsOtpBanner
+import com.example.ui.components.VerifiedNumberBadge
+import com.example.ui.components.VerifyMobileOtpDialog
+import com.example.ui.components.triggerAndroidSmsNotification
+
 /**
- * Rule 1: Mandatory Phone Collection Screen (No OTP)
- * Required after Google Login when user has no phone number saved in their Firestore profile.
- * Customers must enter a 10-digit contact number before accessing the Home Screen.
- * Saved directly to Firestore without SMS/OTP costs.
+ * Rule 1: Mandatory Phone Collection Screen with 2-Step OTP Verification
+ * Required after Google Login when user has no verified phone number saved in their Firestore profile.
+ * Customers enter their 10-digit mobile number, receive the in-app Top SMS OTP Banner & Android Notification,
+ * and verify the 4-digit OTP before accessing the Home Screen.
  */
 @Composable
 fun MandatoryPhoneScreen(
@@ -74,19 +81,36 @@ fun MandatoryPhoneScreen(
     userEmail: String,
     isLoading: Boolean,
     errorMessage: String?,
+    onRequestPhoneOtp: (
+        rawPhone: String,
+        onOtpGenerated: (cleanTenDigits: String, otpCode: String) -> Unit,
+        onError: (String) -> Unit
+    ) -> Unit = { phone, onOtp, _ ->
+        val clean = SecurityValidator.extractTenDigitMobile(phone)
+        onOtp(clean, (1000..9999).random().toString())
+    },
+    onGenerateNewOtpCode: () -> String = { (1000..9999).random().toString() },
     onSavePhone: (String) -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var rawPhone by remember { mutableStateOf("") }
     var isSavingLocally by remember { mutableStateOf(false) }
+    var localError by remember { mutableStateOf<String?>(null) }
+
+    // 2-Step OTP state
+    var showTopSmsBanner by remember { mutableStateOf(false) }
+    var activeOtpPhone by remember { mutableStateOf("") }
+    var activeOtpCode by remember { mutableStateOf("") }
+    var showOtpModal by remember { mutableStateOf(false) }
 
     val cleanDigits = SecurityValidator.extractTenDigitMobile(rawPhone).take(10)
     val isValid = SecurityValidator.isValidIndianMobile(cleanDigits)
     val localValidationWarning = if (cleanDigits.length == 10 && !isValid) {
         SecurityValidator.validateIndianMobileError(cleanDigits)
     } else null
-    val activeErrorMessage = errorMessage ?: localValidationWarning
+    val activeErrorMessage = localError ?: errorMessage ?: localValidationWarning
     val showLoading = isLoading || isSavingLocally
 
     Box(
@@ -104,6 +128,20 @@ fun MandatoryPhoneScreen(
             .padding(horizontal = 24.dp, vertical = 24.dp),
         contentAlignment = Alignment.Center
     ) {
+        // Top SMS-Style OTP Banner
+        Box(
+            modifier = Modifier
+                .fillMaxSize(),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            TopSmsOtpBanner(
+                visible = showTopSmsBanner && activeOtpCode.length == 4,
+                phoneTenDigits = activeOtpPhone,
+                otpCode = activeOtpCode,
+                onDismiss = { showTopSmsBanner = false }
+            )
+        }
+
         // Decorative ambient glow
         Box(
             modifier = Modifier
@@ -168,8 +206,10 @@ fun MandatoryPhoneScreen(
 
                 // Title & Subtitle
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    VerifiedNumberBadge(text = "2-Step Phone OTP")
+                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Contact Number Required",
+                        text = "Verify Your Mobile Number",
                         style = MaterialTheme.typography.titleLarge.copy(
                             fontWeight = FontWeight.Bold
                         ),
@@ -180,7 +220,7 @@ fun MandatoryPhoneScreen(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     Text(
-                        text = "Hello $userName! To confirm your appointments and verify your 4-digit Pay-at-Salon PIN, please provide your 10-digit mobile number.",
+                        text = "Hello $userName! Please verify your 10-digit Indian mobile number via instant 4-digit OTP to unlock appointments.",
                         fontSize = 13.sp,
                         color = Color(0xFF94A3B8),
                         textAlign = TextAlign.Center,
@@ -206,7 +246,7 @@ fun MandatoryPhoneScreen(
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = "No OTP verification required. Saved securely to your profile to prevent throwaway spam bookings.",
+                        text = "Instant Spark-Plan OTP: Your 4-digit code will appear in the top SMS notification banner immediately.",
                         fontSize = 11.sp,
                         color = Color(0xFFCBD5E1),
                         lineHeight = 15.sp
@@ -217,7 +257,6 @@ fun MandatoryPhoneScreen(
                 OutlinedTextField(
                     value = rawPhone,
                     onValueChange = { input ->
-                        // Automatically strip non-digits, country code 91 if full number pasted with prefix
                         val onlyDigits = input.filter { it.isDigit() }
                         val sanitized = if (onlyDigits.length > 10 && onlyDigits.startsWith("91")) {
                             onlyDigits.drop(2).take(10)
@@ -225,11 +264,12 @@ fun MandatoryPhoneScreen(
                             onlyDigits.take(10)
                         }
                         rawPhone = sanitized
+                        localError = null
                     },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("mandatory_phone_input"),
-                    label = { Text("10-Digit Mobile Number") },
+                    label = { Text("10-Digit Mobile Number (Starts 6–9)") },
                     placeholder = { Text("9876543210", color = Color(0xFF64748B)) },
                     leadingIcon = {
                         Row(
@@ -311,12 +351,27 @@ fun MandatoryPhoneScreen(
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                // Save & Continue Button
+                // Send Verification OTP Button
                 Button(
                     onClick = {
                         if (isValid && !showLoading) {
+                            localError = null
                             isSavingLocally = true
-                            onSavePhone("+91 $cleanDigits")
+                            onRequestPhoneOtp(
+                                cleanDigits,
+                                { verifiedDigits, otp ->
+                                    isSavingLocally = false
+                                    activeOtpPhone = verifiedDigits
+                                    activeOtpCode = otp
+                                    showTopSmsBanner = true
+                                    triggerAndroidSmsNotification(context, verifiedDigits, otp)
+                                    showOtpModal = true
+                                },
+                                { err ->
+                                    isSavingLocally = false
+                                    localError = err
+                                }
+                            )
                         }
                     },
                     enabled = isValid && !showLoading,
@@ -340,13 +395,19 @@ fun MandatoryPhoneScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Saving to Profile...",
+                            text = "Sending OTP...",
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp
                         )
                     } else {
+                        Icon(
+                            imageVector = Icons.Default.VerifiedUser,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (isValid) "Save & Access Home Screen" else "Enter 10-digit number (${10 - cleanDigits.length} more)",
+                            text = if (isValid) "Send Verification OTP" else "Enter 10-digit number (${10 - cleanDigits.length} more)",
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp
                         )
@@ -366,5 +427,30 @@ fun MandatoryPhoneScreen(
                 }
             }
         }
+    }
+
+    if (showOtpModal && activeOtpCode.length == 4) {
+        VerifyMobileOtpDialog(
+            phoneTenDigits = activeOtpPhone,
+            expectedOtp = activeOtpCode,
+            title = "Verify Your Mobile Number",
+            subtitle = "Enter the 4-digit OTP sent to +91 $activeOtpPhone to verify your number and unlock TrimTime.",
+            requireNewLoginPin = false,
+            onResendOtp = {
+                val refreshed = onGenerateNewOtpCode()
+                activeOtpCode = refreshed
+                showTopSmsBanner = true
+                triggerAndroidSmsNotification(context, activeOtpPhone, refreshed)
+            },
+            onVerified = { _ ->
+                showOtpModal = false
+                showTopSmsBanner = false
+                isSavingLocally = true
+                onSavePhone("+91 $activeOtpPhone")
+            },
+            onDismiss = {
+                showOtpModal = false
+            }
+        )
     }
 }

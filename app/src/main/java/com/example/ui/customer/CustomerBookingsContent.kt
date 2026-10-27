@@ -207,6 +207,9 @@ fun CustomerBookingCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
@@ -219,7 +222,9 @@ fun CustomerBookingCard(
                     Text(
                         text = booking.salonName,
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = Color.White
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                 }
 
@@ -252,7 +257,9 @@ fun CustomerBookingCard(
                         text = statusText,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = statusColor
+                        color = statusColor,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -260,20 +267,29 @@ fun CustomerBookingCard(
             // Service & Time Slot
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 12.dp)
+                ) {
                     Text(
                         text = booking.service,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFFE2E8F0)
+                        color = Color(0xFFE2E8F0),
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                     Text(
                         text = "Slot: ${booking.timeSlot}",
                         fontSize = 12.sp,
                         color = Color(0xFF94A3B8),
-                        modifier = Modifier.padding(top = 2.dp)
+                        modifier = Modifier.padding(top = 2.dp),
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                 }
 
@@ -281,7 +297,9 @@ fun CustomerBookingCard(
                     text = "₹${booking.servicePrice}",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.ExtraBold,
-                    color = AmberPrimary
+                    color = AmberPrimary,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
 
@@ -298,17 +316,23 @@ fun CustomerBookingCard(
                         )
                     )
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Lock,
@@ -316,37 +340,46 @@ fun CustomerBookingCard(
                                     tint = if (isAccepted) GreenSuccess else AmberPrimary,
                                     modifier = Modifier.size(14.dp)
                                 )
+                                Column {
+                                    Text(
+                                        text = "SERVICE PIN (SHOW TO BARBER)",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFCBD5E1),
+                                        letterSpacing = 0.5.sp,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                    Text(
+                                        text = if (isAccepted) "Salon accepted! Show PIN after service" else "Provide at shop after service",
+                                        fontSize = 10.sp,
+                                        color = if (isAccepted) Color(0xFFA7F3D0) else Color(0xFF94A3B8),
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+
+                            // 4-Digit PIN Display Box - strictly single-line horizontal
+                            Box(
+                                modifier = Modifier
+                                    .
+                                    clip(RoundedCornerShape(8.dp))
+                                    .background(DarkSurface)
+                                    .border(1.dp, if (isAccepted) GreenSuccess else AmberPrimary, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
                                 Text(
-                                    text = "SERVICE PIN (SHOW TO BARBER)",
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFCBD5E1),
-                                    letterSpacing = 0.5.sp
+                                    text = displayPin,
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = AmberPrimary,
+                                    fontFamily = FontFamily.Monospace,
+                                    letterSpacing = 3.sp,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
-                            Text(
-                                text = if (isAccepted) "Salon accepted! Show PIN after service" else "Provide at shop after service",
-                                fontSize = 10.sp,
-                                color = if (isAccepted) Color(0xFFA7F3D0) else Color(0xFF94A3B8)
-                            )
-                        }
-
-                        // PIN Display Box
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(DarkSurface)
-                                .border(1.dp, if (isAccepted) GreenSuccess else AmberPrimary, RoundedCornerShape(8.dp))
-                                .padding(horizontal = 14.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = displayPin,
-                                fontSize = 22.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = AmberPrimary,
-                                fontFamily = FontFamily.Monospace,
-                                letterSpacing = 4.sp
-                            )
                         }
                     }
                 }
@@ -369,12 +402,14 @@ fun CustomerBookingCard(
                     Text(
                         text = "Verified with PIN $displayPin • Paid ₹${booking.servicePrice} at salon",
                         fontSize = 11.sp,
-                        color = Color(0xFFA7F3D0)
+                        color = Color(0xFFA7F3D0),
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                 }
             }
 
-            // Bottom Actions: Pay at Salon note, Get Directions & Cancel Button if Pending or Accepted
+            // Status / Payment Info Row (Kept separate from Action Buttons so buttons never get squeezed)
             val context = LocalContext.current
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -383,7 +418,7 @@ fun CustomerBookingCard(
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Payments,
@@ -392,71 +427,101 @@ fun CustomerBookingCard(
                         modifier = Modifier.size(14.dp)
                     )
                     Text(
-                        text = "Pay at Salon",
+                        text = "Pay at Salon • ₹0 Advance Required",
                         fontSize = 11.sp,
-                        color = Color(0xFFA7F3D0)
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFA7F3D0),
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+
+            // Full-Width Equal-Weight Action Buttons Row: Call Salon | Directions | Cancel
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        val salonPhone = salon?.phone?.ifBlank { TRIMTIME_SUPPORT_PHONE } ?: TRIMTIME_SUPPORT_PHONE
+                        launchPhoneDialer(context, salonPhone)
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenSuccess),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("booking_call_salon_${booking.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Call,
+                        contentDescription = "Call Salon Directly",
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Call Salon",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                OutlinedButton(
+                    onClick = {
+                        launchGeoDirections(
+                            context = context,
+                            latitude = salon?.latitude ?: 25.5941,
+                            longitude = salon?.longitude ?: 85.1376,
+                            salonName = booking.salonName,
+                            fallbackAddress = salon?.location ?: ""
+                        )
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("booking_get_directions_${booking.id}")
                 ) {
-                    OutlinedButton(
-                        onClick = {
-                            val salonPhone = salon?.phone?.ifBlank { TRIMTIME_SUPPORT_PHONE } ?: TRIMTIME_SUPPORT_PHONE
-                            launchPhoneDialer(context, salonPhone)
-                        },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenSuccess),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp),
-                        modifier = Modifier.testTag("booking_call_salon_${booking.id}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Call,
-                            contentDescription = "Call Salon Directly",
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = "Call Salon", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
+                    Icon(
+                        imageVector = Icons.Default.Directions,
+                        contentDescription = "Get Directions",
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Directions",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
 
+                if (isActiveSlot) {
                     OutlinedButton(
-                        onClick = {
-                            launchGeoDirections(
-                                context = context,
-                                latitude = salon?.latitude ?: 25.5941,
-                                longitude = salon?.longitude ?: 85.1376,
-                                salonName = booking.salonName,
-                                fallbackAddress = salon?.location ?: ""
-                            )
-                        },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
+                        onClick = onCancel,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, RedAlert.copy(alpha = 0.8f)),
                         shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 4.dp),
-                        modifier = Modifier.testTag("booking_get_directions_${booking.id}")
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("cancel_booking_${booking.id}")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Directions,
-                            contentDescription = "Get Directions",
-                            modifier = Modifier.size(14.dp)
+                        Text(
+                            text = "Cancel",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(text = "Directions", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                    }
-
-                    if (isActiveSlot) {
-                        OutlinedButton(
-                            onClick = onCancel,
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            modifier = Modifier.testTag("cancel_booking_${booking.id}")
-                        ) {
-                            Text(text = "Cancel", fontSize = 11.sp)
-                        }
                     }
                 }
             }

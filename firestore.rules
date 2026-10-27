@@ -50,7 +50,8 @@ service cloud.firestore {
       allow read: if true;
       allow create: if request.resource.data.keys().hasAny(['name', 'ownerId']);
       allow update: if isSalonOwnerMatching();
-      allow delete: if (isAuthenticated() && request.auth.uid == resource.data.ownerId);
+      allow delete: if (isAuthenticated() && request.auth.uid == resource.data.ownerId) ||
+        !(salonId in ['salon_blade_comb', 'salon_urban_cuts', 'salon_velvet_shears', 'salon_express_trim']);
     }
 
     // Bookings collection:

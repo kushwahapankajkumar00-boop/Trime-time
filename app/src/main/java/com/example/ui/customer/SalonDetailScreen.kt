@@ -7,12 +7,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -32,6 +35,7 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -44,15 +48,19 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.Salon
@@ -66,21 +74,28 @@ import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
+import com.example.util.SalonImageUtils
 
 @Composable
 fun SalonDetailScreen(
     salon: Salon,
+    currentUserId: String = "",
     hasActiveBooking: Boolean = false,
     isSuspended: Boolean = false,
     onBack: () -> Unit,
     onServiceSelected: (SalonService) -> Unit,
     onBookingBlocked: (String) -> Unit = {},
+    onSwitchToPartnerMode: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     BackHandler { onBack() }
 
-    val isBookDisabled = hasActiveBooking || isSuspended
+    val isOwnSalon = currentUserId.isNotBlank() &&
+        (salon.ownerId == currentUserId || salon.partnerId == currentUserId)
+
+    val isBookDisabled = isOwnSalon || hasActiveBooking || isSuspended
     val disabledReason = when {
+        isOwnSalon -> "This is your own registered salon. Manage it in Partner Mode."
         isSuspended -> "Your account has been suspended for too many cancellations"
         hasActiveBooking -> "You already have an active booking. Please complete or cancel it first."
         else -> ""
@@ -111,16 +126,20 @@ fun SalonDetailScreen(
                         )
                     }
                     Spacer(modifier = Modifier.width(4.dp))
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = salon.name,
                             style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                            color = Color.White
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "${salon.distance} away • Next slot in ${salon.nextSlotMinutes}m",
                             fontSize = 11.sp,
-                            color = AmberPrimary
+                            color = AmberPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -238,6 +257,65 @@ fun SalonDetailScreen(
                 }
             }
 
+            // Rule 4: Prevent Self-Booking Banner (Owner Viewing Their Own Salon in Customer Mode)
+            if (isOwnSalon) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                            .testTag("own_salon_booking_blocked_banner"),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                        border = CardDefaults.outlinedCardBorder().copy(
+                            brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
+                        ),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Storefront,
+                                    contentDescription = null,
+                                    tint = AmberPrimary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Text(
+                                    text = "This is your own registered salon. Manage it in Partner Mode.",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                            Button(
+                                onClick = onSwitchToPartnerMode,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = AmberPrimary,
+                                    contentColor = Color(0xFF1E1402)
+                                ),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("manage_own_salon_partner_btn")
+                            ) {
+                                Text(
+                                    text = "Manage in Partner Mode",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Services catalog title
             item {
                 Text(
@@ -270,8 +348,13 @@ fun SalonDetailScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SalonHeaderBanner(salon: Salon) {
+    val salonCoverBitmap = remember(salon.resolvedPhotoData) {
+        SalonImageUtils.decodeBase64ToImageBitmap(salon.resolvedPhotoData)
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -283,24 +366,50 @@ fun SalonHeaderBanner(salon: Salon) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(110.dp)
+                    .heightIn(min = 110.dp)
                     .background(
                         Brush.linearGradient(
                             listOf(Color(0xFF1E1B4B), Color(0xFF451A03), Color(0xFF0F172A))
                         )
                     )
             ) {
+                if (salonCoverBitmap != null) {
+                    Image(
+                        bitmap = salonCoverBitmap,
+                        contentDescription = "${salon.name} Cover Photo",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.matchParentSize()
+                    )
+                    // Strong dark vertical gradient scrim (0.65f to 0.85f) so text & badges always have crisp contrast
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.Black.copy(alpha = 0.65f),
+                                        Color.Black.copy(alpha = 0.85f)
+                                    )
+                                )
+                            )
+                    )
+                }
+
                 Row(
                     modifier = Modifier
-                        .fillMaxSize()
+                        .fillMaxWidth()
                         .padding(16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 10.dp)
+                    ) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Box(
                                 modifier = Modifier
@@ -320,7 +429,9 @@ fun SalonHeaderBanner(salon: Salon) {
                                         text = "${salon.rating} (${salon.reviewCount} reviews)",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color.White
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
@@ -341,15 +452,25 @@ fun SalonHeaderBanner(salon: Salon) {
                                 ) {
                                     Text(
                                         text = if (isBusy) "🔴" else "🟢",
-                                        fontSize = 9.sp
+                                        fontSize = 9.sp,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                     Text(
                                         text = if (isBusy) "Barber Busy (15-20m wait)" else "Available Now",
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (isBusy) Color(0xFFFDBA74) else GreenSuccess
+                                        color = if (isBusy) Color(0xFFFDBA74) else GreenSuccess,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
+                            }
+
+                            if (salon.isPhoneVerified) {
+                                com.example.ui.components.VerifiedNumberBadge(
+                                    text = "✓ Verified Number"
+                                )
                             }
                         }
 
@@ -358,7 +479,9 @@ fun SalonHeaderBanner(salon: Salon) {
                         Text(
                             text = salon.name,
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
-                            color = Color.White
+                            color = Color.White,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
@@ -384,7 +507,7 @@ fun SalonHeaderBanner(salon: Salon) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -418,21 +541,25 @@ fun SalonHeaderBanner(salon: Salon) {
                         shape = RoundedCornerShape(10.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenSuccess),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
+                            .heightIn(min = 42.dp)
                             .testTag("salon_detail_call_salon_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Call,
                             contentDescription = "Call Salon Directly",
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.width(5.dp))
                         Text(
                             text = "Call Salon Directly",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
@@ -449,28 +576,34 @@ fun SalonHeaderBanner(salon: Salon) {
                         shape = RoundedCornerShape(10.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
+                            .heightIn(min = 42.dp)
                             .testTag("salon_detail_get_directions_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Directions,
                             contentDescription = "Get Directions",
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.width(5.dp))
                         Text(
                             text = "Get Directions",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
 
-                Row(
+                // FlowRow for Amenity Pills so "Zero Queue" never breaks vertically letter-by-letter
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     AmenityTag(text = "Air Conditioned")
                     AmenityTag(text = "Instant Walk-in Priority")
@@ -492,7 +625,9 @@ fun AmenityTag(text: String) {
         Text(
             text = "✓ $text",
             fontSize = 10.sp,
-            color = Color(0xFF94A3B8)
+            color = Color(0xFF94A3B8),
+            maxLines = 1,
+            softWrap = false
         )
     }
 }

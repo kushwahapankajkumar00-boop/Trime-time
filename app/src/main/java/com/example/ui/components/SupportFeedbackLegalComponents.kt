@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -308,11 +309,11 @@ fun SupportFeedbackLegalSectionCard(
                     onClick = { launchPhoneDialer(context, TRIMTIME_SUPPORT_PHONE) },
                     modifier = Modifier
                         .weight(1f)
-                        .height(42.dp)
+                        .heightIn(min = 44.dp)
                         .testTag("quick_call_support_btn"),
                     shape = RoundedCornerShape(10.dp),
                     border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.6f)),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 6.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Call,
@@ -326,7 +327,9 @@ fun SupportFeedbackLegalSectionCard(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = primaryTextColor,
-                        maxLines = 1
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -335,11 +338,11 @@ fun SupportFeedbackLegalSectionCard(
                     onClick = { launchWhatsAppSupport(context, TRIMTIME_WHATSAPP_URL) },
                     modifier = Modifier
                         .weight(1f)
-                        .height(42.dp)
+                        .heightIn(min = 44.dp)
                         .testTag("quick_whatsapp_support_btn"),
                     shape = RoundedCornerShape(10.dp),
                     border = BorderStroke(1.dp, GreenSuccess.copy(alpha = 0.6f)),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 6.dp)
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.Chat,
@@ -353,7 +356,9 @@ fun SupportFeedbackLegalSectionCard(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = primaryTextColor,
-                        maxLines = 1
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -362,11 +367,11 @@ fun SupportFeedbackLegalSectionCard(
                     onClick = { launchEmailSupport(context) },
                     modifier = Modifier
                         .weight(1f)
-                        .height(42.dp)
+                        .heightIn(min = 44.dp)
                         .testTag("quick_email_support_btn"),
                     shape = RoundedCornerShape(10.dp),
                     border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.6f)),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp)
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 6.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Email,
@@ -380,7 +385,9 @@ fun SupportFeedbackLegalSectionCard(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = primaryTextColor,
-                        maxLines = 1
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -655,8 +662,9 @@ fun HelpAndSupportCenterDialog(
                                 onClick = { launchPhoneDialer(context, TRIMTIME_SUPPORT_PHONE) },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(48.dp)
+                                    .heightIn(min = 50.dp)
                                     .testTag("support_call_customer_support_btn"),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                                 shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = Color(0xFF0284C7),
@@ -672,7 +680,10 @@ fun HelpAndSupportCenterDialog(
                                 Text(
                                     text = "Call Customer Support (+91 62000 92115)",
                                     fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 13.sp
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
 
@@ -681,8 +692,9 @@ fun HelpAndSupportCenterDialog(
                                 onClick = { launchWhatsAppSupport(context, TRIMTIME_WHATSAPP_URL) },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(48.dp)
+                                    .heightIn(min = 50.dp)
                                     .testTag("support_whatsapp_live_btn"),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                                 shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = Color(0xFF16A34A),
@@ -698,7 +710,10 @@ fun HelpAndSupportCenterDialog(
                                 Text(
                                     text = "WhatsApp Live Support (Instant Chat)",
                                     fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 13.sp
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
 
@@ -713,8 +728,9 @@ fun HelpAndSupportCenterDialog(
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(46.dp)
+                                    .heightIn(min = 48.dp)
                                     .testTag("support_email_support_btn"),
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                                 shape = RoundedCornerShape(12.dp),
                                 border = BorderStroke(1.dp, AmberPrimary)
                             ) {
@@ -728,8 +744,11 @@ fun HelpAndSupportCenterDialog(
                                 Text(
                                     text = "Email Support (support@trimtime.app)",
                                     fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 13.sp,
-                                    color = AmberPrimary
+                                    fontSize = 12.sp,
+                                    color = AmberPrimary,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -776,12 +795,17 @@ fun HelpAndSupportCenterDialog(
                                     contentColor = Color.Black
                                 ),
                                 shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.testTag("support_sheet_open_feedback_btn")
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                                modifier = Modifier
+                                    .heightIn(min = 42.dp)
+                                    .testTag("support_sheet_open_feedback_btn")
                             ) {
                                 Text(
                                     text = "Send Feedback",
                                     fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 12.sp
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    softWrap = false
                                 )
                             }
                         }
@@ -878,7 +902,8 @@ fun HelpAndSupportCenterDialog(
                             },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(42.dp),
+                                .heightIn(min = 44.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             shape = RoundedCornerShape(10.dp),
                             border = BorderStroke(1.dp, Color(0xFF475569))
                         ) {
@@ -886,7 +911,10 @@ fun HelpAndSupportCenterDialog(
                                 text = "Terms & Conditions",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFFCBD5E1)
+                                color = Color(0xFFCBD5E1),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                         OutlinedButton(
@@ -896,7 +924,8 @@ fun HelpAndSupportCenterDialog(
                             },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(42.dp),
+                                .heightIn(min = 44.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             shape = RoundedCornerShape(10.dp),
                             border = BorderStroke(1.dp, Color(0xFF475569))
                         ) {
@@ -904,7 +933,10 @@ fun HelpAndSupportCenterDialog(
                                 text = "Privacy Policy",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFFCBD5E1)
+                                color = Color(0xFFCBD5E1),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }

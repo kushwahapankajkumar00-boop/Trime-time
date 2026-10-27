@@ -6,19 +6,20 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Close
@@ -49,6 +50,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -110,6 +113,7 @@ fun BookingBottomSheet(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(20.dp)
             ) {
                 // Header with Close
@@ -118,17 +122,25 @@ fun BookingBottomSheet(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                    ) {
                         Text(
                             text = "Select Time Slot",
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
-                            color = Color.White
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "${salon.name} • ${service.name}",
                             fontSize = 12.sp,
                             color = AmberPrimary,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
 
@@ -174,6 +186,7 @@ fun BookingBottomSheet(
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
+                                        .heightIn(min = 42.dp)
                                         .clip(RoundedCornerShape(12.dp))
                                         .background(bgColor)
                                         .border(1.5.dp, borderColor, RoundedCornerShape(12.dp))
@@ -196,9 +209,12 @@ fun BookingBottomSheet(
                                         }
                                         Text(
                                             text = slot,
-                                            fontSize = 12.sp,
+                                            fontSize = 11.sp,
                                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                            color = textColor
+                                            color = textColor,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                 }
@@ -271,6 +287,7 @@ fun BookingBottomSheet(
 
                 // Price & Pay at Salon Guarantee
                 Card(
+                    modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF0F261D)),
                     shape = RoundedCornerShape(10.dp),
                     border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF047857)))
@@ -278,11 +295,14 @@ fun BookingBottomSheet(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(10.dp),
+                            .padding(12.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Icon(
                                 imageVector = Icons.Default.Payments,
                                 contentDescription = null,
@@ -290,17 +310,21 @@ fun BookingBottomSheet(
                                 modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = "Pay at Salon",
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFA7F3D0)
+                                    color = Color(0xFFA7F3D0),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
                                     text = "₹0 Due Online • Strictly Pay Counter",
                                     fontSize = 10.sp,
-                                    color = Color(0xFFD1FAE5)
+                                    color = Color(0xFFD1FAE5),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -309,7 +333,10 @@ fun BookingBottomSheet(
                             text = "₹${service.price}",
                             fontSize = 18.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = GreenSuccess
+                            color = GreenSuccess,
+                            softWrap = false,
+                            maxLines = 1,
+                            modifier = Modifier.padding(start = 12.dp)
                         )
                     }
                 }
@@ -376,7 +403,7 @@ fun BookingBottomSheet(
                     Spacer(modifier = Modifier.height(10.dp))
                 }
 
-                // Confirm / Book Button
+                // Confirm / Book Button (Flexible minHeight = 52.dp so second line is never clipped)
                 val isButtonEnabled = !hasActiveBooking && !isSuspended && customerName.isNotBlank() && customerPhone.isNotBlank()
 
                 Button(
@@ -386,8 +413,9 @@ fun BookingBottomSheet(
                     enabled = isButtonEnabled,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp)
+                        .heightIn(min = 52.dp)
                         .testTag("confirm_booking_button"),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
                         disabledContainerColor = Color(0xFF334155),
@@ -404,7 +432,8 @@ fun BookingBottomSheet(
                             else -> "Confirm Slot & Get 4-Digit PIN"
                         },
                         fontWeight = FontWeight.ExtraBold,
-                        fontSize = 14.sp
+                        fontSize = 14.sp,
+                        textAlign = TextAlign.Center
                     )
                 }
             }
