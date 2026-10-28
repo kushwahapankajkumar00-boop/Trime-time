@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
@@ -684,6 +685,12 @@ fun isDeviceBiometricAvailable(context: Context): Boolean {
     }
 }
 
+private tailrec fun Context.findFragmentActivity(): FragmentActivity? = when (this) {
+    is FragmentActivity -> this
+    is ContextWrapper -> baseContext.findFragmentActivity()
+    else -> null
+}
+
 /**
  * Launches the native Android BiometricPrompt (Fingerprint / Face Unlock).
  */
@@ -694,13 +701,13 @@ fun launchBiometricPrompt(
     onSuccess: () -> Unit,
     onError: (String) -> Unit
 ) {
-    val activity = context as? FragmentActivity
+    val activity = (context as? FragmentActivity) ?: context.findFragmentActivity()
     if (activity == null) {
         onError("Use your 4-digit MPIN below to unlock.")
         return
     }
     try {
-        val executor = ContextCompat.getMainExecutor(activity)
+        val executor = ContextCompat.getMainExecutor(context)
         val prompt = BiometricPrompt(
             activity,
             executor,
