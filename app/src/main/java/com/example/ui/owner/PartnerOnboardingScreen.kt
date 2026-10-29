@@ -22,10 +22,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccessTime
@@ -300,26 +301,25 @@ fun PartnerOnboardingScreen(
             }
         }
 
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
-                .weight(1f),
-            contentPadding = PaddingValues(16.dp),
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             if (showTopSmsBanner && activeOtpCode.length == 4) {
-                item {
-                    com.example.ui.components.TopSmsOtpBanner(
-                        visible = true,
-                        phoneTenDigits = activeOtpPhone,
-                        otpCode = activeOtpCode,
-                        onDismiss = { showTopSmsBanner = false }
-                    )
-                }
+                com.example.ui.components.TopSmsOtpBanner(
+                    visible = true,
+                    phoneTenDigits = activeOtpPhone,
+                    otpCode = activeOtpCode,
+                    onDismiss = { showTopSmsBanner = false }
+                )
             }
 
             // Banner Card
-            item {
+            run {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -371,7 +371,7 @@ fun PartnerOnboardingScreen(
             }
 
             // STEP 1: Salon Name, Owner Name & 10-Digit Business Phone
-            item {
+            run {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -508,7 +508,7 @@ fun PartnerOnboardingScreen(
             }
 
             // STEP 2: Full Shop Address, City/Area & Pincode
-            item {
+            run {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -604,7 +604,7 @@ fun PartnerOnboardingScreen(
             }
 
             // STEP 3: Shop Category, Total Available Chairs & Timings
-            item {
+            run {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -662,69 +662,104 @@ fun PartnerOnboardingScreen(
                             }
                         }
 
-                        // Total Available Chairs Counter
-                        Row(
+                        // Dynamic Total Available Chairs Stepper & Numeric Input
+                        var chairInputText by remember(availableChairs) { mutableStateOf(availableChairs.toString()) }
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(DarkSurface)
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Row(
+                                modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.EventSeat,
-                                    contentDescription = null,
-                                    tint = AmberPrimary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Column {
-                                    Text(
-                                        text = "Total Available Chairs *",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.EventSeat,
+                                        contentDescription = null,
+                                        tint = AmberPrimary,
+                                        modifier = Modifier.size(20.dp)
                                     )
-                                    Text(
-                                        text = "Active grooming chairs in your shop",
-                                        fontSize = 11.sp,
-                                        color = Color(0xFF94A3B8)
-                                    )
+                                    Column {
+                                        Text(
+                                            text = "Total Active Chairs *",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                        Text(
+                                            text = "Use [ - ] [ + ] or type exact chair count",
+                                            fontSize = 11.sp,
+                                            color = Color(0xFF94A3B8)
+                                        )
+                                    }
                                 }
-                            }
 
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = { if (availableChairs > 1) availableChairs-- },
-                                    modifier = Modifier.size(36.dp),
-                                    contentPadding = PaddingValues(0.dp),
-                                    shape = CircleShape,
-                                    border = BorderStroke(1.dp, AmberPrimary)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text("-", color = AmberPrimary, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
-                                }
-                                Text(
-                                    text = "$availableChairs",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = AmberPrimary,
-                                    modifier = Modifier.testTag("partner_reg_chairs_value")
-                                )
-                                OutlinedButton(
-                                    onClick = { if (availableChairs < 15) availableChairs++ },
-                                    modifier = Modifier.size(36.dp),
-                                    contentPadding = PaddingValues(0.dp),
-                                    shape = CircleShape,
-                                    border = BorderStroke(1.dp, AmberPrimary)
-                                ) {
-                                    Text("+", color = AmberPrimary, fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                                    OutlinedButton(
+                                        onClick = {
+                                            if (availableChairs > 1) {
+                                                availableChairs--
+                                                chairInputText = availableChairs.toString()
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .testTag("partner_reg_chairs_dec_btn"),
+                                        contentPadding = PaddingValues(0.dp),
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, AmberPrimary)
+                                    ) {
+                                        Text("-", color = AmberPrimary, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
+                                    }
+
+                                    OutlinedTextField(
+                                        value = chairInputText,
+                                        onValueChange = { raw ->
+                                            val digits = raw.filter { it.isDigit() }.take(2)
+                                            chairInputText = digits
+                                            val parsed = digits.toIntOrNull()
+                                            if (parsed != null && parsed >= 1) {
+                                                availableChairs = parsed
+                                            }
+                                        },
+                                        singleLine = true,
+                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                        colors = textFieldColors,
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier
+                                            .width(68.dp)
+                                            .testTag("partner_reg_chairs_value")
+                                    )
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            if (availableChairs < 99) {
+                                                availableChairs++
+                                                chairInputText = availableChairs.toString()
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .testTag("partner_reg_chairs_inc_btn"),
+                                        contentPadding = PaddingValues(0.dp),
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, AmberPrimary)
+                                    ) {
+                                        Text("+", color = AmberPrimary, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
+                                    }
                                 }
                             }
                         }
@@ -829,7 +864,7 @@ fun PartnerOnboardingScreen(
             }
 
             // STEP 4: Initial Services & Pricing (At least 1 required)
-            item {
+            run {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -1008,7 +1043,7 @@ fun PartnerOnboardingScreen(
             }
 
             // STEP 5: GPS / OpenStreetMap Location Pin & Terms Confirmation
-            item {
+            run {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -1193,26 +1228,24 @@ fun PartnerOnboardingScreen(
 
             // Validation Error Banner
             if (!validationError.isNullOrBlank()) {
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFF3F151B)),
-                        border = BorderStroke(1.dp, Color(0xFFEF4444))
-                    ) {
-                        Text(
-                            text = validationError ?: "",
-                            color = Color(0xFFFCA5A5),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(12.dp)
-                        )
-                    }
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF3F151B)),
+                    border = BorderStroke(1.dp, Color(0xFFEF4444))
+                ) {
+                    Text(
+                        text = validationError ?: "",
+                        color = Color(0xFFFCA5A5),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(12.dp)
+                    )
                 }
             }
 
             // Submit Partner Salon Registration Button
-            item {
+            run {
                 Button(
                     onClick = {
                         // If the user typed a new service in the input boxes without tapping "+ Add Service", include it automatically

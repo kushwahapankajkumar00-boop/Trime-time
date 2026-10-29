@@ -109,7 +109,6 @@ dependencies {
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation("org.osmdroid:osmdroid-android:6.1.18")
-  implementation("androidx.biometric:biometric:1.1.0")
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)

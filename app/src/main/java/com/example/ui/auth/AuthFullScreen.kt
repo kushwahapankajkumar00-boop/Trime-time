@@ -477,13 +477,13 @@ fun AuthFullScreen(
                         }
 
                         Text(
-                            text = "Enter your registered Mobile Number or Email Address and your account Password.",
+                            text = "Enter your registered 10-Digit Mobile Number and Password to sign in.",
                             fontSize = 11.sp,
                             color = Color(0xFF94A3B8),
                             lineHeight = 15.sp
                         )
 
-                        // Input 1: Mobile Number OR Email Address
+                        // Input 1: Mobile Number (or Email)
                         OutlinedTextField(
                             value = loginIdentifier,
                             onValueChange = {
@@ -494,7 +494,7 @@ fun AuthFullScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("login_identifier_input"),
-                            label = { Text("Mobile Number or Email Address", fontSize = 12.sp) },
+                            label = { Text("10-Digit Mobile Number", fontSize = 12.sp) },
                             placeholder = {
                                 Text(
                                     "e.g. 9876543210 or yourname@gmail.com",
@@ -712,7 +712,7 @@ fun AuthFullScreen(
                             }
                         }
                         Text(
-                            text = "Enter your Full Name, Email, 10-Digit Mobile Number, and Password. Verify your mobile number once via OTP to get started.",
+                            text = "Enter your Full Name, 10-Digit Mobile Number, and Password. Verify your mobile number once via OTP to get started.",
                             fontSize = 11.sp,
                             color = Color(0xFF94A3B8),
                             lineHeight = 15.sp
@@ -754,7 +754,7 @@ fun AuthFullScreen(
                             )
                         )
 
-                        // Email Address Input (Sanitized)
+                        // Optional Email Address Input (auto-derived from phone if left blank)
                         OutlinedTextField(
                             value = emailAddress,
                             onValueChange = {
@@ -764,8 +764,8 @@ fun AuthFullScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("auth_email_input"),
-                            label = { Text("Email Address", fontSize = 12.sp) },
-                            placeholder = { Text("yourname@gmail.com", fontSize = 13.sp, color = Color(0xFF64748B)) },
+                            label = { Text("Email Address (Optional)", fontSize = 12.sp) },
+                            placeholder = { Text("yourname@gmail.com (optional)", fontSize = 13.sp, color = Color(0xFF64748B)) },
                             leadingIcon = {
                                 Icon(
                                     imageVector = Icons.Default.Email,
@@ -912,20 +912,20 @@ fun AuthFullScreen(
                                 localValidationError = null
 
                                 val cleanName = SecurityValidator.sanitizeName(fullName)
-                                val cleanEmail = emailAddress.trim()
                                 val phoneErr = SecurityValidator.validateIndianMobileError(phoneDigits)
+                                val cleanEmail = emailAddress.trim().ifBlank { "user.$phoneDigits@trimtime.app" }
                                 val cleanPass = signUpPassword.trim()
 
                                 if (cleanName.length < 2) {
                                     localValidationError = "Please enter your full name (2–60 characters)."
                                     return@Button
                                 }
-                                if (!cleanEmail.contains("@") || !cleanEmail.contains(".")) {
-                                    localValidationError = "Please enter a valid email address."
-                                    return@Button
-                                }
                                 if (phoneErr != null) {
                                     localValidationError = phoneErr
+                                    return@Button
+                                }
+                                if (!cleanEmail.contains("@") || !cleanEmail.contains(".")) {
+                                    localValidationError = "Please enter a valid email address or leave it blank."
                                     return@Button
                                 }
                                 if (cleanPass.length < 4) {
@@ -1025,7 +1025,7 @@ fun AuthFullScreen(
                 activeOtpCode = ""
                 onSignInWithRealIdentity(
                     fullName,
-                    emailAddress,
+                    emailAddress.trim().ifBlank { "user.$activeOtpPhone@trimtime.app" },
                     activeOtpPhone,
                     false,
                     signUpPassword.trim(),
@@ -1405,16 +1405,17 @@ fun Sha1RealAccountLoginDialog(
                         onClick = {
                             val cleanName = SecurityValidator.sanitizeName(name)
                             val phoneError = SecurityValidator.validateIndianMobileError(phone)
+                            val resolvedEmail = email.trim().ifBlank { "user.${phone.trim()}@trimtime.app" }
                             if (cleanName.length < 2) {
                                 localError = "Please enter your full name (2–60 characters)."
-                            } else if (!email.contains("@") || !email.contains(".")) {
-                                localError = "Please enter a valid email address."
                             } else if (phoneError != null) {
                                 localError = phoneError
+                            } else if (!resolvedEmail.contains("@") || !resolvedEmail.contains(".")) {
+                                localError = "Please enter a valid email address or leave it blank."
                             } else if (newPassword.trim().length < 4) {
                                 localError = "Please set a Password (at least 4 characters)."
                             } else {
-                                onConfirmSignIn(cleanName, email.trim(), phone.trim(), false, newPassword.trim())
+                                onConfirmSignIn(cleanName, resolvedEmail, phone.trim(), false, newPassword.trim())
                             }
                         },
                         enabled = !isLoading,

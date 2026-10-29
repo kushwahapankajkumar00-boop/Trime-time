@@ -1065,22 +1065,26 @@ fun CustomerSalonsOsmMapSection(
                             },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp)
+                                .height(46.dp)
                                 .testTag("map_popup_directions_btn_${salon.id}"),
                             shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                             border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8))
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Directions,
                                 contentDescription = "Get Directions",
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(15.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = "Get Directions",
                                 fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
 
@@ -1088,9 +1092,10 @@ fun CustomerSalonsOsmMapSection(
                             onClick = { onSalonSelected(salon) },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp)
+                                .height(46.dp)
                                 .testTag("map_popup_book_btn_${salon.id}"),
                             shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = AmberPrimary,
                                 contentColor = DarkBackground
@@ -1099,7 +1104,10 @@ fun CustomerSalonsOsmMapSection(
                             Text(
                                 text = "View & Book",
                                 fontSize = 13.sp,
-                                fontWeight = FontWeight.ExtraBold
+                                fontWeight = FontWeight.ExtraBold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }

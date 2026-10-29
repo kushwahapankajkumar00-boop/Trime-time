@@ -1,6 +1,7 @@
 package com.example
 
 import android.os.Bundle
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
@@ -32,7 +33,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.AppAuthState
 import com.example.model.UserRole
@@ -43,13 +43,12 @@ import com.example.ui.components.AppBottomNav
 import com.example.ui.components.AppTopBar
 import com.example.ui.components.PinDisplayDialog
 import com.example.ui.components.PinVerificationDialog
-import com.example.ui.components.QuickAccessSetupDialog
-import com.example.ui.components.QuickAccessUnlockScreen
 import com.example.ui.customer.BookingBottomSheet
 import com.example.ui.customer.CustomerBookingsContent
 import com.example.ui.customer.CustomerHomeScreen
 import com.example.ui.customer.ProfileScreen
 import com.example.ui.customer.SalonDetailScreen
+import com.example.ui.admin.AdminDashboardScreen
 import com.example.ui.owner.PartnerDashboardScreen
 import com.example.ui.owner.PartnerOnboardingScreen
 import com.example.ui.theme.AmberPrimary
@@ -60,7 +59,7 @@ import com.example.viewmodel.TrimTimeViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-class MainActivity : FragmentActivity() {
+class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         com.example.ui.components.initOsmDroidConfig(this)
@@ -81,12 +80,14 @@ fun TrimTimeApp(
 ) {
     val authState by viewModel.authState.collectAsState()
     val currentUserProfile by viewModel.currentUserProfile.collectAsState()
-    val isSessionUnlocked by viewModel.isSessionUnlocked.collectAsState()
-    val showQuickAccessSetup by viewModel.showQuickAccessSetup.collectAsState()
     val isCloudSynced by viewModel.isCloudSynced.collectAsState()
     val allSalons by viewModel.allSalons.collectAsState()
     val filteredSalons by viewModel.filteredSalons.collectAsState()
     val allBookings by viewModel.allBookings.collectAsState()
+    val allUsers by viewModel.allUsers.collectAsState()
+    val supportTickets by viewModel.supportTickets.collectAsState()
+    val showAdminDashboard by viewModel.showAdminDashboard.collectAsState()
+    val isSuperAdmin by viewModel.isSuperAdmin.collectAsState()
     val customerBookings by viewModel.customerBookings.collectAsState()
     val latestCompletedBooking by viewModel.latestCompletedBooking.collectAsState()
     val appPreferences by viewModel.appPreferences.collectAsState()
@@ -241,25 +242,35 @@ fun TrimTimeApp(
             }
 
             is AppAuthState.Authenticated -> {
-                val profileForUnlock = currentUserProfile
-                if (!isSessionUnlocked && profileForUnlock?.hasQuickAccessSetup == true) {
-                    // Quick Access Unlock Screen on future app launches (Fingerprint / Biometrics or 4-Digit MPIN)
-                    QuickAccessUnlockScreen(
-                        userName = profileForUnlock.name,
-                        userPhone = profileForUnlock.phone.ifBlank { profileForUnlock.email },
-                        isPhoneVerified = profileForUnlock.isPhoneVerified,
-                        expectedMpin = profileForUnlock.quickAccessMpin,
-                        biometricEnabled = profileForUnlock.biometricEnabled,
-                        onUnlocked = {
-                            viewModel.unlockSessionWithQuickAccess()
-                        },
-                        onUsePasswordOrSwitchAccount = {
-                            viewModel.logout()
+                if (showAdminDashboard && isSuperAdmin) {
+                    Scaffold(
+                        modifier = Modifier.fillMaxSize(),
+                        containerColor = DarkBackground,
+                        snackbarHost = { SnackbarHost(snackbarHostState) }
+                    ) { adminPadding ->
+                        Box(modifier = Modifier.padding(adminPadding)) {
+                            AdminDashboardScreen(
+                                salons = allSalons,
+                                users = allUsers,
+                                supportTickets = supportTickets,
+                                onBack = { viewModel.closeAdminDashboard() },
+                                onUpdateSalonApproval = { salonId, status, suspended ->
+                                    viewModel.updateSalonApproval(salonId, status, suspended)
+                                },
+                                onUpdateSalonCategory = { salonId, tag ->
+                                    viewModel.updateSalonCategory(salonId, tag)
+                                },
+                                onUpdateUserBlockStatus = { userId, blocked ->
+                                    viewModel.updateUserBlockStatus(userId, blocked)
+                                },
+                                onResolveSupportTicket = { ticketId, resolved ->
+                                    viewModel.resolveSupportTicket(ticketId, resolved)
+                                }
+                            )
                         }
-                    )
-                } else {
-                    when (state.role) {
-                        UserRole.CUSTOMER -> {
+                    }
+                } else when (state.role) {
+                    UserRole.CUSTOMER -> {
                             val currentProfile = currentUserProfile
                             val userPhoneDigits = currentProfile?.phone?.filter { it.isDigit() } ?: ""
                             val tenDigits = if (userPhoneDigits.length > 10 && userPhoneDigits.startsWith("91")) {
@@ -462,9 +473,6 @@ fun TrimTimeApp(
                                                         onResetSalonRegistration = {
                                                             viewModel.resetPartnerSalonRegistration(ownedSalon?.id)
                                                         },
-                                                        onOpenQuickAccessSetup = {
-                                                            viewModel.openQuickAccessSetup()
-                                                        },
                                                         onUpdatePersonalProfile = { name, phone, city ->
                                                             viewModel.updatePersonalProfile(name, phone, city, isPhoneVerified = true)
                                                         },
@@ -494,6 +502,8 @@ fun TrimTimeApp(
                                                         onSubmitFeedback = { rating, category, msg, onDone ->
                                                             viewModel.submitFeedback(rating, category, msg, onDone)
                                                         },
+                                                        isAdmin = isSuperAdmin,
+                                                        onOpenAdminPanel = { viewModel.openAdminDashboard() },
                                                         onLogout = { viewModel.logout() }
                                                     )
                                                 }
@@ -604,22 +614,6 @@ fun TrimTimeApp(
                                 }
                             }
                         }
-                    }
-
-                    // Post-Login / Post-Signup Quick Access Setup Dialog (4-Digit MPIN & Fingerprint/Biometric)
-                    if (showQuickAccessSetup && currentUserProfile != null) {
-                        QuickAccessSetupDialog(
-                            userName = currentUserProfile?.name.orEmpty(),
-                            initialMpin = currentUserProfile?.quickAccessMpin.orEmpty(),
-                            initialBiometricEnabled = currentUserProfile?.biometricEnabled ?: true,
-                            onSaveQuickAccess = { mpin, biometricEnabled ->
-                                viewModel.saveQuickAccessSettings(mpin, biometricEnabled)
-                            },
-                            onSkipForNow = {
-                                viewModel.dismissQuickAccessSetup()
-                            }
-                        )
-                    }
                 }
             }
         }

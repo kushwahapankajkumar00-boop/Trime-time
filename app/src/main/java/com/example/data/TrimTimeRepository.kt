@@ -67,6 +67,8 @@ class TrimTimeRepository private constructor(context: Context) {
     private var bookingsListener: ListenerRegistration? = null
     private var customerBookingsListener: ListenerRegistration? = null
     private var userDocListener: ListenerRegistration? = null
+    private var usersListener: ListenerRegistration? = null
+    private var feedbackListener: ListenerRegistration? = null
 
     private val invalidSharedUserIds = setOf("dev_test_user_001", "dev_tester", "default_user", "guest")
     private val seedSalonIds = setOf("salon_blade_comb", "salon_urban_cuts", "salon_velvet_shears", "salon_express_trim")
@@ -86,6 +88,14 @@ class TrimTimeRepository private constructor(context: Context) {
     // Real-time Salons directly from Firestore
     private val _salons = MutableStateFlow<List<Salon>>(emptyList())
     val salons: StateFlow<List<Salon>> = _salons.asStateFlow()
+
+    // Real-time All Users from Firestore (for Super Admin User & Spam Management)
+    private val _allUsers = MutableStateFlow<List<UserProfile>>(emptyList())
+    val allUsers: StateFlow<List<UserProfile>> = _allUsers.asStateFlow()
+
+    // Real-time Support & Feedback Tickets from Firestore (for Super Admin Help Desk)
+    private val _supportTickets = MutableStateFlow<List<FeedbackSubmission>>(emptyList())
+    val supportTickets: StateFlow<List<FeedbackSubmission>> = _supportTickets.asStateFlow()
 
     // Real-time All Bookings from Firestore (for Partner Salon Queue filtering by salonId)
     private val _bookings = MutableStateFlow<List<Booking>>(emptyList())
@@ -115,13 +125,6 @@ class TrimTimeRepository private constructor(context: Context) {
     // Dedicated Partner Salon Registration Onboarding state (shown when an unregistered user taps Partner)
     private val _showPartnerOnboarding = MutableStateFlow(false)
     val showPartnerOnboarding: StateFlow<Boolean> = _showPartnerOnboarding.asStateFlow()
-
-    // Quick Access (4-Digit MPIN / Fingerprint Biometrics) state
-    private val _isSessionUnlocked = MutableStateFlow(true)
-    val isSessionUnlocked: StateFlow<Boolean> = _isSessionUnlocked.asStateFlow()
-
-    private val _showQuickAccessSetup = MutableStateFlow(false)
-    val showQuickAccessSetup: StateFlow<Boolean> = _showQuickAccessSetup.asStateFlow()
 
     // Persisted Customer App Settings & Preferences
     private val _appPreferences = MutableStateFlow(loadSavedPreferences())
@@ -161,52 +164,6 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     fun isDemoSalon(salonId: String): Boolean = salonId in seedSalonIds
-
-    fun unlockSessionWithQuickAccess() {
-        _isSessionUnlocked.value = true
-    }
-
-    fun dismissQuickAccessSetup() {
-        _showQuickAccessSetup.value = false
-    }
-
-    fun openQuickAccessSetup() {
-        _showQuickAccessSetup.value = true
-    }
-
-    fun saveQuickAccessSettings(
-        mpin: String,
-        biometricEnabled: Boolean,
-        onSuccess: () -> Unit = {}
-    ) {
-        val cleanMpin = mpin.filter { it.isDigit() }.take(4)
-        val current = _currentUserProfile.value
-        sessionPrefs.edit()
-            .putString("saved_quick_mpin", cleanMpin)
-            .putBoolean("saved_biometric_enabled", biometricEnabled)
-            .putBoolean("saved_quick_access_enabled", true)
-            .apply()
-
-        if (current != null) {
-            val updated = current.copy(
-                quickAccessMpin = cleanMpin,
-                biometricEnabled = biometricEnabled,
-                isQuickAccessEnabled = true
-            )
-            _currentUserProfile.value = updated
-            firestore?.collection("users")?.document(current.id)?.set(
-                mapOf(
-                    "quickAccessMpin" to cleanMpin,
-                    "biometricEnabled" to biometricEnabled,
-                    "isQuickAccessEnabled" to true
-                ),
-                com.google.firebase.firestore.SetOptions.merge()
-            )
-        }
-        _showQuickAccessSetup.value = false
-        _isSessionUnlocked.value = true
-        onSuccess()
-    }
 
     private fun loadSavedPreferences(): AppPreferences {
         val themeKey = settingsPrefs.getString("pref_theme_mode", AppThemeMode.DARK.key)
@@ -594,6 +551,9 @@ class TrimTimeRepository private constructor(context: Context) {
                                     registrationFormSubmittedFlag = isFormSubmittedFlag
                                 )
                                 val isSalonPhoneVerified = doc.getBoolean("isPhoneVerified") ?: true
+                                val adminCategoryTag = doc.getString("adminCategoryTag")?.takeIf { it.isNotBlank() } ?: "Standard"
+                                val approvalStatus = doc.getString("approvalStatus")?.takeIf { it.isNotBlank() } ?: "APPROVED"
+                                val isSalonSuspended = doc.getBoolean("isSuspended") ?: false
 
                                 // Purge any legacy auto-created or dummy salon document in Firestore
                                 if (!isSeedSalon && !isGenuinelyRegistered) {
@@ -626,6 +586,9 @@ class TrimTimeRepository private constructor(context: Context) {
                                     landmark = landmark,
                                     pincode = pincode,
                                     shopCategory = shopCategory,
+                                    adminCategoryTag = adminCategoryTag,
+                                    approvalStatus = approvalStatus,
+                                    isSuspended = isSalonSuspended,
                                     openingTime = openingTime,
                                     closingTime = closingTime,
                                     latitude = lat,
@@ -717,8 +680,123 @@ class TrimTimeRepository private constructor(context: Context) {
                     }
                 }
             }
+
+            // Live Real-Time Listener for Users collection (Super Admin User & Spam Management + current user sync)
+            usersListener?.remove()
+            usersListener = db.collection("users").addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.w(tag, "Firestore users listener error: ${error.message}")
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    val liveUsers = snapshot.documents.mapNotNull { doc ->
+                        parseUserDocument(doc)
+                    }.filter { user ->
+                        user.id.isNotBlank() && user.id !in invalidSharedUserIds
+                    }.sortedByDescending { it.createdAt }
+                    _allUsers.value = liveUsers
+
+                    // Keep current user's profile in sync with live admin/block/strike changes
+                    val activeUid = _currentUserProfile.value?.id
+                    if (!activeUid.isNullOrBlank()) {
+                        val matchingUser = liveUsers.find { it.id == activeUid }
+                        if (matchingUser != null) {
+                            _currentUserProfile.value = matchingUser.copy(
+                                hasRegisteredSalon = _currentUserProfile.value?.hasRegisteredSalon ?: matchingUser.hasRegisteredSalon,
+                                salonId = _currentUserProfile.value?.salonId ?: matchingUser.salonId,
+                                role = _currentUserProfile.value?.role ?: matchingUser.role
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Live Real-Time Listener for Feedback / Support Help Desk collection
+            feedbackListener?.remove()
+            feedbackListener = db.collection("feedback").addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.w(tag, "Firestore feedback listener error: ${error.message}")
+                    return@addSnapshotListener
+                }
+                if (snapshot != null) {
+                    val liveTickets = snapshot.documents.mapNotNull { doc ->
+                        parseFeedbackDocument(doc)
+                    }.sortedByDescending { it.timestamp }
+                    _supportTickets.value = liveTickets
+                }
+            }
         } catch (e: Exception) {
             Log.e(tag, "Error setting up live listeners: ${e.message}")
+        }
+    }
+
+    private fun parseUserDocument(doc: com.google.firebase.firestore.DocumentSnapshot): UserProfile? {
+        return try {
+            val uid = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id
+            val strikes = maxOf(
+                doc.getLong("cancellationStrikes")?.toInt() ?: 0,
+                doc.getLong("cancellationCount")?.toInt() ?: 0
+            )
+            val isBlockedFlag = doc.getBoolean("isBlocked") ?: false
+            val isSuspendedFlag = doc.getBoolean("isSuspended") ?: (strikes >= 3 || isBlockedFlag)
+            val phoneVal = doc.getString("phone") ?: ""
+            val emailVal = doc.getString("email") ?: ""
+            val isAdminFlag = (doc.getBoolean("isAdmin") ?: false) || isOwnerIdentity(phoneVal, emailVal)
+
+            UserProfile(
+                id = uid,
+                name = SecurityValidator.sanitizeName(
+                    doc.getString("name")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("displayName")?.takeIf { it.isNotBlank() }
+                        ?: "Customer"
+                ),
+                email = emailVal,
+                phone = phoneVal,
+                password = doc.getString("password") ?: doc.getString("loginPin") ?: "",
+                loginPin = doc.getString("loginPin") ?: doc.getString("password") ?: "",
+                isPhoneVerified = doc.getBoolean("isPhoneVerified") ?: phoneVal.isNotBlank(),
+                role = doc.getString("role") ?: "customer",
+                salonId = doc.getString("salonId"),
+                hasRegisteredSalon = doc.getBoolean("hasRegisteredSalon") ?: false,
+                defaultCity = doc.getString("defaultCity") ?: "Current Location",
+                cancellationCount = strikes,
+                cancellationStrikes = strikes,
+                isSuspended = isSuspendedFlag,
+                isBlocked = isBlockedFlag,
+                isAdmin = isAdminFlag,
+                createdAt = doc.getLong("createdAt") ?: 0L
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun parseFeedbackDocument(doc: com.google.firebase.firestore.DocumentSnapshot): FeedbackSubmission? {
+        return try {
+            val uid = doc.getString("userId")?.trim() ?: ""
+            val storedPhone = doc.getString("userPhone")?.trim().orEmpty()
+            val resolvedPhone = storedPhone.ifBlank {
+                _allUsers.value.find { it.id == uid }?.phone.orEmpty()
+            }
+            val statusStr = doc.getString("status")?.takeIf { it.isNotBlank() } ?: "OPEN"
+            val isResolvedFlag = doc.getBoolean("isResolved") ?: statusStr.equals("RESOLVED", ignoreCase = true)
+
+            FeedbackSubmission(
+                id = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id,
+                userId = uid,
+                userName = doc.getString("userName")?.takeIf { it.isNotBlank() } ?: "TrimTime User",
+                userPhone = resolvedPhone,
+                userRole = doc.getString("userRole") ?: "customer",
+                rating = doc.getLong("rating")?.toInt() ?: 5,
+                category = doc.getString("category") ?: "General Feedback",
+                message = doc.getString("message") ?: "",
+                status = if (isResolvedFlag) "RESOLVED" else statusStr,
+                isResolved = isResolvedFlag,
+                resolvedAt = doc.getLong("resolvedAt"),
+                timestamp = doc.getLong("timestamp") ?: 0L
+            )
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -1296,9 +1374,10 @@ class TrimTimeRepository private constructor(context: Context) {
                                 existingDoc.getString("defaultCity")?.takeIf { it.isNotBlank() } ?: _appPreferences.value.defaultCity
                             )
                             val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
-                            val existingQuickMpin = existingDoc.getString("quickAccessMpin") ?: ""
-                            val existingBiometric = existingDoc.getBoolean("biometricEnabled") ?: false
-                            val existingQuickEnabled = existingDoc.getBoolean("isQuickAccessEnabled") ?: false
+
+                            val existingIsBlocked = existingDoc.getBoolean("isBlocked") ?: false
+                            val existingIsAdmin = (existingDoc.getBoolean("isAdmin") ?: false) ||
+                                isOwnerIdentity(resolvedPhone, trimmedEmail)
 
                             // Every user MUST default to Customer Mode upon Login/Signup
                             val userProfile = UserProfile(
@@ -1308,9 +1387,6 @@ class TrimTimeRepository private constructor(context: Context) {
                                 phone = resolvedPhone,
                                 password = cleanPassword,
                                 loginPin = cleanPassword,
-                                quickAccessMpin = existingQuickMpin,
-                                biometricEnabled = existingBiometric,
-                                isQuickAccessEnabled = existingQuickEnabled,
                                 isPhoneVerified = isPhoneVerified,
                                 role = "customer",
                                 salonId = existingSalonId,
@@ -1318,7 +1394,9 @@ class TrimTimeRepository private constructor(context: Context) {
                                 defaultCity = existingCity,
                                 cancellationCount = existingStrikes,
                                 cancellationStrikes = existingStrikes,
-                                isSuspended = existingIsSuspended,
+                                isSuspended = existingIsSuspended || existingIsBlocked,
+                                isBlocked = existingIsBlocked,
+                                isAdmin = existingIsAdmin,
                                 createdAt = existingCreatedAt
                             )
 
@@ -1333,10 +1411,6 @@ class TrimTimeRepository private constructor(context: Context) {
                             _currentUserProfile.value = userProfile
                             attachCustomerBookingsListener(uid)
                             _isLoading.value = false
-                            _isSessionUnlocked.value = true
-                            if (!userProfile.hasQuickAccessSetup) {
-                                _showQuickAccessSetup.value = true
-                            }
                             _currentRole.value = UserRole.CUSTOMER
                             _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                             if (asPartner && !existingHasSalon) {
@@ -1344,6 +1418,7 @@ class TrimTimeRepository private constructor(context: Context) {
                             }
                             onSuccess()
                         } else {
+                            val isNewUserAdmin = isOwnerIdentity(formattedPhone, trimmedEmail)
                             val newProfile = UserProfile(
                                 id = uid,
                                 name = trimmedName,
@@ -1359,6 +1434,8 @@ class TrimTimeRepository private constructor(context: Context) {
                                 cancellationCount = 0,
                                 cancellationStrikes = 0,
                                 isSuspended = false,
+                                isBlocked = false,
+                                isAdmin = isNewUserAdmin,
                                 createdAt = System.currentTimeMillis()
                             )
 
@@ -1374,8 +1451,6 @@ class TrimTimeRepository private constructor(context: Context) {
                                     _currentUserProfile.value = newProfile
                                     attachCustomerBookingsListener(uid)
                                     _currentRole.value = UserRole.CUSTOMER
-                                    _isSessionUnlocked.value = true
-                                    _showQuickAccessSetup.value = true
                                     _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                                     _isLoading.value = false
                                     if (asPartner) {
@@ -1574,12 +1649,6 @@ class TrimTimeRepository private constructor(context: Context) {
         val existingPhone = doc.getString("phone") ?: ""
         val existingPassword = doc.getString("password")?.takeIf { it.isNotBlank() }
             ?: doc.getString("loginPin") ?: ""
-        val existingQuickMpin = doc.getString("quickAccessMpin")
-            ?: sessionPrefs.getString("saved_quick_mpin", "") ?: ""
-        val existingBiometric = doc.getBoolean("biometricEnabled")
-            ?: sessionPrefs.getBoolean("saved_biometric_enabled", false)
-        val existingQuickEnabled = doc.getBoolean("isQuickAccessEnabled")
-            ?: sessionPrefs.getBoolean("saved_quick_access_enabled", false)
         val existingIsPhoneVerified = doc.getBoolean("isPhoneVerified") ?: existingPhone.isNotBlank()
         val rawDocId = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id
         val uid = if (rawDocId.isNotBlank() && rawDocId !in invalidSharedUserIds) {
@@ -1608,7 +1677,9 @@ class TrimTimeRepository private constructor(context: Context) {
             doc.getLong("cancellationStrikes")?.toInt() ?: 0,
             doc.getLong("cancellationCount")?.toInt() ?: 0
         )
-        val existingIsSuspended = doc.getBoolean("isSuspended") ?: (existingStrikes >= 3)
+        val existingIsBlocked = doc.getBoolean("isBlocked") ?: false
+        val existingIsSuspended = (doc.getBoolean("isSuspended") ?: (existingStrikes >= 3)) || existingIsBlocked
+        val existingIsAdmin = (doc.getBoolean("isAdmin") ?: false) || isOwnerIdentity(existingPhone, existingEmail)
         val existingCreatedAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
 
         // Every user MUST default to Customer Mode upon Login
@@ -1619,9 +1690,6 @@ class TrimTimeRepository private constructor(context: Context) {
             phone = existingPhone,
             password = existingPassword,
             loginPin = existingPassword,
-            quickAccessMpin = existingQuickMpin,
-            biometricEnabled = existingBiometric,
-            isQuickAccessEnabled = existingQuickEnabled,
             isPhoneVerified = existingIsPhoneVerified,
             role = "customer",
             salonId = existingSalonId,
@@ -1630,6 +1698,8 @@ class TrimTimeRepository private constructor(context: Context) {
             cancellationCount = existingStrikes,
             cancellationStrikes = existingStrikes,
             isSuspended = existingIsSuspended,
+            isBlocked = existingIsBlocked,
+            isAdmin = existingIsAdmin,
             createdAt = existingCreatedAt
         )
 
@@ -1638,19 +1708,12 @@ class TrimTimeRepository private constructor(context: Context) {
             .putString("saved_name", existingName)
             .putString("saved_email", existingEmail)
             .putString("saved_role", "customer")
-            .putString("saved_quick_mpin", existingQuickMpin)
-            .putBoolean("saved_biometric_enabled", existingBiometric)
-            .putBoolean("saved_quick_access_enabled", existingQuickEnabled)
             .apply()
 
         _currentUserProfile.value = userProfile
         attachCustomerBookingsListener(uid)
         _isLoading.value = false
         _showPartnerOnboarding.value = false
-        _isSessionUnlocked.value = true
-        if (!userProfile.hasQuickAccessSetup) {
-            _showQuickAccessSetup.value = true
-        }
         _currentRole.value = UserRole.CUSTOMER
         _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
         onSuccess(userProfile)
@@ -1717,9 +1780,6 @@ class TrimTimeRepository private constructor(context: Context) {
                     val existingPhone = existingDoc.getString("phone") ?: ""
                     val existingPassword = existingDoc.getString("password")?.takeIf { it.isNotBlank() }
                         ?: existingDoc.getString("loginPin") ?: ""
-                    val existingQuickMpin = existingDoc.getString("quickAccessMpin") ?: ""
-                    val existingBiometric = existingDoc.getBoolean("biometricEnabled") ?: false
-                    val existingQuickEnabled = existingDoc.getBoolean("isQuickAccessEnabled") ?: false
                     val existingIsPhoneVerified = existingDoc.getBoolean("isPhoneVerified") ?: existingPhone.isNotBlank()
                     val existingCancellationCount = existingDoc.getLong("cancellationCount")?.toInt() ?: 0
                     val existingIsSuspended = existingDoc.getBoolean("isSuspended") ?: (existingCancellationCount >= 3)
@@ -1732,6 +1792,9 @@ class TrimTimeRepository private constructor(context: Context) {
                     val existingSalonId = verifiedSalon?.id
                     val existingHasSalon = verifiedSalon != null
                     val existingCity = existingDoc.getString("defaultCity")?.takeIf { it.isNotBlank() } ?: _appPreferences.value.defaultCity
+                    val existingIsBlocked = existingDoc.getBoolean("isBlocked") ?: false
+                    val existingIsAdmin = (existingDoc.getBoolean("isAdmin") ?: false) ||
+                        isOwnerIdentity(existingPhone, existingEmail)
                     val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
 
                     val userProfile = UserProfile(
@@ -1741,16 +1804,16 @@ class TrimTimeRepository private constructor(context: Context) {
                         phone = existingPhone,
                         password = existingPassword,
                         loginPin = existingPassword,
-                        quickAccessMpin = existingQuickMpin,
-                        biometricEnabled = existingBiometric,
-                        isQuickAccessEnabled = existingQuickEnabled,
                         isPhoneVerified = existingIsPhoneVerified,
                         role = "customer",
                         salonId = existingSalonId,
                         hasRegisteredSalon = existingHasSalon,
                         defaultCity = existingCity,
                         cancellationCount = existingCancellationCount,
-                        isSuspended = existingIsSuspended,
+                        cancellationStrikes = existingCancellationCount,
+                        isSuspended = existingIsSuspended || existingIsBlocked,
+                        isBlocked = existingIsBlocked,
+                        isAdmin = existingIsAdmin,
                         createdAt = existingCreatedAt
                     )
 
@@ -1759,18 +1822,11 @@ class TrimTimeRepository private constructor(context: Context) {
                         .putString("saved_name", existingName)
                         .putString("saved_email", existingEmail)
                         .putString("saved_role", "customer")
-                        .putString("saved_quick_mpin", existingQuickMpin)
-                        .putBoolean("saved_biometric_enabled", existingBiometric)
-                        .putBoolean("saved_quick_access_enabled", existingQuickEnabled)
                         .apply()
                     _currentUserProfile.value = userProfile
                     attachCustomerBookingsListener(uid)
                     _isLoading.value = false
                     _showPartnerOnboarding.value = false
-                    _isSessionUnlocked.value = true
-                    if (!userProfile.hasQuickAccessSetup) {
-                        _showQuickAccessSetup.value = true
-                    }
                     _currentRole.value = UserRole.CUSTOMER
                     _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                     onSuccess()
@@ -1798,8 +1854,6 @@ class TrimTimeRepository private constructor(context: Context) {
                             _currentUserProfile.value = newProfile
                             attachCustomerBookingsListener(uid)
                             _currentRole.value = UserRole.CUSTOMER
-                            _isSessionUnlocked.value = true
-                            _showQuickAccessSetup.value = true
                             _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                             _isLoading.value = false
                             onSuccess()
@@ -1883,8 +1937,6 @@ class TrimTimeRepository private constructor(context: Context) {
         sessionPrefs.edit().clear().apply()
         _showSha1FallbackDialog.value = false
         _showPartnerOnboarding.value = false
-        _showQuickAccessSetup.value = false
-        _isSessionUnlocked.value = true
         _currentRole.value = UserRole.CUSTOMER
         _currentUserProfile.value = null
         _customerBookings.value = emptyList()
@@ -2511,14 +2563,18 @@ class TrimTimeRepository private constructor(context: Context) {
                     )
 
                     val existingPhoneVal = doc.getString("phone") ?: user?.phoneNumber ?: ""
+                    val existingEmailVal = doc.getString("email") ?: user?.email ?: ""
                     val existingLoginPinVal = doc.getString("loginPin") ?: ""
                     val existingPhoneVerifiedVal = doc.getBoolean("isPhoneVerified") ?: existingPhoneVal.isNotBlank()
+                    val existingIsBlockedVal = doc.getBoolean("isBlocked") ?: false
+                    val existingIsAdminVal = (doc.getBoolean("isAdmin") ?: false) ||
+                        isOwnerIdentity(existingPhoneVal, existingEmailVal)
 
                     // Every user MUST default to Customer Mode upon Login / Session Restore
                     val profile = UserProfile(
                         id = uid,
                         name = SecurityValidator.sanitizeName(doc.getString("name") ?: user?.displayName ?: "Customer"),
-                        email = doc.getString("email") ?: user?.email ?: "",
+                        email = existingEmailVal,
                         phone = existingPhoneVal,
                         loginPin = existingLoginPinVal,
                         isPhoneVerified = existingPhoneVerifiedVal,
@@ -2528,7 +2584,9 @@ class TrimTimeRepository private constructor(context: Context) {
                         defaultCity = defaultCityVal,
                         cancellationCount = cancelCount,
                         cancellationStrikes = cancelCount,
-                        isSuspended = suspended,
+                        isSuspended = suspended || existingIsBlockedVal,
+                        isBlocked = existingIsBlockedVal,
+                        isAdmin = existingIsAdminVal,
                         createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
                     )
                     sessionPrefs.edit().putString("saved_role", "customer").apply()
@@ -2597,13 +2655,21 @@ class TrimTimeRepository private constructor(context: Context) {
             throw IllegalStateException("Please log in with your Mobile Number or Email before booking.")
         }
 
-        // Rule 3: Strictly enforce the 3-Strike Anti-Spam Rule (cancellationStrikes >= 3)
-        if (currentProfile != null && (currentProfile.effectiveCancellationStrikes >= 3 || currentProfile.isSuspended)) {
-            throw IllegalStateException("Security Lockout: Your account is suspended due to 3 or more booking cancellations.")
+        // Rule 3: Strictly enforce Admin Block & 3-Strike Anti-Spam Rule (isBlocked || isSuspended || cancellationStrikes >= 3)
+        if (currentProfile != null && currentProfile.isEffectivelyBlocked) {
+            val blockMsg = if (currentProfile.isBlocked) {
+                "Account Blocked: Your account has been blocked by TrimTime Admin and cannot make new bookings."
+            } else {
+                "Security Lockout: Your account is suspended due to 3 or more booking cancellations."
+            }
+            throw IllegalStateException(blockMsg)
         }
 
-        // Rule 4: Prevent Self-Booking (Owner Booking Their Own Salon)
+        // Rule 4: Prevent Self-Booking (Owner Booking Their Own Salon) & Suspended/Rejected Salons
         val targetSalon = _salons.value.find { it.id == salonId }
+        if (targetSalon != null && (targetSalon.isSuspended || targetSalon.approvalStatus.equals("REJECTED", ignoreCase = true))) {
+            throw IllegalStateException("This salon is currently suspended or unavailable for bookings.")
+        }
         if (targetSalon != null &&
             resolvedCustomerId.isNotBlank() &&
             (targetSalon.ownerId == resolvedCustomerId || targetSalon.partnerId == resolvedCustomerId)
@@ -3294,12 +3360,17 @@ class TrimTimeRepository private constructor(context: Context) {
             id = feedbackId,
             userId = currentProfile?.id?.ifBlank { "anonymous_user" } ?: "anonymous_user",
             userName = SecurityValidator.sanitizeName(currentProfile?.name?.ifBlank { "TrimTime User" } ?: "TrimTime User"),
+            userPhone = currentProfile?.phone ?: "",
             userRole = currentProfile?.role?.ifBlank { activeRole } ?: activeRole,
             rating = rating.coerceIn(1, 5),
             category = SecurityValidator.sanitizeName(category.ifBlank { "General Feedback" }),
             message = sanitizedMessage,
+            status = "OPEN",
+            isResolved = false,
             timestamp = System.currentTimeMillis()
         )
+
+        _supportTickets.value = listOf(submission) + _supportTickets.value
 
         val db = firestore
         if (db == null) {
@@ -3320,7 +3391,278 @@ class TrimTimeRepository private constructor(context: Context) {
             }
     }
 
+    // ==========================================
+    // Super Admin Dashboard Management Functions
+    // ==========================================
+
+    /**
+     * Checks whether the phone or email matches the Super Admin owner identity,
+     * or if `profile.isAdmin == true` in Firestore.
+     */
+    fun isOwnerIdentity(phone: String?, email: String?): Boolean {
+        val rawPhone = phone?.trim().orEmpty()
+        val cleanDigits = SecurityValidator.extractTenDigitMobile(rawPhone)
+        val ownerDigits = SecurityValidator.extractTenDigitMobile(OWNER_ADMIN_PHONE)
+        val phoneMatchesOwner = rawPhone.equals(OWNER_ADMIN_PHONE, ignoreCase = true) ||
+            rawPhone.replace(" ", "").equals(OWNER_ADMIN_PHONE.replace(" ", ""), ignoreCase = true) ||
+            (ownerDigits.length == 10 && cleanDigits == ownerDigits)
+        val emailMatchesOwner = email?.trim()?.equals(OWNER_ADMIN_EMAIL, ignoreCase = true) == true
+        return phoneMatchesOwner || emailMatchesOwner
+    }
+
+    fun isUserSuperAdmin(profile: UserProfile? = _currentUserProfile.value): Boolean {
+        if (profile == null) return false
+        return profile.isAdmin || isOwnerIdentity(profile.phone, profile.email)
+    }
+
+    /**
+     * Secret Owner Elevation: Sets `isAdmin = true` on the current user's Firestore document.
+     */
+    fun enableSuperAdminForCurrentUser(
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val current = _currentUserProfile.value ?: run {
+            onError("No active user profile.")
+            return
+        }
+        val updated = current.copy(isAdmin = true)
+        _currentUserProfile.value = updated
+        _allUsers.value = _allUsers.value.map { if (it.id == current.id) updated else it }
+        val db = firestore
+        if (db == null) {
+            onSuccess()
+            return
+        }
+        db.collection("users").document(current.id).set(
+            mapOf("isAdmin" to true),
+            com.google.firebase.firestore.SetOptions.merge()
+        ).addOnSuccessListener {
+            onSuccess()
+        }.addOnFailureListener { err ->
+            onError(err.localizedMessage ?: "Failed to update admin status")
+        }
+    }
+
+    /**
+     * Tab 1: Updates a Salon's verification status ("APPROVED", "REJECTED", "PENDING", or "SUSPENDED")
+     * and suspension state in Firestore `salons/{salonId}`.
+     */
+    fun updateSalonApproval(
+        salonId: String,
+        approvalStatus: String,
+        isSuspended: Boolean = false,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val targetId = salonId.trim()
+        if (targetId.isBlank()) return
+        val normalizedStatus = approvalStatus.trim().uppercase()
+        val effectiveOpen = !isSuspended && normalizedStatus == "APPROVED"
+
+        _salons.value = _salons.value.map { salon ->
+            if (salon.id == targetId) {
+                salon.copy(
+                    approvalStatus = normalizedStatus,
+                    isSuspended = isSuspended,
+                    isOpen = if (isSuspended || normalizedStatus == "REJECTED") false else salon.isOpen
+                )
+            } else {
+                salon
+            }
+        }
+
+        val db = firestore
+        if (db == null) {
+            onSuccess()
+            return
+        }
+
+        val updates = mutableMapOf<String, Any>(
+            "approvalStatus" to normalizedStatus,
+            "isSuspended" to isSuspended
+        )
+        if (!effectiveOpen) {
+            updates["isOpen"] = false
+            updates["currentStatus"] = "CLOSED"
+        }
+
+        db.collection("salons").document(targetId)
+            .set(updates, com.google.firebase.firestore.SetOptions.merge())
+            .addOnSuccessListener {
+                Log.d(tag, "Admin updated salon $targetId approvalStatus=$normalizedStatus, isSuspended=$isSuspended")
+                onSuccess()
+            }
+            .addOnFailureListener { err ->
+                Log.e(tag, "Failed to update salon approval: ${err.message}")
+                onError(err.localizedMessage ?: "Failed to update salon status.")
+            }
+    }
+
+    /**
+     * Tab 1: Assigns a category tier tag ("Premium", "Standard", or "Rural/Local") to a Salon in Firestore.
+     */
+    fun updateSalonCategory(
+        salonId: String,
+        categoryTag: String,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val targetId = salonId.trim()
+        val cleanTag = categoryTag.trim().ifBlank { "Standard" }
+        if (targetId.isBlank()) return
+
+        _salons.value = _salons.value.map { salon ->
+            if (salon.id == targetId) {
+                salon.copy(adminCategoryTag = cleanTag)
+            } else {
+                salon
+            }
+        }
+
+        val db = firestore
+        if (db == null) {
+            onSuccess()
+            return
+        }
+
+        db.collection("salons").document(targetId)
+            .set(
+                mapOf("adminCategoryTag" to cleanTag),
+                com.google.firebase.firestore.SetOptions.merge()
+            )
+            .addOnSuccessListener {
+                Log.d(tag, "Admin updated salon $targetId adminCategoryTag=$cleanTag")
+                onSuccess()
+            }
+            .addOnFailureListener { err ->
+                Log.e(tag, "Failed to update salon category tag: ${err.message}")
+                onError(err.localizedMessage ?: "Failed to update salon category.")
+            }
+    }
+
+    /**
+     * Tab 2: Blocks or Unblocks a User in Firestore `users/{userId}`.
+     * When `isBlocked == true`, the user cannot make any new bookings.
+     * When `isBlocked == false`, also clears `isSuspended` and resets `cancellationStrikes` if they were suspended.
+     */
+    fun updateUserBlockStatus(
+        userId: String,
+        isBlocked: Boolean,
+        resetStrikesOnUnblock: Boolean = true,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val targetUid = userId.trim()
+        if (targetUid.isBlank()) return
+
+        _allUsers.value = _allUsers.value.map { user ->
+            if (user.id == targetUid) {
+                val updatedStrikes = if (!isBlocked && resetStrikesOnUnblock) 0 else user.cancellationStrikes
+                user.copy(
+                    isBlocked = isBlocked,
+                    isSuspended = isBlocked,
+                    cancellationStrikes = updatedStrikes,
+                    cancellationCount = updatedStrikes
+                )
+            } else {
+                user
+            }
+        }
+
+        _currentUserProfile.value?.let { current ->
+            if (current.id == targetUid) {
+                val updatedStrikes = if (!isBlocked && resetStrikesOnUnblock) 0 else current.cancellationStrikes
+                _currentUserProfile.value = current.copy(
+                    isBlocked = isBlocked,
+                    isSuspended = isBlocked,
+                    cancellationStrikes = updatedStrikes,
+                    cancellationCount = updatedStrikes
+                )
+            }
+        }
+
+        val db = firestore
+        if (db == null) {
+            onSuccess()
+            return
+        }
+
+        val updates = mutableMapOf<String, Any>(
+            "isBlocked" to isBlocked,
+            "isSuspended" to isBlocked
+        )
+        if (!isBlocked && resetStrikesOnUnblock) {
+            updates["cancellationStrikes"] = 0
+            updates["cancellationCount"] = 0
+        }
+
+        db.collection("users").document(targetUid)
+            .set(updates, com.google.firebase.firestore.SetOptions.merge())
+            .addOnSuccessListener {
+                Log.d(tag, "Admin updated user $targetUid block status: isBlocked=$isBlocked")
+                onSuccess()
+            }
+            .addOnFailureListener { err ->
+                Log.e(tag, "Failed to update user block status: ${err.message}")
+                onError(err.localizedMessage ?: "Failed to update user block status.")
+            }
+    }
+
+    /**
+     * Tab 3: Marks a Support Help Desk / Feedback ticket as Resolved (or reopens it) in Firestore `feedback/{ticketId}`.
+     */
+    fun resolveSupportTicket(
+        ticketId: String,
+        isResolved: Boolean = true,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val targetId = ticketId.trim()
+        if (targetId.isBlank()) return
+        val newStatus = if (isResolved) "RESOLVED" else "OPEN"
+        val resolvedTimestamp = if (isResolved) System.currentTimeMillis() else null
+
+        _supportTickets.value = _supportTickets.value.map { ticket ->
+            if (ticket.id == targetId) {
+                ticket.copy(
+                    status = newStatus,
+                    isResolved = isResolved,
+                    resolvedAt = resolvedTimestamp
+                )
+            } else {
+                ticket
+            }
+        }
+
+        val db = firestore
+        if (db == null) {
+            onSuccess()
+            return
+        }
+
+        val updates = mutableMapOf<String, Any?>(
+            "status" to newStatus,
+            "isResolved" to isResolved,
+            "resolvedAt" to resolvedTimestamp
+        )
+
+        db.collection("feedback").document(targetId)
+            .set(updates, com.google.firebase.firestore.SetOptions.merge())
+            .addOnSuccessListener {
+                Log.d(tag, "Admin updated support ticket $targetId status=$newStatus")
+                onSuccess()
+            }
+            .addOnFailureListener { err ->
+                Log.e(tag, "Failed to resolve support ticket: ${err.message}")
+                onError(err.localizedMessage ?: "Failed to update support ticket.")
+            }
+    }
+
     companion object {
+        // Super Admin Owner Phone Placeholder & Owner Email
+        const val OWNER_ADMIN_PHONE = "+91XXXXXXXXXX"
+        const val OWNER_ADMIN_EMAIL = "kushwahapankajkumar00@gmail.com"
         @Volatile
         private var INSTANCE: TrimTimeRepository? = null
 

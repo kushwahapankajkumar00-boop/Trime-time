@@ -4,7 +4,6 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
-import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
@@ -26,20 +25,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.Verified
@@ -54,10 +50,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -71,7 +64,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
@@ -90,10 +82,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.fragment.app.FragmentActivity
 import com.example.R
 import com.example.ui.theme.AmberPrimary
-import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
@@ -299,7 +289,7 @@ fun VerifiedNumberBadge(
 
 /**
  * Clean "Verify Your Mobile Number" 4-Box OTP Input Screen / Modal with a 30-second "Resend OTP" timer.
- * Also supports "Forgot PIN? Verify via OTP" mode when `requireNewLoginPin = true`.
+ * Also supports "Forgot Password? Verify via OTP" mode when `requireNewLoginPin = true`.
  */
 @Composable
 fun VerifyMobileOtpDialog(
@@ -438,7 +428,7 @@ fun VerifyMobileOtpDialog(
                         }
                     }
 
-                    // 4-Box OTP Input Row
+                    // 4-Box OTP Input Row (Fixed size boxes so the 4th box never squeezes)
                     BasicTextField(
                         value = enteredOtp,
                         onValueChange = { raw ->
@@ -455,7 +445,7 @@ fun VerifyMobileOtpDialog(
                         decorationBox = {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 for (i in 0 until 4) {
@@ -463,7 +453,7 @@ fun VerifyMobileOtpDialog(
                                     val isFocusedBox = enteredOtp.length == i || (enteredOtp.length == 4 && i == 3)
                                     Box(
                                         modifier = Modifier
-                                            .size(width = 58.dp, height = 62.dp)
+                                            .requiredSize(width = 54.dp, height = 60.dp)
                                             .clip(RoundedCornerShape(14.dp))
                                             .background(
                                                 if (charStr.isNotEmpty()) Color(0xFF172554) else DarkSurface
@@ -528,9 +518,9 @@ fun VerifyMobileOtpDialog(
                             shape = RoundedCornerShape(12.dp),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = AmberPrimary,
-                                unfocusedBorderColor = Color(0xFF334155),
                                 focusedTextColor = Color.White,
                                 unfocusedTextColor = Color.White,
+                                unfocusedBorderColor = Color(0xFF334155),
                                 focusedLabelColor = AmberPrimary,
                                 unfocusedLabelColor = Color(0xFF94A3B8)
                             )
@@ -668,573 +658,3 @@ fun VerifyMobileOtpDialog(
         }
     }
 }
-
-/**
- * Checks if the Android device supports Biometric / Fingerprint authentication.
- */
-fun isDeviceBiometricAvailable(context: Context): Boolean {
-    return try {
-        val biometricManager = BiometricManager.from(context)
-        val result = biometricManager.canAuthenticate(
-            BiometricManager.Authenticators.BIOMETRIC_WEAK or
-                BiometricManager.Authenticators.BIOMETRIC_STRONG
-        )
-        result == BiometricManager.BIOMETRIC_SUCCESS
-    } catch (_: Exception) {
-        false
-    }
-}
-
-private tailrec fun Context.findFragmentActivity(): FragmentActivity? = when (this) {
-    is FragmentActivity -> this
-    is ContextWrapper -> baseContext.findFragmentActivity()
-    else -> null
-}
-
-/**
- * Launches the native Android BiometricPrompt (Fingerprint / Face Unlock).
- */
-fun launchBiometricPrompt(
-    context: Context,
-    title: String = "TrimTime Quick Access",
-    subtitle: String = "Use your Fingerprint or Biometrics to unlock",
-    onSuccess: () -> Unit,
-    onError: (String) -> Unit
-) {
-    val activity = (context as? FragmentActivity) ?: context.findFragmentActivity()
-    if (activity == null) {
-        onError("Use your 4-digit MPIN below to unlock.")
-        return
-    }
-    try {
-        val executor = ContextCompat.getMainExecutor(context)
-        val prompt = BiometricPrompt(
-            activity,
-            executor,
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    super.onAuthenticationSucceeded(result)
-                    onSuccess()
-                }
-
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    super.onAuthenticationError(errorCode, errString)
-                    if (errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
-                        errorCode != BiometricPrompt.ERROR_USER_CANCELED
-                    ) {
-                        onError(errString.toString())
-                    }
-                }
-            }
-        )
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(title)
-            .setSubtitle(subtitle)
-            .setNegativeButtonText("Use 4-Digit MPIN")
-            .build()
-        prompt.authenticate(promptInfo)
-    } catch (e: Exception) {
-        onError("Biometric sensor unavailable. Please enter your 4-digit MPIN.")
-    }
-}
-
-/**
- * Post-Login / Sign-Up "Set Up Quick Access" Dialog:
- * Lets the user set a 4-Digit MPIN and/or enable Fingerprint/Biometrics so future app launches
- * only ask for their Fingerprint or 4-Digit MPIN instead of the full password.
- */
-@Composable
-fun QuickAccessSetupDialog(
-    userName: String,
-    initialMpin: String = "",
-    initialBiometricEnabled: Boolean = true,
-    onSaveQuickAccess: (mpin: String, enableBiometrics: Boolean) -> Unit,
-    onSkipForNow: () -> Unit
-) {
-    val context = LocalContext.current
-    val canUseBiometrics = remember { isDeviceBiometricAvailable(context) }
-    var mpinInput by remember { mutableStateOf(initialMpin.take(4)) }
-    var biometricChecked by remember { mutableStateOf(initialBiometricEnabled) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    val focusRequester = remember { FocusRequester() }
-
-    LaunchedEffect(Unit) {
-        try {
-            focusRequester.requestFocus()
-        } catch (_: Exception) {
-        }
-    }
-
-    Dialog(
-        onDismissRequest = onSkipForNow,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp)
-                .testTag("quick_access_setup_dialog"),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
-            border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.65f))
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(22.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(54.dp)
-                        .clip(CircleShape)
-                        .background(AmberPrimary.copy(alpha = 0.16f))
-                        .border(1.5.dp, AmberPrimary, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Fingerprint,
-                        contentDescription = "Quick Access",
-                        tint = AmberPrimary,
-                        modifier = Modifier.size(30.dp)
-                    )
-                }
-
-                Text(
-                    text = "Enable Quick Access",
-                    fontSize = 19.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = Color.White,
-                    textAlign = TextAlign.Center
-                )
-
-                Text(
-                    text = "Welcome${if (userName.isNotBlank()) ", ${userName.substringBefore(" ")}" else ""}! Set a 4-Digit MPIN or enable Fingerprint so you can unlock TrimTime in 1 second on future launches without typing your password.",
-                    fontSize = 12.sp,
-                    color = Color(0xFF94A3B8),
-                    textAlign = TextAlign.Center,
-                    lineHeight = 17.sp
-                )
-
-                Text(
-                    text = "CREATE 4-DIGIT MPIN",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = AmberPrimary,
-                    letterSpacing = 0.8.sp
-                )
-
-                // 4-Box MPIN Input
-                BasicTextField(
-                    value = mpinInput,
-                    onValueChange = { raw ->
-                        mpinInput = raw.filter { it.isDigit() }.take(4)
-                        errorMessage = null
-                    },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                    cursorBrush = SolidColor(AmberPrimary),
-                    textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
-                    modifier = Modifier
-                        .focusRequester(focusRequester)
-                        .testTag("quick_access_mpin_setup_input"),
-                    decorationBox = {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            for (i in 0 until 4) {
-                                val charStr = mpinInput.getOrNull(i)?.toString() ?: ""
-                                val isFocused = mpinInput.length == i || (mpinInput.length == 4 && i == 3)
-                                Box(
-                                    modifier = Modifier
-                                        .size(width = 56.dp, height = 60.dp)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(if (charStr.isNotEmpty()) Color(0xFF172554) else DarkSurface)
-                                        .border(
-                                            width = if (isFocused) 2.dp else 1.dp,
-                                            color = when {
-                                                errorMessage != null -> RedAlert
-                                                charStr.isNotEmpty() -> AmberPrimary
-                                                isFocused -> AmberPrimary
-                                                else -> Color(0xFF334155)
-                                            },
-                                            shape = RoundedCornerShape(14.dp)
-                                        )
-                                        .clickable {
-                                            try {
-                                                focusRequester.requestFocus()
-                                            } catch (_: Exception) {
-                                            }
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = if (charStr.isNotEmpty()) "●" else "•",
-                                        fontSize = if (charStr.isNotEmpty()) 20.sp else 16.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (charStr.isNotEmpty()) AmberPrimary else Color(0xFF475569)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                )
-
-                // Biometric / Fingerprint Toggle Card
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    color = DarkSurface,
-                    border = BorderStroke(1.dp, Color(0xFF334155))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Fingerprint,
-                                contentDescription = "Fingerprint Unlock",
-                                tint = GreenSuccess,
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Column {
-                                Text(
-                                    text = "Fingerprint / Biometric Unlock",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = if (canUseBiometrics) {
-                                        "Unlock instantly with device biometrics"
-                                    } else {
-                                        "Biometric prompt + 4-digit MPIN fallback"
-                                    },
-                                    fontSize = 11.sp,
-                                    color = Color(0xFF94A3B8)
-                                )
-                            }
-                        }
-                        Switch(
-                            checked = biometricChecked,
-                            onCheckedChange = { biometricChecked = it },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.Black,
-                                checkedTrackColor = GreenSuccess
-                            ),
-                            modifier = Modifier.testTag("quick_access_biometric_switch")
-                        )
-                    }
-                }
-
-                if (!errorMessage.isNullOrBlank()) {
-                    Text(
-                        text = errorMessage ?: "",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = RedAlert,
-                        textAlign = TextAlign.Center
-                    )
-                }
-
-                Button(
-                    onClick = {
-                        if (mpinInput.length != 4) {
-                            errorMessage = "Please enter a 4-digit MPIN to enable Quick Access."
-                            return@Button
-                        }
-                        onSaveQuickAccess(mpinInput, biometricChecked)
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(50.dp)
-                        .testTag("save_quick_access_button"),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = AmberPrimary,
-                        contentColor = Color.Black
-                    )
-                ) {
-                    Text(
-                        text = "Save MPIN & Enable Quick Access",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-
-                TextButton(
-                    onClick = onSkipForNow,
-                    modifier = Modifier.testTag("skip_quick_access_button")
-                ) {
-                    Text(
-                        text = "Skip for now",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF94A3B8)
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * Full-Screen "Quick Access" Unlock Screen shown on future app launches when a user has
- * enabled a 4-Digit MPIN or Fingerprint/Biometrics.
- */
-@Composable
-fun QuickAccessUnlockScreen(
-    userName: String,
-    userPhone: String,
-    isPhoneVerified: Boolean,
-    expectedMpin: String,
-    biometricEnabled: Boolean,
-    onUnlocked: () -> Unit,
-    onUsePasswordOrSwitchAccount: () -> Unit
-) {
-    val context = LocalContext.current
-    var enteredMpin by remember { mutableStateOf("") }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    val focusRequester = remember { FocusRequester() }
-
-    LaunchedEffect(Unit) {
-        if (biometricEnabled) {
-            launchBiometricPrompt(
-                context = context,
-                title = "Welcome back, ${userName.substringBefore(" ").ifBlank { "TrimTime User" }}",
-                subtitle = "Touch the fingerprint sensor or enter your 4-digit MPIN",
-                onSuccess = onUnlocked,
-                onError = { /* User can enter 4-digit MPIN below */ }
-            )
-        }
-        try {
-            focusRequester.requestFocus()
-        } catch (_: Exception) {
-        }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(Color(0xFF0A0F1D), DarkBackground, Color(0xFF0B1325))
-                )
-            )
-            .padding(horizontal = 24.dp, vertical = 36.dp)
-            .testTag("quick_access_unlock_screen"),
-        contentAlignment = Alignment.Center
-    ) {
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(26.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
-            border = BorderStroke(1.dp, Color(0xFF1E293B))
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(64.dp)
-                        .clip(CircleShape)
-                        .background(AmberPrimary.copy(alpha = 0.16f))
-                        .border(1.5.dp, AmberPrimary, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Fingerprint,
-                        contentDescription = "Quick Access",
-                        tint = AmberPrimary,
-                        modifier = Modifier.size(34.dp)
-                    )
-                }
-
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = "Welcome back, ${userName.ifBlank { "Member" }}",
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (isPhoneVerified) {
-                            VerifiedBlueTickIcon(size = 18.dp)
-                        }
-                    }
-                    if (userPhone.isNotBlank()) {
-                        Text(
-                            text = "+91 $userPhone",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = Color(0xFF94A3B8)
-                        )
-                    }
-                }
-
-                Text(
-                    text = "Enter your 4-Digit Quick Access MPIN",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = AmberPrimary
-                )
-
-                // 4-Box MPIN Entry with instant auto-unlock on 4th digit
-                BasicTextField(
-                    value = enteredMpin,
-                    onValueChange = { raw ->
-                        val clean = raw.filter { it.isDigit() }.take(4)
-                        enteredMpin = clean
-                        errorMessage = null
-                        if (clean.length == 4) {
-                            if (expectedMpin.isBlank() || clean == expectedMpin) {
-                                onUnlocked()
-                            } else {
-                                errorMessage = "Incorrect 4-Digit MPIN. Please try again."
-                                enteredMpin = ""
-                            }
-                        }
-                    },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                    cursorBrush = SolidColor(AmberPrimary),
-                    textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
-                    modifier = Modifier
-                        .focusRequester(focusRequester)
-                        .testTag("quick_access_mpin_unlock_input"),
-                    decorationBox = {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            for (i in 0 until 4) {
-                                val charStr = enteredMpin.getOrNull(i)?.toString() ?: ""
-                                val isFocused = enteredMpin.length == i
-                                Box(
-                                    modifier = Modifier
-                                        .size(width = 58.dp, height = 62.dp)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(if (charStr.isNotEmpty()) Color(0xFF172554) else DarkSurface)
-                                        .border(
-                                            width = if (isFocused) 2.dp else 1.dp,
-                                            color = when {
-                                                errorMessage != null -> RedAlert
-                                                charStr.isNotEmpty() -> GreenSuccess
-                                                isFocused -> AmberPrimary
-                                                else -> Color(0xFF334155)
-                                            },
-                                            shape = RoundedCornerShape(14.dp)
-                                        )
-                                        .clickable {
-                                            try {
-                                                focusRequester.requestFocus()
-                                            } catch (_: Exception) {
-                                            }
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = if (charStr.isNotEmpty()) "●" else "•",
-                                        fontSize = if (charStr.isNotEmpty()) 22.sp else 18.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (charStr.isNotEmpty()) Color.White else Color(0xFF475569)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                )
-
-                if (!errorMessage.isNullOrBlank()) {
-                    Text(
-                        text = errorMessage ?: "",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = RedAlert,
-                        textAlign = TextAlign.Center
-                    )
-                }
-
-                // Fingerprint Button
-                if (biometricEnabled) {
-                    OutlinedButton(
-                        onClick = {
-                            launchBiometricPrompt(
-                                context = context,
-                                title = "TrimTime Biometric Unlock",
-                                subtitle = "Authenticate with Fingerprint or Face Unlock",
-                                onSuccess = onUnlocked,
-                                onError = { msg -> errorMessage = msg }
-                            )
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("quick_access_fingerprint_button"),
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, GreenSuccess.copy(alpha = 0.8f)),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenSuccess)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Fingerprint,
-                            contentDescription = "Unlock with Fingerprint",
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Unlock with Fingerprint / Biometrics",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
-
-                TextButton(
-                    onClick = onUsePasswordOrSwitchAccount,
-                    modifier = Modifier.testTag("quick_access_switch_account_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Logout,
-                        contentDescription = null,
-                        tint = Color(0xFF94A3B8),
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Use Password or Switch Account",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFF94A3B8)
-                    )
-                }
-            }
-        }
-    }
-}
-

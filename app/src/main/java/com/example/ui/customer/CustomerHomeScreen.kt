@@ -1622,105 +1622,120 @@ fun BlinkitSalonCard(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Bottom Action: Pay at Salon Guarantee + Directions + "View & Book" / "Join Waitlist"
+                // Bottom Section: Row 1 = Pay at Salon Guarantee Badge (No overlap with buttons)
                 val context = LocalContext.current
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .wrapContentHeight(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF064E3B).copy(alpha = 0.28f))
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Payments,
+                        contentDescription = "Pay at Salon",
+                        tint = GreenSuccess,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "₹0 Advance • Pay at Salon after your service",
+                        fontSize = 11.sp,
+                        color = Color(0xFFA7F3D0),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Row 2 = Balanced Full-Width Action Buttons ("Get Directions" + "View & Book" / "Join Waitlist")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        modifier = Modifier.weight(1f)
+                    OutlinedButton(
+                        onClick = {
+                            launchGeoDirections(
+                                context = context,
+                                latitude = salon.latitude,
+                                longitude = salon.longitude,
+                                salonName = salon.name,
+                                fallbackAddress = salon.location
+                            )
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .testTag("salon_card_directions_${salon.id}")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Payments,
-                            contentDescription = "Pay at Salon",
-                            tint = GreenSuccess,
-                            modifier = Modifier.size(14.dp)
+                            imageVector = Icons.Default.Directions,
+                            contentDescription = "Get Directions",
+                            modifier = Modifier.size(15.dp)
                         )
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "₹0 Advance • Pay at Salon",
-                            fontSize = 11.sp,
-                            color = Color(0xFFA7F3D0),
-                            fontWeight = FontWeight.SemiBold,
+                            text = "Get Directions",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
                             maxLines = 1,
+                            softWrap = false,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                launchGeoDirections(
-                                    context = context,
-                                    latitude = salon.latitude,
-                                    longitude = salon.longitude,
-                                    salonName = salon.name,
-                                    fallbackAddress = salon.location
-                                )
-                            },
+                    if (!isOwnSalon) {
+                        // 6. Booking Action: "View & Book" or "Join Waitlist" if busy
+                        Button(
+                            onClick = onBookClick,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
+                                contentColor = if (isBusy) Color.White else Color(0xFF1E1402)
+                            ),
                             shape = RoundedCornerShape(10.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                            modifier = Modifier.testTag("salon_card_directions_${salon.id}")
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(44.dp)
+                                .testTag("view_and_book_button_${salon.id}")
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Directions,
-                                contentDescription = "Get Directions",
-                                modifier = Modifier.size(15.dp)
+                            Text(
+                                text = if (isBusy) "Join Waitlist" else "View & Book",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
-
-                        if (!isOwnSalon) {
-                            // 6. Booking Action: "View & Book" or "Join Waitlist" if busy
-                            Button(
-                                onClick = onBookClick,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
-                                    contentColor = if (isBusy) Color.White else Color(0xFF1E1402)
-                                ),
-                                shape = RoundedCornerShape(10.dp),
-                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
-                                modifier = Modifier.testTag("view_and_book_button_${salon.id}")
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        text = if (isBusy) "Join Waitlist" else "View & Book",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                            }
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(Color(0xFF1E293B))
-                                    .border(1.dp, AmberPrimary.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                            ) {
-                                Text(
-                                    text = "Your Salon",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = AmberPrimary,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
-                            }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(44.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF1E293B))
+                                .border(1.dp, AmberPrimary.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                                .padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "Your Salon",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = AmberPrimary,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }

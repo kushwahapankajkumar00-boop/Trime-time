@@ -51,8 +51,6 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val authError: StateFlow<String?> = repository.authError
     val showSha1FallbackDialog: StateFlow<Boolean> = repository.showSha1FallbackDialog
     val showPartnerOnboarding: StateFlow<Boolean> = repository.showPartnerOnboarding
-    val isSessionUnlocked: StateFlow<Boolean> = repository.isSessionUnlocked
-    val showQuickAccessSetup: StateFlow<Boolean> = repository.showQuickAccessSetup
     val appPreferences: StateFlow<AppPreferences> = repository.appPreferences
 
     // Live Customer GPS Coordinates & Reverse-Geocoded Location Display
@@ -62,9 +60,19 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val userLocationSubtitle: StateFlow<String> = repository.userLocationSubtitle
     val isLiveGpsActive: StateFlow<Boolean> = repository.isLiveGpsActive
 
-    // Real-Time Salons & Bookings from Firestore
+    // Real-Time Salons, Bookings, Users & Support Tickets from Firestore
     val allSalons = repository.salons
     val allBookings = repository.bookings
+    val allUsers = repository.allUsers
+    val supportTickets = repository.supportTickets
+
+    // Secret Super Admin Access State
+    private val _showAdminDashboard = MutableStateFlow(false)
+    val showAdminDashboard: StateFlow<Boolean> = _showAdminDashboard.asStateFlow()
+
+    val isSuperAdmin: StateFlow<Boolean> = currentUserProfile.combine(allUsers) { profile, _ ->
+        repository.isUserSuperAdmin(profile)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     // Whether the currently logged-in user already owns a registered salon in Firestore
     // (strictly currentUser.uid == salon.ownerId && isRegistrationCompleted && registrationFormSubmitted)
@@ -144,10 +152,14 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                     salon.shopAddress.contains(query, ignoreCase = true) ||
                     salon.services.any { it.name.contains(query, ignoreCase = true) }
 
+            val isNotRejectedOrSuspended = !salon.isSuspended &&
+                    !salon.approvalStatus.equals("REJECTED", ignoreCase = true)
+
             val matchesCategory = category == "All" ||
+                    salon.adminCategoryTag.equals(category, ignoreCase = true) ||
                     salon.services.any { it.category.equals(category, ignoreCase = true) }
 
-            includeByDemoSetting && matchesQuery && matchesCategory
+            includeByDemoSetting && isNotRejectedOrSuspended && matchesQuery && matchesCategory
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -218,8 +230,21 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
 
     fun setServiceToBook(service: SalonService?) {
         if (service != null) {
-            val currentUid = currentUserProfile.value?.id?.trim().orEmpty()
+            val profile = currentUserProfile.value
+            if (profile != null && profile.isEffectivelyBlocked) {
+                _userMessage.value = if (profile.isBlocked) {
+                    "Account Blocked: Your account has been blocked by Admin and cannot make new bookings."
+                } else {
+                    "Security Lockout: Your account is suspended due to 3 cancellation strikes."
+                }
+                return
+            }
+            val currentUid = profile?.id?.trim().orEmpty()
             val salon = _selectedSalon.value
+            if (salon != null && (salon.isSuspended || salon.approvalStatus.equals("REJECTED", ignoreCase = true))) {
+                _userMessage.value = "This salon is currently suspended or unavailable for bookings."
+                return
+            }
             if (currentUid.isNotBlank() && salon != null && (salon.ownerId == currentUid || salon.partnerId == currentUid)) {
                 _userMessage.value = "This is your own registered salon. Manage it in Partner Mode."
                 return
@@ -304,33 +329,6 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
-    fun unlockSessionWithQuickAccess() {
-        repository.unlockSessionWithQuickAccess()
-    }
-
-    fun dismissQuickAccessSetup() {
-        repository.dismissQuickAccessSetup()
-    }
-
-    fun openQuickAccessSetup() {
-        repository.openQuickAccessSetup()
-    }
-
-    fun saveQuickAccessSettings(
-        mpin: String,
-        biometricEnabled: Boolean,
-        onSuccess: () -> Unit = {}
-    ) {
-        repository.saveQuickAccessSettings(
-            mpin = mpin,
-            biometricEnabled = biometricEnabled,
-            onSuccess = {
-                _userMessage.value = "✓ Quick Access (4-Digit MPIN & Biometrics) enabled!"
-                onSuccess()
-            }
-        )
-    }
-
     // Rule 2: One Active Booking Rule (strictly scoped to currentUser.uid; status in PENDING, ACCEPTED, IN_PROGRESS)
     val hasActivePendingBooking: StateFlow<Boolean> = combine(
         customerBookings,
@@ -342,9 +340,9 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
-    // Rule 3: 3-Strike Anti-Spam Rule (cancellationStrikes >= 3 = blocked)
+    // Rule 3: Admin Block & 3-Strike Anti-Spam Rule (isBlocked || isSuspended || cancellationStrikes >= 3 = blocked)
     val isUserSuspended: StateFlow<Boolean> = currentUserProfile.combine(customerBookings) { profile, _ ->
-        (profile?.effectiveCancellationStrikes ?: 0) >= 3 || (profile?.isSuspended == true)
+        profile?.isEffectivelyBlocked == true
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     fun confirmBooking(customerName: String, customerPhone: String) {
@@ -355,9 +353,13 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        // Rule 3 Auto-Block check (3-Strike Anti-Spam Rule)
-        if (profile != null && (profile.effectiveCancellationStrikes >= 3 || profile.isSuspended)) {
-            _userMessage.value = "Security Lockout: Your account is blocked from new bookings due to 3 cancellation strikes."
+        // Rule 3 Auto-Block / Admin-Block check
+        if (profile != null && profile.isEffectivelyBlocked) {
+            _userMessage.value = if (profile.isBlocked) {
+                "Account Blocked: Your account has been blocked by Admin and cannot make new bookings."
+            } else {
+                "Security Lockout: Your account is blocked from new bookings due to 3 cancellation strikes."
+            }
             return
         }
 
@@ -751,6 +753,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun logout() {
+        _showAdminDashboard.value = false
         repository.signOut()
         _currentNavTab.value = CustomerNavTab.SALONS
         _selectedSalon.value = null
@@ -1147,6 +1150,113 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             onError = { err ->
                 _userMessage.value = err
                 onDone(false, err)
+            }
+        )
+    }
+
+    // ==========================================
+    // Super Admin Dashboard Actions
+    // ==========================================
+
+    fun openAdminDashboard() {
+        if (isSuperAdmin.value || repository.isUserSuperAdmin()) {
+            _showAdminDashboard.value = true
+        } else {
+            _userMessage.value = "Access Denied: Super Admin privileges required."
+        }
+    }
+
+    fun closeAdminDashboard() {
+        _showAdminDashboard.value = false
+    }
+
+    fun enableSuperAdminAccess() {
+        repository.enableSuperAdminForCurrentUser(
+            onSuccess = {
+                _userMessage.value = "👑 Super Admin privileges activated for your account!"
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun updateSalonApproval(
+        salonId: String,
+        approvalStatus: String,
+        isSuspended: Boolean = false
+    ) {
+        repository.updateSalonApproval(
+            salonId = salonId,
+            approvalStatus = approvalStatus,
+            isSuspended = isSuspended,
+            onSuccess = {
+                val actionLabel = when {
+                    isSuspended -> "SUSPENDED"
+                    approvalStatus.equals("APPROVED", ignoreCase = true) -> "APPROVED"
+                    approvalStatus.equals("REJECTED", ignoreCase = true) -> "REJECTED"
+                    else -> approvalStatus
+                }
+                _userMessage.value = "✓ Salon status updated to $actionLabel"
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun updateSalonCategory(
+        salonId: String,
+        categoryTag: String
+    ) {
+        repository.updateSalonCategory(
+            salonId = salonId,
+            categoryTag = categoryTag,
+            onSuccess = {
+                _userMessage.value = "✓ Salon tagged as '$categoryTag'"
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun updateUserBlockStatus(
+        userId: String,
+        isBlocked: Boolean
+    ) {
+        repository.updateUserBlockStatus(
+            userId = userId,
+            isBlocked = isBlocked,
+            onSuccess = {
+                _userMessage.value = if (isBlocked) {
+                    "🚫 User blocked from making new bookings."
+                } else {
+                    "✓ User unblocked & cancellation strikes reset."
+                }
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun resolveSupportTicket(
+        ticketId: String,
+        isResolved: Boolean = true
+    ) {
+        repository.resolveSupportTicket(
+            ticketId = ticketId,
+            isResolved = isResolved,
+            onSuccess = {
+                _userMessage.value = if (isResolved) {
+                    "✓ Support ticket marked as Resolved."
+                } else {
+                    "Support ticket reopened."
+                }
+            },
+            onError = { err ->
+                _userMessage.value = err
             }
         )
     }

@@ -43,6 +43,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.MenuBook
@@ -991,36 +992,72 @@ fun BarberAvailabilityToggleCard(
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        text = "Available Chairs: $availableChairs",
+                        text = "Active Chairs: $availableChairs",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(1, 2, 3, 4).forEach { count ->
-                            val selected = availableChairs == count
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (selected) AmberPrimary else Color(0xFF1E293B))
-                                    .border(
-                                        1.dp,
-                                        if (selected) AmberPrimary else Color(0xFF334155),
-                                        RoundedCornerShape(8.dp)
-                                    )
-                                    .clickable {
-                                        onChairAndWaitChange(currentStatus, count, waitingTimeMinutes)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF1E293B))
+                                .border(1.dp, AmberPrimary, RoundedCornerShape(8.dp))
+                                .clickable {
+                                    if (availableChairs > 1) {
+                                        onChairAndWaitChange(currentStatus, availableChairs - 1, waitingTimeMinutes)
                                     }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
-                                    .testTag("chair_count_$count")
-                            ) {
-                                Text(
-                                    text = "$count",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = if (selected) Color(0xFF1E1402) else Color.White
-                                )
-                            }
+                                }
+                                .testTag("chair_count_dec"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "-",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = AmberPrimary
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .height(32.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(AmberPrimary)
+                                .padding(horizontal = 12.dp)
+                                .testTag("chair_count_$availableChairs"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "$availableChairs",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFF1E1402)
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF1E293B))
+                                .border(1.dp, AmberPrimary, RoundedCornerShape(8.dp))
+                                .clickable {
+                                    if (availableChairs < 99) {
+                                        onChairAndWaitChange(currentStatus, availableChairs + 1, waitingTimeMinutes)
+                                    }
+                                }
+                                .testTag("chair_count_inc"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "+",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = AmberPrimary
+                            )
                         }
                     }
                 }
@@ -2784,44 +2821,101 @@ fun PartnerShopProfileTabContent(
                         )
                     }
 
-                    // Available Chairs Selector
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(
-                            text = "Available Chairs: $availableChairs",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFE2E8F0)
-                        )
+                    // Dynamic Active Chairs Stepper + Numeric Input
+                    var profileChairText by remember(availableChairs) { mutableStateOf(availableChairs.toString()) }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(DarkSurface)
+                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            listOf(1, 2, 3, 4, 5, 6).forEach { count ->
-                                val isSelected = availableChairs == count
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(40.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(if (isSelected) AmberPrimary else DarkSurface)
-                                        .border(
-                                            1.dp,
-                                            if (isSelected) AmberPrimary else Color(0xFF334155),
-                                            RoundedCornerShape(10.dp)
-                                        )
-                                        .clickable {
-                                            availableChairs = count
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Active Grooming Chairs: $availableChairs",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFE2E8F0)
+                                )
+                                Text(
+                                    text = "Adjust with [ - ] [ + ] or enter exact number of chairs",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        if (availableChairs > 1) {
+                                            availableChairs--
+                                            profileChairText = availableChairs.toString()
                                             locationSaveSuccess = false
                                         }
-                                        .testTag("profile_chair_count_$count"),
-                                    contentAlignment = Alignment.Center
+                                    },
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .testTag("profile_chair_dec_button"),
+                                    contentPadding = PaddingValues(0.dp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, AmberPrimary)
                                 ) {
-                                    Text(
-                                        text = "$count",
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (isSelected) DarkBackground else Color.White
-                                    )
+                                    Text("-", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = AmberPrimary)
+                                }
+
+                                OutlinedTextField(
+                                    value = profileChairText,
+                                    onValueChange = { raw ->
+                                        val digits = raw.filter { it.isDigit() }.take(2)
+                                        profileChairText = digits
+                                        val parsed = digits.toIntOrNull()
+                                        if (parsed != null && parsed >= 1) {
+                                            availableChairs = parsed
+                                            locationSaveSuccess = false
+                                        }
+                                    },
+                                    singleLine = true,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = AmberPrimary,
+                                        unfocusedBorderColor = Color(0xFF475569),
+                                        focusedContainerColor = Color(0xFF0F172A),
+                                        unfocusedContainerColor = Color(0xFF0F172A),
+                                        focusedTextColor = AmberPrimary,
+                                        unfocusedTextColor = AmberPrimary
+                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier
+                                        .width(68.dp)
+                                        .testTag("profile_chair_count_$availableChairs")
+                                )
+
+                                OutlinedButton(
+                                    onClick = {
+                                        if (availableChairs < 99) {
+                                            availableChairs++
+                                            profileChairText = availableChairs.toString()
+                                            locationSaveSuccess = false
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .testTag("profile_chair_inc_button"),
+                                    contentPadding = PaddingValues(0.dp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, AmberPrimary)
+                                ) {
+                                    Text("+", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = AmberPrimary)
                                 }
                             }
                         }
@@ -2851,174 +2945,177 @@ fun PartnerShopProfileTabContent(
                         shape = RoundedCornerShape(10.dp)
                     )
 
-                    // Address / Location Input (Sanitized, max 250 chars)
-                    OutlinedTextField(
-                        value = fullAddress,
-                        onValueChange = {
-                            fullAddress = SecurityValidator.sanitizeAddress(it, trimEdges = false)
-                            locationSaveSuccess = false
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("shop_full_address_input"),
-                        label = { Text("Address / Location * (Max 250 chars)", color = Color(0xFF94A3B8)) },
-                        placeholder = { Text("e.g. Shop #12, Boring Road, Near Pantaloons", color = Color(0xFF64748B)) },
-                        singleLine = false,
-                        maxLines = 3,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = AmberPrimary,
-                            unfocusedBorderColor = Color(0xFF475569),
-                            focusedContainerColor = DarkSurface,
-                            unfocusedContainerColor = DarkSurface,
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-
-                    // Nearby Landmark Input (Sanitized, max 60 chars)
-                    OutlinedTextField(
-                        value = landmark,
-                        onValueChange = {
-                            landmark = SecurityValidator.sanitizeName(it, trimEdges = false)
-                            locationSaveSuccess = false
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("shop_landmark_input"),
-                        label = { Text("Nearby Landmark", color = Color(0xFF94A3B8)) },
-                        placeholder = { Text("e.g. Opposite Shiv Temple / Metro Pillar 42", color = Color(0xFF64748B)) },
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = AmberPrimary,
-                            unfocusedBorderColor = Color(0xFF475569),
-                            focusedContainerColor = DarkSurface,
-                            unfocusedContainerColor = DarkSurface,
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    )
-
                     HorizontalDivider(color = Color(0xFF1E293B))
 
-                    // GPS Auto-Fetch + OpenStreetMap Pin Picker
-                    val gpsScope = androidx.compose.runtime.rememberCoroutineScope()
-                    val gpsPermissionLauncher = rememberLauncherForActivityResult(
-                        contract = ActivityResultContracts.RequestMultiplePermissions()
-                    ) { permissions ->
-                        val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-                            permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-                        if (granted) {
-                            fetchDeviceGpsLocation(context) { lat, lng, _ ->
-                                currentLatitude = lat
-                                currentLongitude = lng
-                                isGpsFetched = true
-                                isFetchingGps = false
-                                locationSaveSuccess = false
-                                gpsScope.launch {
-                                    val (revTitle, revSub) = com.example.ui.components.reverseGeocodeLocation(context, lat, lng)
-                                    if (fullAddress.isBlank() && revSub.isNotBlank()) {
-                                        fullAddress = "$revTitle ($revSub)"
-                                    }
+                    // PARTNER LOCATION LOCK (Urban Company Style):
+                    // Partners set their physical location ONCE during registration.
+                    // In Shop Profile, the address and GPS coordinates are locked and read-only.
+                    var showLocationChangeSupportDialog by remember { mutableStateOf(false) }
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("partner_locked_location_card"),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.LocationOn,
+                                        contentDescription = null,
+                                        tint = AmberPrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "Registered Shop Location",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color.White
+                                    )
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(0xFF1E293B))
+                                        .border(1.dp, AmberPrimary.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        .testTag("location_locked_badge")
+                                ) {
+                                    Text(
+                                        text = "🔒 Location Locked",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = AmberPrimary
+                                    )
                                 }
                             }
-                        } else {
-                            isFetchingGps = false
-                        }
-                    }
 
-                    Button(
-                        onClick = {
-                            isFetchingGps = true
-                            if (hasLocationPermission(context)) {
-                                fetchDeviceGpsLocation(context) { lat, lng, _ ->
-                                    currentLatitude = lat
-                                    currentLongitude = lng
-                                    isGpsFetched = true
-                                    isFetchingGps = false
-                                    locationSaveSuccess = false
-                                    gpsScope.launch {
-                                        val (revTitle, revSub) = com.example.ui.components.reverseGeocodeLocation(context, lat, lng)
-                                        if (fullAddress.isBlank() && revSub.isNotBlank()) {
-                                            fullAddress = "$revTitle ($revSub)"
-                                        }
-                                    }
-                                }
-                            } else {
-                                gpsPermissionLauncher.launch(
-                                    arrayOf(
-                                        Manifest.permission.ACCESS_FINE_LOCATION,
-                                        Manifest.permission.ACCESS_COARSE_LOCATION
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(DarkSurface)
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = fullAddress.ifBlank { salon?.location ?: "Registered Shop Address" },
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                if (landmark.isNotBlank()) {
+                                    Text(
+                                        text = "Landmark: $landmark",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFFCBD5E1)
                                     )
+                                }
+                                Text(
+                                    text = "Verified GPS Coordinates: ${String.format(java.util.Locale.US, "%.4f, %.4f", currentLatitude, currentLongitude)}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF38BDF8)
                                 )
                             }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 48.dp)
-                            .testTag("gps_auto_fetch_button"),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF1E3A8A)
-                        ),
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.MyLocation,
-                                contentDescription = "Fetch GPS",
-                                tint = Color(0xFF93C5FD),
-                                modifier = Modifier.size(20.dp)
-                            )
+
                             Text(
-                                text = if (isFetchingGps) "Acquiring Satellites..." else "📍 Use Current GPS Location",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis
+                                text = "For customer trust and accurate distance discovery, your physical salon coordinates are locked after onboarding.",
+                                fontSize = 11.sp,
+                                color = Color(0xFF94A3B8),
+                                lineHeight = 15.sp
                             )
+
+                            OutlinedButton(
+                                onClick = { showLocationChangeSupportDialog = true },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(42.dp)
+                                    .testTag("request_location_change_button"),
+                                shape = RoundedCornerShape(10.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Request Location Change",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
 
-                    // Interactive OpenStreetMap Shop Pin Picker (inside clean 260.dp Box)
-                    PartnerLocationPickerOsmMap(
-                        latitude = currentLatitude,
-                        longitude = currentLongitude,
-                        salonName = shopName.ifBlank { salon?.name ?: "My Salon" },
-                        onLocationPicked = { pickedLat, pickedLng ->
-                            currentLatitude = pickedLat
-                            currentLongitude = pickedLng
-                            isGpsFetched = true
-                            locationSaveSuccess = false
-                        }
-                    )
-
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF0F172A))
-                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Lat: ${"%.4f".format(currentLatitude)}, Lng: ${"%.4f".format(currentLongitude)}",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFF67E8F9)
-                        )
-                        Text(
-                            text = if (isGpsFetched) "Pin Locked • Ready to Save" else "Tap map to adjust pin",
-                            fontSize = 10.sp,
-                            color = Color(0xFF94A3B8)
+                    if (showLocationChangeSupportDialog) {
+                        androidx.compose.material3.AlertDialog(
+                            onDismissRequest = { showLocationChangeSupportDialog = false },
+                            containerColor = Color(0xFF111827),
+                            titleContentColor = Color.White,
+                            textContentColor = Color(0xFFCBD5E1),
+                            title = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        tint = AmberPrimary
+                                    )
+                                    Text(
+                                        text = "Location Locked for Partner Safety",
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
+                                }
+                            },
+                            text = {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(
+                                        text = "To prevent fake listings and protect customer directions, partners cannot freely move their salon's GPS pin once the shop is live.",
+                                        fontSize = 13.sp,
+                                        lineHeight = 18.sp
+                                    )
+                                    Text(
+                                        text = "Have you relocated your physical shop? Please contact TrimTime Partner Support at support@trimtime.app with your Shop ID (${salon?.id ?: "Partner"}) and new address proof to update your pinned coordinates.",
+                                        fontSize = 12.sp,
+                                        color = AmberPrimary,
+                                        lineHeight = 17.sp
+                                    )
+                                }
+                            },
+                            confirmButton = {
+                                Button(
+                                    onClick = { showLocationChangeSupportDialog = false },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = AmberPrimary,
+                                        contentColor = Color.Black
+                                    )
+                                ) {
+                                    Text("Understood", fontWeight = FontWeight.Bold)
+                                }
+                            }
                         )
                     }
 

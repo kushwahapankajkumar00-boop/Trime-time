@@ -10,78 +10,84 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Payments
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.example.model.Booking
 import com.example.ui.theme.AmberPrimary
+import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 
+/**
+ * Customer PIN Confirmation Dialog:
+ * Shows the generated 4-digit Service PIN (`servicePin`) when a slot is booked.
+ * Uses DialogProperties(usePlatformDefaultWidth = false) and fixed requiredSize boxes
+ * so all 4 digits maintain their exact width and NEVER get squeezed or clipped on narrow screens.
+ */
 @Composable
 fun PinDisplayDialog(
     booking: Booking,
     onDismiss: () -> Unit,
     onViewBookings: () -> Unit
 ) {
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
-                .testTag("booking_confirmed_dialog"),
+                .padding(horizontal = 16.dp)
+                .testTag("pin_display_dialog"),
             shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(24.dp),
+                    .padding(horizontal = 18.dp, vertical = 22.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Success Icon Badge
                 Box(
                     modifier = Modifier
-                        .size(64.dp)
+                        .size(60.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF064E3B)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.CheckCircle,
-                        contentDescription = "Success",
+                        contentDescription = "Confirmed",
                         tint = GreenSuccess,
-                        modifier = Modifier.size(38.dp)
+                        modifier = Modifier.size(34.dp)
                     )
                 }
 
@@ -89,32 +95,70 @@ fun PinDisplayDialog(
 
                 Text(
                     text = "Slot Confirmed!",
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
-                    color = Color.White
+                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
+                    color = Color.White,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    text = "${booking.service} at ${booking.salonName}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color(0xFF94A3B8),
+                    textAlign = TextAlign.Center
                 )
 
                 Text(
-                    text = "${booking.salonName} • ${booking.timeSlot}",
-                    style = MaterialTheme.typography.bodyMedium,
+                    text = "Time Slot: ${booking.timeSlot} • ₹${booking.servicePrice}",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
                     color = AmberPrimary,
-                    fontWeight = FontWeight.SemiBold,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(top = 4.dp)
+                    textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
-                // Highlighted 4-Digit Service PIN Box
+                // Pay at Salon Badge
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Color(0xFF064E3B))
+                        .border(1.dp, GreenSuccess.copy(alpha = 0.4f), RoundedCornerShape(50))
+                        .padding(horizontal = 12.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Payments,
+                        contentDescription = "Pay at Salon",
+                        tint = GreenSuccess,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "₹0 Advance • Pay ₹${booking.servicePrice} at Salon",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFA7F3D0),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 4-Digit Service PIN Highlight Box
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
                     shape = RoundedCornerShape(16.dp),
-                    border = CardDefaults.outlinedCardBorder().copy(brush = Brush.linearGradient(listOf(AmberPrimary, Color(0xFFD97706))))
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                    border = CardDefaults.outlinedCardBorder().copy(
+                        brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
+                    )
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(16.dp),
+                            .padding(horizontal = 12.dp, vertical = 16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Row(
@@ -123,7 +167,7 @@ fun PinDisplayDialog(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Lock,
-                                contentDescription = "Security",
+                                contentDescription = "Service PIN",
                                 tint = AmberPrimary,
                                 modifier = Modifier.size(16.dp)
                             )
@@ -131,35 +175,42 @@ fun PinDisplayDialog(
                                 text = "YOUR 4-DIGIT SERVICE PIN",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFFE2E8F0),
-                                letterSpacing = 1.sp
+                                color = AmberPrimary,
+                                letterSpacing = 1.sp,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // Large 4 Digits
+                        // Display 4 individual PIN digits with fixed requiredSize so the 4th digit NEVER clips or squeezes
+                        val paddedPin = booking.pin.trim().padEnd(4, '0').take(4)
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.testTag("service_pin_display")
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("generated_pin_code"),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            val pinChars = booking.pin.padEnd(4, '-').toCharArray()
-                            pinChars.forEach { char ->
+                            paddedPin.forEachIndexed { idx, char ->
                                 Box(
                                     modifier = Modifier
-                                        .size(54.dp)
+                                        .requiredSize(width = 52.dp, height = 58.dp)
                                         .clip(RoundedCornerShape(12.dp))
-                                        .background(Color(0xFF0F172A))
-                                        .border(2.dp, AmberPrimary, RoundedCornerShape(12.dp)),
+                                        .background(DarkBackground)
+                                        .border(1.5.dp, AmberPrimary, RoundedCornerShape(12.dp))
+                                        .testTag("confirmed_pin_digit_box_$idx"),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
                                         text = char.toString(),
-                                        fontSize = 28.sp,
-                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 24.sp,
+                                        fontWeight = FontWeight.Black,
                                         color = AmberPrimary,
-                                        fontFamily = FontFamily.Monospace
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        textAlign = TextAlign.Center
                                     )
                                 }
                             }
@@ -167,100 +218,37 @@ fun PinDisplayDialog(
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        // Anti-Fake Rule Notice
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF1E293B))
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Shield,
-                                contentDescription = "Anti Fake Rule",
-                                tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                text = "Anti-Fake Guarantee: Share this PIN with the barber ONLY after your haircut is completed.",
-                                fontSize = 11.sp,
-                                color = Color(0xFFCBD5E1),
-                                lineHeight = 15.sp
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Pay at salon reminder
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF0F251E))
-                        .border(1.dp, Color(0xFF047857), RoundedCornerShape(10.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Payments,
-                        contentDescription = "Pay at Salon",
-                        tint = GreenSuccess,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
                         Text(
-                            text = "Model: Pay at Salon (Strictly ₹0 Advance)",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFA7F3D0)
-                        )
-                        Text(
-                            text = "Pay ₹${booking.servicePrice} directly at the counter after grooming.",
+                            text = "Share this 4-digit PIN with your barber ONLY when you sit in the chair to verify arrival.",
                             fontSize = 11.sp,
-                            color = Color(0xFFD1FAE5)
+                            color = Color(0xFFCBD5E1),
+                            textAlign = TextAlign.Center,
+                            lineHeight = 16.sp
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(18.dp))
 
-                // Action Buttons
                 Button(
-                    onClick = {
-                        onDismiss()
-                        onViewBookings()
-                    },
+                    onClick = onViewBookings,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(48.dp)
+                        .height(50.dp)
                         .testTag("view_my_bookings_button"),
-                    colors = ButtonDefaults.buttonColors(containerColor = AmberPrimary),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AmberPrimary,
+                        contentColor = DarkBackground
+                    ),
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Text(
                         text = "View in My Bookings",
-                        color = Color(0xFF1E1402),
                         fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
+                        fontSize = 15.sp,
+                        maxLines = 1,
+                        softWrap = false
                     )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                OutlinedButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(44.dp)
-                        .testTag("dismiss_pin_dialog_button"),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text(text = "Close", color = Color(0xFF94A3B8))
                 }
             }
         }

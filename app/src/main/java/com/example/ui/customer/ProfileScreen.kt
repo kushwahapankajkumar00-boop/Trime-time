@@ -72,7 +72,6 @@ import com.example.model.AppLanguage
 import com.example.model.AppPreferences
 import com.example.model.AppThemeMode
 import com.example.model.UserProfile
-import androidx.compose.material.icons.filled.Fingerprint
 import com.example.ui.components.HelpAndSupportCenterDialog
 import com.example.ui.components.LegalPoliciesViewerDialog
 import com.example.ui.components.LegalPolicyTab
@@ -93,7 +92,6 @@ fun ProfileScreen(
     onBecomePartner: () -> Unit = {},
     onSwitchToPartner: () -> Unit = {},
     onResetSalonRegistration: () -> Unit = {},
-    onOpenQuickAccessSetup: () -> Unit = {},
     onUpdatePersonalProfile: (name: String, phone: String, defaultCity: String) -> Unit = { _, _, _ -> },
     onUpdateAccountIdentity: (name: String, email: String, phone: String, asPartner: Boolean) -> Unit = { _, _, _, _ -> },
     onRequestPhoneOtp: (
@@ -114,6 +112,8 @@ fun ProfileScreen(
     onSubmitFeedback: (rating: Int, category: String, message: String, onDone: (Boolean, String) -> Unit) -> Unit = { _, _, _, onDone ->
         onDone(true, "Saved")
     },
+    isAdmin: Boolean = false,
+    onOpenAdminPanel: () -> Unit = {},
     onLogout: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -272,63 +272,115 @@ fun ProfileScreen(
                         }
                     }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    OutlinedButton(
+                        onClick = { showEditPersonalDialog = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 44.dp)
+                            .testTag("edit_personal_profile_btn"),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.7f))
                     ) {
-                        OutlinedButton(
-                            onClick = { showEditPersonalDialog = true },
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 44.dp)
-                                .testTag("edit_personal_profile_btn"),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.7f))
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Edit Profile",
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isHinglish) "प्रोफ़ाइल बदलें" else "Edit Profile",
+                            color = AmberPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+
+        // Secret Super Admin Access: ONLY visible if phone matches owner number ("+91XXXXXXXXXX") or Firestore isAdmin == true
+        val isSuperAdminUser = isAdmin ||
+            (userProfile?.isAdmin == true) ||
+            userProfile?.phone?.replace(" ", "")?.equals(
+                com.example.data.TrimTimeRepository.OWNER_ADMIN_PHONE.replace(" ", ""),
+                ignoreCase = true
+            ) == true
+        if (isSuperAdminUser) {
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("secret_admin_panel_card"),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF281114)),
+                    border = BorderStroke(1.5.dp, Color(0xFFDC2626))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Edit,
-                                contentDescription = "Edit Profile",
-                                tint = AmberPrimary,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (isHinglish) "प्रोफ़ाइल बदलें" else "Edit Profile",
-                                color = AmberPrimary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color(0xFF7F1D1D)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "👑",
+                                    fontSize = 19.sp
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "SUPER ADMIN PRIVILEGE",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFFFCA5A5),
+                                    letterSpacing = 0.8.sp
+                                )
+                                Text(
+                                    text = "TrimTime Central Management",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "Approve or suspend salons, assign category tags, block spammers & resolve support tickets.",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFFFECACA),
+                                    lineHeight = 15.sp
+                                )
+                            }
                         }
 
-                        OutlinedButton(
-                            onClick = onOpenQuickAccessSetup,
+                        Button(
+                            onClick = onOpenAdminPanel,
                             modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 44.dp)
-                                .testTag("quick_access_setup_btn"),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                            shape = RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.7f))
+                                .fillMaxWidth()
+                                .heightIn(min = 50.dp)
+                                .testTag("open_admin_panel_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFDC2626),
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(10.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Fingerprint,
-                                contentDescription = "Quick Access",
-                                tint = Color(0xFF38BDF8),
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
                             Text(
-                                text = if (userProfile?.hasQuickAccessSetup == true) "Quick Access ✓" else "Set MPIN / Biometric",
-                                color = primaryTextColor,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis
+                                text = "👑 Open Admin Panel",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.sp,
+                                color = Color.White
                             )
                         }
                     }

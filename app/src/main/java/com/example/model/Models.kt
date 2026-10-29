@@ -49,27 +49,26 @@ data class UserProfile(
     val phone: String = "",
     val password: String = "",
     val loginPin: String = "",
-    val quickAccessMpin: String = "",
-    val biometricEnabled: Boolean = false,
-    val isQuickAccessEnabled: Boolean = false,
     val isPhoneVerified: Boolean = false,
-    val role: String = "customer", // "customer" or "partner"
+    val role: String = "customer", // "customer", "partner", or "admin"
+    val isAdmin: Boolean = false,
     val salonId: String? = null,
     val hasRegisteredSalon: Boolean = false,
     val defaultCity: String = "Current Location",
     val cancellationCount: Int = 0,
     val cancellationStrikes: Int = cancellationCount,
     val isSuspended: Boolean = false,
+    val isBlocked: Boolean = false,
     val createdAt: Long = System.currentTimeMillis()
 ) {
     val effectiveCancellationStrikes: Int
         get() = maxOf(cancellationCount, cancellationStrikes)
 
+    val isEffectivelyBlocked: Boolean
+        get() = isBlocked || isSuspended || effectiveCancellationStrikes >= 3
+
     val effectivePassword: String
         get() = password.ifBlank { loginPin }
-
-    val hasQuickAccessSetup: Boolean
-        get() = isQuickAccessEnabled && (quickAccessMpin.length == 4 || biometricEnabled)
 
     fun toMap(): Map<String, Any?> = mapOf(
         "id" to id,
@@ -78,17 +77,16 @@ data class UserProfile(
         "phone" to phone,
         "password" to password.ifBlank { loginPin },
         "loginPin" to loginPin.ifBlank { password },
-        "quickAccessMpin" to quickAccessMpin,
-        "biometricEnabled" to biometricEnabled,
-        "isQuickAccessEnabled" to isQuickAccessEnabled,
         "isPhoneVerified" to isPhoneVerified,
         "role" to role,
+        "isAdmin" to isAdmin,
         "salonId" to salonId,
         "hasRegisteredSalon" to hasRegisteredSalon,
         "defaultCity" to defaultCity,
         "cancellationCount" to effectiveCancellationStrikes,
         "cancellationStrikes" to effectiveCancellationStrikes,
-        "isSuspended" to (isSuspended || effectiveCancellationStrikes >= 3),
+        "isSuspended" to isEffectivelyBlocked,
+        "isBlocked" to isEffectivelyBlocked,
         "createdAt" to createdAt
     )
 }
@@ -137,6 +135,9 @@ data class Salon(
     val landmark: String = "",
     val pincode: String = "",
     val shopCategory: String = "Men's Salon",
+    val adminCategoryTag: String = "Standard", // "Premium", "Standard", or "Rural/Local"
+    val approvalStatus: String = "APPROVED", // "PENDING", "APPROVED", "REJECTED", "SUSPENDED"
+    val isSuspended: Boolean = false,
     val openingTime: String = "9:00 AM",
     val closingTime: String = "9:00 PM",
     val latitude: Double? = null,
@@ -182,6 +183,9 @@ data class Salon(
         "landmark" to landmark,
         "pincode" to pincode,
         "shopCategory" to shopCategory,
+        "adminCategoryTag" to adminCategoryTag,
+        "approvalStatus" to approvalStatus,
+        "isSuspended" to isSuspended,
         "openingTime" to openingTime,
         "closingTime" to closingTime,
         "latitude" to latitude,
@@ -247,21 +251,29 @@ data class FeedbackSubmission(
     val id: String = "",
     val userId: String = "",
     val userName: String = "",
+    val userPhone: String = "",
     val userRole: String = "customer",
     val rating: Int = 5,
     val category: String = "Bug Report",
     val message: String = "",
-    val timestamp: Long = System.currentTimeMillis()
+    val status: String = "OPEN", // "OPEN" or "RESOLVED"
+    val isResolved: Boolean = false,
+    val timestamp: Long = System.currentTimeMillis(),
+    val resolvedAt: Long? = null
 ) {
-    fun toMap(): Map<String, Any> = mapOf(
+    fun toMap(): Map<String, Any?> = mapOf(
         "id" to id,
         "userId" to userId,
         "userName" to userName,
+        "userPhone" to userPhone,
         "userRole" to userRole,
         "rating" to rating,
         "category" to category,
         "message" to message,
-        "timestamp" to timestamp
+        "status" to status,
+        "isResolved" to isResolved,
+        "timestamp" to timestamp,
+        "resolvedAt" to resolvedAt
     )
 }
 

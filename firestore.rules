@@ -45,11 +45,12 @@ service cloud.firestore {
       allow delete: if isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Salons collection: Partner can ONLY update or delete a salon document if their ownerId matches
+    // Salons collection: Partner can update/delete their own salon, or Super Admin can update approval/category/suspension
     match /salons/{salonId} {
       allow read: if true;
       allow create: if request.resource.data.keys().hasAny(['name', 'ownerId']);
-      allow update: if isSalonOwnerMatching();
+      allow update: if isSalonOwnerMatching() ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['approvalStatus', 'isSuspended', 'isOpen', 'currentStatus', 'adminCategoryTag']);
       allow delete: if (isAuthenticated() && request.auth.uid == resource.data.ownerId) ||
         !(salonId in ['salon_blade_comb', 'salon_urban_cuts', 'salon_velvet_shears', 'salon_express_trim']);
     }
@@ -67,13 +68,14 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Feedback collection
+    // Feedback / Support Help Desk collection
     match /feedback/{feedbackId} {
       allow read: if true;
       allow create: if request.resource.data.keys().hasAll(['rating', 'category', 'message']) &&
         request.resource.data.message is string &&
         request.resource.data.message.size() <= 500;
-      allow update, delete: if false;
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'isResolved', 'resolvedAt']);
+      allow delete: if false;
     }
   }
 }
