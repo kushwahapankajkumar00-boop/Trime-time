@@ -303,13 +303,8 @@ fun ProfileScreen(
             }
         }
 
-        // Secret Super Admin Access: ONLY visible if phone matches owner number ("+91XXXXXXXXXX") or Firestore isAdmin == true
-        val isSuperAdminUser = isAdmin ||
-            (userProfile?.isAdmin == true) ||
-            userProfile?.phone?.replace(" ", "")?.equals(
-                com.example.data.TrimTimeRepository.OWNER_ADMIN_PHONE.replace(" ", ""),
-                ignoreCase = true
-            ) == true
+        // Secret Super Admin Access: ONLY visible if the logged-in user's Firestore document explicitly has isAdmin == true
+        val isSuperAdminUser = isAdmin && (userProfile?.isAdmin == true)
         if (isSuperAdminUser) {
             item {
                 Card(

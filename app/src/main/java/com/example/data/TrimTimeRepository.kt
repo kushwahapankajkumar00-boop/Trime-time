@@ -737,11 +737,11 @@ class TrimTimeRepository private constructor(context: Context) {
                 doc.getLong("cancellationStrikes")?.toInt() ?: 0,
                 doc.getLong("cancellationCount")?.toInt() ?: 0
             )
-            val isBlockedFlag = doc.getBoolean("isBlocked") ?: false
-            val isSuspendedFlag = doc.getBoolean("isSuspended") ?: (strikes >= 3 || isBlockedFlag)
+            val isBlockedFlag = doc.getBoolean("isBlocked") == true
+            val isSuspendedFlag = (doc.getBoolean("isSuspended") ?: (strikes >= 3)) || isBlockedFlag
             val phoneVal = doc.getString("phone") ?: ""
             val emailVal = doc.getString("email") ?: ""
-            val isAdminFlag = (doc.getBoolean("isAdmin") ?: false) || isOwnerIdentity(phoneVal, emailVal)
+            val isAdminFlag = doc.getBoolean("isAdmin") == true
 
             UserProfile(
                 id = uid,
@@ -1375,9 +1375,8 @@ class TrimTimeRepository private constructor(context: Context) {
                             )
                             val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
 
-                            val existingIsBlocked = existingDoc.getBoolean("isBlocked") ?: false
-                            val existingIsAdmin = (existingDoc.getBoolean("isAdmin") ?: false) ||
-                                isOwnerIdentity(resolvedPhone, trimmedEmail)
+                            val existingIsBlocked = existingDoc.getBoolean("isBlocked") == true
+                            val existingIsAdmin = existingDoc.getBoolean("isAdmin") == true
 
                             // Every user MUST default to Customer Mode upon Login/Signup
                             val userProfile = UserProfile(
@@ -1418,7 +1417,6 @@ class TrimTimeRepository private constructor(context: Context) {
                             }
                             onSuccess()
                         } else {
-                            val isNewUserAdmin = isOwnerIdentity(formattedPhone, trimmedEmail)
                             val newProfile = UserProfile(
                                 id = uid,
                                 name = trimmedName,
@@ -1435,7 +1433,7 @@ class TrimTimeRepository private constructor(context: Context) {
                                 cancellationStrikes = 0,
                                 isSuspended = false,
                                 isBlocked = false,
-                                isAdmin = isNewUserAdmin,
+                                isAdmin = false,
                                 createdAt = System.currentTimeMillis()
                             )
 
@@ -1677,9 +1675,9 @@ class TrimTimeRepository private constructor(context: Context) {
             doc.getLong("cancellationStrikes")?.toInt() ?: 0,
             doc.getLong("cancellationCount")?.toInt() ?: 0
         )
-        val existingIsBlocked = doc.getBoolean("isBlocked") ?: false
+        val existingIsBlocked = doc.getBoolean("isBlocked") == true
         val existingIsSuspended = (doc.getBoolean("isSuspended") ?: (existingStrikes >= 3)) || existingIsBlocked
-        val existingIsAdmin = (doc.getBoolean("isAdmin") ?: false) || isOwnerIdentity(existingPhone, existingEmail)
+        val existingIsAdmin = doc.getBoolean("isAdmin") == true
         val existingCreatedAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
 
         // Every user MUST default to Customer Mode upon Login
@@ -1792,9 +1790,8 @@ class TrimTimeRepository private constructor(context: Context) {
                     val existingSalonId = verifiedSalon?.id
                     val existingHasSalon = verifiedSalon != null
                     val existingCity = existingDoc.getString("defaultCity")?.takeIf { it.isNotBlank() } ?: _appPreferences.value.defaultCity
-                    val existingIsBlocked = existingDoc.getBoolean("isBlocked") ?: false
-                    val existingIsAdmin = (existingDoc.getBoolean("isAdmin") ?: false) ||
-                        isOwnerIdentity(existingPhone, existingEmail)
+                    val existingIsBlocked = existingDoc.getBoolean("isBlocked") == true
+                    val existingIsAdmin = existingDoc.getBoolean("isAdmin") == true
                     val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
 
                     val userProfile = UserProfile(
@@ -2566,9 +2563,8 @@ class TrimTimeRepository private constructor(context: Context) {
                     val existingEmailVal = doc.getString("email") ?: user?.email ?: ""
                     val existingLoginPinVal = doc.getString("loginPin") ?: ""
                     val existingPhoneVerifiedVal = doc.getBoolean("isPhoneVerified") ?: existingPhoneVal.isNotBlank()
-                    val existingIsBlockedVal = doc.getBoolean("isBlocked") ?: false
-                    val existingIsAdminVal = (doc.getBoolean("isAdmin") ?: false) ||
-                        isOwnerIdentity(existingPhoneVal, existingEmailVal)
+                    val existingIsBlockedVal = doc.getBoolean("isBlocked") == true
+                    val existingIsAdminVal = doc.getBoolean("isAdmin") == true
 
                     // Every user MUST default to Customer Mode upon Login / Session Restore
                     val profile = UserProfile(
@@ -3396,57 +3392,19 @@ class TrimTimeRepository private constructor(context: Context) {
     // ==========================================
 
     /**
-     * Checks whether the phone or email matches the Super Admin owner identity,
-     * or if `profile.isAdmin == true` in Firestore.
+     * Strict Firestore Admin Check:
+     * Returns true ONLY if the logged-in user's Firestore document (`users/{uid}`)
+     * explicitly contains the boolean field `isAdmin == true`.
+     * Defaults to false if missing, null, or false.
      */
-    fun isOwnerIdentity(phone: String?, email: String?): Boolean {
-        val rawPhone = phone?.trim().orEmpty()
-        val cleanDigits = SecurityValidator.extractTenDigitMobile(rawPhone)
-        val ownerDigits = SecurityValidator.extractTenDigitMobile(OWNER_ADMIN_PHONE)
-        val phoneMatchesOwner = rawPhone.equals(OWNER_ADMIN_PHONE, ignoreCase = true) ||
-            rawPhone.replace(" ", "").equals(OWNER_ADMIN_PHONE.replace(" ", ""), ignoreCase = true) ||
-            (ownerDigits.length == 10 && cleanDigits == ownerDigits)
-        val emailMatchesOwner = email?.trim()?.equals(OWNER_ADMIN_EMAIL, ignoreCase = true) == true
-        return phoneMatchesOwner || emailMatchesOwner
-    }
-
     fun isUserSuperAdmin(profile: UserProfile? = _currentUserProfile.value): Boolean {
-        if (profile == null) return false
-        return profile.isAdmin || isOwnerIdentity(profile.phone, profile.email)
-    }
-
-    /**
-     * Secret Owner Elevation: Sets `isAdmin = true` on the current user's Firestore document.
-     */
-    fun enableSuperAdminForCurrentUser(
-        onSuccess: () -> Unit = {},
-        onError: (String) -> Unit = {}
-    ) {
-        val current = _currentUserProfile.value ?: run {
-            onError("No active user profile.")
-            return
-        }
-        val updated = current.copy(isAdmin = true)
-        _currentUserProfile.value = updated
-        _allUsers.value = _allUsers.value.map { if (it.id == current.id) updated else it }
-        val db = firestore
-        if (db == null) {
-            onSuccess()
-            return
-        }
-        db.collection("users").document(current.id).set(
-            mapOf("isAdmin" to true),
-            com.google.firebase.firestore.SetOptions.merge()
-        ).addOnSuccessListener {
-            onSuccess()
-        }.addOnFailureListener { err ->
-            onError(err.localizedMessage ?: "Failed to update admin status")
-        }
+        return profile?.isAdmin == true
     }
 
     /**
      * Tab 1: Updates a Salon's verification status ("APPROVED", "REJECTED", "PENDING", or "SUSPENDED")
      * and suspension state in Firestore `salons/{salonId}`.
+     * Strictly requires `currentUserProfile.isAdmin == true`.
      */
     fun updateSalonApproval(
         salonId: String,
@@ -3455,6 +3413,11 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
+        val adminProfile = _currentUserProfile.value
+        if (adminProfile == null || adminProfile.isAdmin != true) {
+            onError("Access Denied: Only Super Admins can modify salon approval status.")
+            return
+        }
         val targetId = salonId.trim()
         if (targetId.isBlank()) return
         val normalizedStatus = approvalStatus.trim().uppercase()
@@ -3480,7 +3443,8 @@ class TrimTimeRepository private constructor(context: Context) {
 
         val updates = mutableMapOf<String, Any>(
             "approvalStatus" to normalizedStatus,
-            "isSuspended" to isSuspended
+            "isSuspended" to isSuspended,
+            "adminActorId" to adminProfile.id
         )
         if (!effectiveOpen) {
             updates["isOpen"] = false
@@ -3501,6 +3465,7 @@ class TrimTimeRepository private constructor(context: Context) {
 
     /**
      * Tab 1: Assigns a category tier tag ("Premium", "Standard", or "Rural/Local") to a Salon in Firestore.
+     * Strictly requires `currentUserProfile.isAdmin == true`.
      */
     fun updateSalonCategory(
         salonId: String,
@@ -3508,6 +3473,11 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
+        val adminProfile = _currentUserProfile.value
+        if (adminProfile == null || adminProfile.isAdmin != true) {
+            onError("Access Denied: Only Super Admins can assign salon category tags.")
+            return
+        }
         val targetId = salonId.trim()
         val cleanTag = categoryTag.trim().ifBlank { "Standard" }
         if (targetId.isBlank()) return
@@ -3528,7 +3498,10 @@ class TrimTimeRepository private constructor(context: Context) {
 
         db.collection("salons").document(targetId)
             .set(
-                mapOf("adminCategoryTag" to cleanTag),
+                mapOf(
+                    "adminCategoryTag" to cleanTag,
+                    "adminActorId" to adminProfile.id
+                ),
                 com.google.firebase.firestore.SetOptions.merge()
             )
             .addOnSuccessListener {
@@ -3543,8 +3516,7 @@ class TrimTimeRepository private constructor(context: Context) {
 
     /**
      * Tab 2: Blocks or Unblocks a User in Firestore `users/{userId}`.
-     * When `isBlocked == true`, the user cannot make any new bookings.
-     * When `isBlocked == false`, also clears `isSuspended` and resets `cancellationStrikes` if they were suspended.
+     * Strictly requires `currentUserProfile.isAdmin == true`.
      */
     fun updateUserBlockStatus(
         userId: String,
@@ -3553,6 +3525,11 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
+        val adminProfile = _currentUserProfile.value
+        if (adminProfile == null || adminProfile.isAdmin != true) {
+            onError("Access Denied: Only Super Admins can block or unblock users.")
+            return
+        }
         val targetUid = userId.trim()
         if (targetUid.isBlank()) return
 
@@ -3590,7 +3567,8 @@ class TrimTimeRepository private constructor(context: Context) {
 
         val updates = mutableMapOf<String, Any>(
             "isBlocked" to isBlocked,
-            "isSuspended" to isBlocked
+            "isSuspended" to isBlocked,
+            "adminActorId" to adminProfile.id
         )
         if (!isBlocked && resetStrikesOnUnblock) {
             updates["cancellationStrikes"] = 0
@@ -3611,6 +3589,7 @@ class TrimTimeRepository private constructor(context: Context) {
 
     /**
      * Tab 3: Marks a Support Help Desk / Feedback ticket as Resolved (or reopens it) in Firestore `feedback/{ticketId}`.
+     * Strictly requires `currentUserProfile.isAdmin == true`.
      */
     fun resolveSupportTicket(
         ticketId: String,
@@ -3618,6 +3597,11 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
+        val adminProfile = _currentUserProfile.value
+        if (adminProfile == null || adminProfile.isAdmin != true) {
+            onError("Access Denied: Only Super Admins can resolve support tickets.")
+            return
+        }
         val targetId = ticketId.trim()
         if (targetId.isBlank()) return
         val newStatus = if (isResolved) "RESOLVED" else "OPEN"
@@ -3644,7 +3628,8 @@ class TrimTimeRepository private constructor(context: Context) {
         val updates = mutableMapOf<String, Any?>(
             "status" to newStatus,
             "isResolved" to isResolved,
-            "resolvedAt" to resolvedTimestamp
+            "resolvedAt" to resolvedTimestamp,
+            "adminActorId" to adminProfile.id
         )
 
         db.collection("feedback").document(targetId)
@@ -3660,9 +3645,6 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     companion object {
-        // Super Admin Owner Phone Placeholder & Owner Email
-        const val OWNER_ADMIN_PHONE = "+91XXXXXXXXXX"
-        const val OWNER_ADMIN_EMAIL = "kushwahapankajkumar00@gmail.com"
         @Volatile
         private var INSTANCE: TrimTimeRepository? = null
 

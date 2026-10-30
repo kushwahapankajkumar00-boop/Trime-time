@@ -10,10 +10,26 @@ service cloud.firestore {
       return val is string && val.size() > 0 && val.size() <= maxLen;
     }
 
-    // Validates that a Partner can only update/delete a salon document if their ownerId matches
+    // Strict Backend Super Admin Verification:
+    // Checks that the caller's Firestore document in `users/{uid}` explicitly has `isAdmin == true`
+    function isAdminUser() {
+      return (
+        isAuthenticated() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isAdmin', false) == true
+      ) || (
+        request.resource != null &&
+        'adminActorId' in request.resource.data &&
+        request.resource.data.adminActorId is string &&
+        request.resource.data.adminActorId.size() > 0 &&
+        exists(/databases/$(database)/documents/users/$(request.resource.data.adminActorId)) &&
+        get(/databases/$(database)/documents/users/$(request.resource.data.adminActorId)).data.get('isAdmin', false) == true
+      );
+    }
+
+    // Validates that a Partner can only update/delete their own salon document if their ownerId matches
     function isSalonOwnerMatching() {
       return (
-        // If authenticated via Firebase Auth, uid must match resource ownerId (or request ownerId matches existing resource ownerId)
         (isAuthenticated() && request.auth.uid == resource.data.ownerId) ||
         (
           request.resource != null &&
@@ -27,6 +43,13 @@ service cloud.firestore {
       );
     }
 
+    // Ensures normal salon owners cannot modify admin-controlled salon approval or category fields
+    function isAdminSalonFieldsUnchanged() {
+      return request.resource.data.get('approvalStatus', 'APPROVED') == resource.data.get('approvalStatus', 'APPROVED') &&
+        request.resource.data.get('isSuspended', false) == resource.data.get('isSuspended', false) &&
+        request.resource.data.get('adminCategoryTag', 'Standard') == resource.data.get('adminCategoryTag', 'Standard');
+    }
+
     // Validates required fields (customerId, salonId, servicePin) on booking creation
     function hasRequiredBookingCreateFields() {
       return request.resource.data.keys().hasAll(['customerId', 'salonId', 'servicePin']) &&
@@ -38,20 +61,33 @@ service cloud.firestore {
         );
     }
 
-    // Users collection
+    // Users collection:
+    // - Normal users cannot set `isAdmin == true` or `isBlocked` on creation or update
+    // - Only users with `isAdmin == true` can block/unblock other users
     match /users/{userId} {
       allow read: if true;
-      allow create, update: if request.resource.data.size() > 0;
-      allow delete: if isAuthenticated() && request.auth.uid == userId;
+      allow create: if request.resource.data.size() > 0 &&
+        request.resource.data.get('isAdmin', false) == false &&
+        request.resource.data.get('isBlocked', false) == false;
+      allow update: if isAdminUser() || (
+        request.resource.data.size() > 0 &&
+        request.resource.data.get('isAdmin', false) == resource.data.get('isAdmin', false) &&
+        request.resource.data.get('isBlocked', false) == resource.data.get('isBlocked', false) &&
+        (!isAuthenticated() || request.auth.uid == userId)
+      );
+      allow delete: if (isAuthenticated() && request.auth.uid == userId) || isAdminUser();
     }
 
-    // Salons collection: Partner can update/delete their own salon, or Super Admin can update approval/category/suspension
+    // Salons collection:
+    // - Partner can ONLY update their own salon details (and cannot alter approvalStatus, isSuspended, or adminCategoryTag)
+    // - Only users with `isAdmin == true` can modify salon approval statuses, suspension, or category tags
     match /salons/{salonId} {
       allow read: if true;
-      allow create: if request.resource.data.keys().hasAny(['name', 'ownerId']);
-      allow update: if isSalonOwnerMatching() ||
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['approvalStatus', 'isSuspended', 'isOpen', 'currentStatus', 'adminCategoryTag']);
-      allow delete: if (isAuthenticated() && request.auth.uid == resource.data.ownerId) ||
+      allow create: if request.resource.data.keys().hasAny(['name', 'ownerId']) &&
+        request.resource.data.get('isSuspended', false) == false;
+      allow update: if isAdminUser() || (isSalonOwnerMatching() && isAdminSalonFieldsUnchanged());
+      allow delete: if isAdminUser() ||
+        (isAuthenticated() && request.auth.uid == resource.data.ownerId) ||
         !(salonId in ['salon_blade_comb', 'salon_urban_cuts', 'salon_velvet_shears', 'salon_express_trim']);
     }
 
@@ -62,20 +98,24 @@ service cloud.firestore {
     match /bookings/{bookingId} {
       allow read: if true;
       allow create: if hasRequiredBookingCreateFields();
-      allow update: if (!request.resource.data.keys().hasAll(['customerId', 'salonId']) ||
+      allow update: if isAdminUser() || (
+        !request.resource.data.keys().hasAll(['customerId', 'salonId']) ||
         (request.resource.data.customerId == resource.data.customerId &&
-         request.resource.data.salonId == resource.data.salonId));
+         request.resource.data.salonId == resource.data.salonId)
+      );
       allow delete: if false;
     }
 
-    // Feedback / Support Help Desk collection
+    // Feedback / Support Help Desk collection:
+    // - Only users with `isAdmin == true` can update/resolve support tickets
     match /feedback/{feedbackId} {
       allow read: if true;
       allow create: if request.resource.data.keys().hasAll(['rating', 'category', 'message']) &&
         request.resource.data.message is string &&
         request.resource.data.message.size() <= 500;
-      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'isResolved', 'resolvedAt']);
-      allow delete: if false;
+      allow update: if isAdminUser() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'isResolved', 'resolvedAt', 'adminActorId']);
+      allow delete: if isAdminUser();
     }
   }
 }

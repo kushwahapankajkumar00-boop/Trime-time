@@ -79,14 +79,13 @@ data class UserProfile(
         "loginPin" to loginPin.ifBlank { password },
         "isPhoneVerified" to isPhoneVerified,
         "role" to role,
-        "isAdmin" to isAdmin,
         "salonId" to salonId,
         "hasRegisteredSalon" to hasRegisteredSalon,
         "defaultCity" to defaultCity,
         "cancellationCount" to effectiveCancellationStrikes,
         "cancellationStrikes" to effectiveCancellationStrikes,
         "isSuspended" to isEffectivelyBlocked,
-        "isBlocked" to isEffectivelyBlocked,
+        "isBlocked" to isBlocked,
         "createdAt" to createdAt
     )
 }

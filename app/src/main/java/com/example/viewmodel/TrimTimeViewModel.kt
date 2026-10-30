@@ -71,7 +71,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val showAdminDashboard: StateFlow<Boolean> = _showAdminDashboard.asStateFlow()
 
     val isSuperAdmin: StateFlow<Boolean> = currentUserProfile.combine(allUsers) { profile, _ ->
-        repository.isUserSuperAdmin(profile)
+        profile?.isAdmin == true
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     // Whether the currently logged-in user already owns a registered salon in Firestore
@@ -1159,26 +1159,16 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     // ==========================================
 
     fun openAdminDashboard() {
-        if (isSuperAdmin.value || repository.isUserSuperAdmin()) {
+        if (currentUserProfile.value?.isAdmin == true) {
             _showAdminDashboard.value = true
         } else {
+            _showAdminDashboard.value = false
             _userMessage.value = "Access Denied: Super Admin privileges required."
         }
     }
 
     fun closeAdminDashboard() {
         _showAdminDashboard.value = false
-    }
-
-    fun enableSuperAdminAccess() {
-        repository.enableSuperAdminForCurrentUser(
-            onSuccess = {
-                _userMessage.value = "👑 Super Admin privileges activated for your account!"
-            },
-            onError = { err ->
-                _userMessage.value = err
-            }
-        )
     }
 
     fun updateSalonApproval(
