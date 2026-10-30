@@ -97,15 +97,6 @@ fun PartnerOnboardingScreen(
     userProfile: UserProfile?,
     isLoading: Boolean,
     onCancel: () -> Unit,
-    onRequestPhoneOtp: (
-        rawPhone: String,
-        onOtpGenerated: (cleanTenDigits: String, otpCode: String) -> Unit,
-        onError: (String) -> Unit
-    ) -> Unit = { phone, onOtp, _ ->
-        val clean = phone.filter { it.isDigit() }.takeLast(10)
-        onOtp(clean, (1000..9999).random().toString())
-    },
-    onGenerateNewOtpCode: () -> String = { (1000..9999).random().toString() },
     onSubmitRegistration: (
         salonName: String,
         ownerName: String,
@@ -144,17 +135,7 @@ fun PartnerOnboardingScreen(
     var businessPhone by remember(initialProfileTenDigits) {
         mutableStateOf(initialProfileTenDigits)
     }
-    var verifiedBusinessPhone by remember(initialProfileTenDigits, userProfile?.isPhoneVerified) {
-        mutableStateOf(if (userProfile?.isPhoneVerified == true && initialProfileTenDigits.length == 10) initialProfileTenDigits else "")
-    }
-    val isBusinessPhoneVerified = businessPhone.length == 10 && businessPhone == verifiedBusinessPhone
-
-    // 2-Step OTP states for Partner Registration
-    var showTopSmsBanner by remember { mutableStateOf(false) }
-    var activeOtpPhone by remember { mutableStateOf("") }
-    var activeOtpCode by remember { mutableStateOf("") }
-    var showPartnerOtpModal by remember { mutableStateOf(false) }
-    var autoSubmitAfterOtp by remember { mutableStateOf(false) }
+    val isBusinessPhoneVerified = businessPhone.length == 10
 
     // 2. Full Shop Address, City/Area, Pincode & Landmark
     var shopAddress by remember { mutableStateOf("") }
@@ -309,15 +290,6 @@ fun PartnerOnboardingScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            if (showTopSmsBanner && activeOtpCode.length == 4) {
-                com.example.ui.components.TopSmsOtpBanner(
-                    visible = true,
-                    phoneTenDigits = activeOtpPhone,
-                    otpCode = activeOtpCode,
-                    onDismiss = { showTopSmsBanner = false }
-                )
-            }
-
             // Banner Card
             run {
                 Card(
@@ -460,49 +432,6 @@ fun PartnerOnboardingScreen(
                                 .fillMaxWidth()
                                 .testTag("partner_reg_phone_input")
                         )
-
-                        if (!isBusinessPhoneVerified) {
-                            OutlinedButton(
-                                onClick = {
-                                    validationError = null
-                                    autoSubmitAfterOtp = false
-                                    onRequestPhoneOtp(
-                                        businessPhone,
-                                        { cleanTen, otp ->
-                                            activeOtpPhone = cleanTen
-                                            activeOtpCode = otp
-                                            showTopSmsBanner = true
-                                            com.example.ui.components.triggerAndroidSmsNotification(context, cleanTen, otp)
-                                            showPartnerOtpModal = true
-                                        },
-                                        { err ->
-                                            validationError = err
-                                        }
-                                    )
-                                },
-                                enabled = businessPhone.length == 10,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(42.dp)
-                                    .testTag("partner_reg_send_otp_btn"),
-                                shape = RoundedCornerShape(10.dp),
-                                border = BorderStroke(1.dp, AmberPrimary)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.VerifiedUser,
-                                    contentDescription = null,
-                                    tint = AmberPrimary,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Send Verification OTP for +91 $businessPhone",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = AmberPrimary
-                                )
-                            }
-                        }
                     }
                 }
             }
@@ -1310,23 +1239,6 @@ fun PartnerOnboardingScreen(
                             !termsAccepted -> {
                                 validationError = "Please accept the TrimTime Partner Terms & Conditions."
                             }
-                            !isBusinessPhoneVerified -> {
-                                validationError = null
-                                autoSubmitAfterOtp = true
-                                onRequestPhoneOtp(
-                                    phoneDigits,
-                                    { cleanTen, otp ->
-                                        activeOtpPhone = cleanTen
-                                        activeOtpCode = otp
-                                        showTopSmsBanner = true
-                                        com.example.ui.components.triggerAndroidSmsNotification(context, cleanTen, otp)
-                                        showPartnerOtpModal = true
-                                    },
-                                    { err ->
-                                        validationError = err
-                                    }
-                                )
-                            }
                             else -> {
                                 validationError = null
                                 onSubmitRegistration(
@@ -1380,7 +1292,7 @@ fun PartnerOnboardingScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isBusinessPhoneVerified) "Submit & Register Salon" else "Verify OTP & Register Salon",
+                            text = "Submit & Register Salon",
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 14.sp
                         )
@@ -1390,51 +1302,6 @@ fun PartnerOnboardingScreen(
                 Spacer(modifier = Modifier.height(20.dp))
             }
         }
-    }
-
-    if (showPartnerOtpModal && activeOtpCode.length == 4) {
-        com.example.ui.components.VerifyMobileOtpDialog(
-            phoneTenDigits = activeOtpPhone,
-            expectedOtp = activeOtpCode,
-            title = "Verify Business Mobile Number",
-            subtitle = "Enter the 4-digit OTP sent to +91 $activeOtpPhone to verify your salon's contact number.",
-            requireNewLoginPin = false,
-            onResendOtp = {
-                val refreshed = onGenerateNewOtpCode()
-                activeOtpCode = refreshed
-                showTopSmsBanner = true
-                com.example.ui.components.triggerAndroidSmsNotification(context, activeOtpPhone, refreshed)
-            },
-            onVerified = { _ ->
-                showPartnerOtpModal = false
-                showTopSmsBanner = false
-                verifiedBusinessPhone = activeOtpPhone
-                businessPhone = activeOtpPhone
-                if (autoSubmitAfterOtp) {
-                    autoSubmitAfterOtp = false
-                    onSubmitRegistration(
-                        salonName.trim(),
-                        ownerName.trim(),
-                        activeOtpPhone,
-                        shopAddress.trim(),
-                        cityArea.trim(),
-                        pincode.filter { it.isDigit() },
-                        landmark.trim(),
-                        selectedCategory,
-                        availableChairs,
-                        openingTime.trim(),
-                        closingTime.trim(),
-                        initialServices.toList(),
-                        latitude,
-                        longitude
-                    )
-                }
-            },
-            onDismiss = {
-                showPartnerOtpModal = false
-                autoSubmitAfterOtp = false
-            }
-        )
     }
 }
 

@@ -93,16 +93,6 @@ fun ProfileScreen(
     onSwitchToPartner: () -> Unit = {},
     onResetSalonRegistration: () -> Unit = {},
     onUpdatePersonalProfile: (name: String, phone: String, defaultCity: String) -> Unit = { _, _, _ -> },
-    onUpdateAccountIdentity: (name: String, email: String, phone: String, asPartner: Boolean) -> Unit = { _, _, _, _ -> },
-    onRequestPhoneOtp: (
-        rawPhone: String,
-        onOtpGenerated: (cleanTenDigits: String, otpCode: String) -> Unit,
-        onError: (String) -> Unit
-    ) -> Unit = { phone, onOtp, _ ->
-        val clean = phone.filter { it.isDigit() }.takeLast(10)
-        onOtp(clean, (1000..9999).random().toString())
-    },
-    onGenerateNewOtpCode: () -> String = { (1000..9999).random().toString() },
     onThemeModeChange: (AppThemeMode) -> Unit = {},
     onLanguageChange: (AppLanguage) -> Unit = {},
     onNotificationPreferencesChange: (bookingAlerts: Boolean, queueReminders: Boolean, offersDiscounts: Boolean) -> Unit = { _, _, _ -> },
@@ -123,13 +113,6 @@ fun ProfileScreen(
     var showFeedbackDialog by remember { mutableStateOf(false) }
     var activeLegalTab by remember { mutableStateOf<LegalPolicyTab?>(null) }
 
-    // 2-Step Phone OTP state for Profile Phone Verification / Edit (Shown only during active verification)
-    var showTopSmsBanner by remember { mutableStateOf(false) }
-    var activeOtpPhone by remember { mutableStateOf("") }
-    var activeOtpCode by remember { mutableStateOf("") }
-    var showPhoneOtpModal by remember { mutableStateOf(false) }
-    var pendingProfileSave by remember { mutableStateOf<Triple<String, String, String>?>(null) }
-
     val isHinglish = appPreferences.language == AppLanguage.HINDI_HINGLISH
     val bgColor = MaterialTheme.colorScheme.background
     val cardColor = MaterialTheme.colorScheme.surfaceVariant
@@ -144,16 +127,6 @@ fun ProfileScreen(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        if (showTopSmsBanner && showPhoneOtpModal && activeOtpCode.length == 4) {
-            item {
-                com.example.ui.components.TopSmsOtpBanner(
-                    visible = true,
-                    phoneTenDigits = activeOtpPhone,
-                    otpCode = activeOtpCode,
-                    onDismiss = { showTopSmsBanner = false }
-                )
-            }
-        }
 
         // 1. User Account Info Card
         item {
@@ -299,13 +272,35 @@ fun ProfileScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
+                    val user = userProfile
+                    if (user?.isAdmin == true) {
+                        Button(
+                            onClick = onOpenAdminPanel,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .testTag("open_admin_panel_top_button"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color.Red,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text(
+                                text = "👑 Open Admin Panel",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 14.sp,
+                                color = Color.White
+                            )
+                        }
+                    }
                 }
             }
         }
 
         // Secret Super Admin Access: ONLY visible if the logged-in user's Firestore document explicitly has isAdmin == true
-        val isSuperAdminUser = isAdmin && (userProfile?.isAdmin == true)
-        if (isSuperAdminUser) {
+        val user = userProfile
+        if (user?.isAdmin == true) {
             item {
                 Card(
                     modifier = Modifier
@@ -313,7 +308,7 @@ fun ProfileScreen(
                         .testTag("secret_admin_panel_card"),
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF281114)),
-                    border = BorderStroke(1.5.dp, Color(0xFFDC2626))
+                    border = BorderStroke(1.5.dp, Color.Red)
                 ) {
                     Column(
                         modifier = Modifier
@@ -366,7 +361,7 @@ fun ProfileScreen(
                                 .heightIn(min = 50.dp)
                                 .testTag("open_admin_panel_button"),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFDC2626),
+                                containerColor = Color.Red,
                                 contentColor = Color.White
                             ),
                             shape = RoundedCornerShape(10.dp)
@@ -843,7 +838,7 @@ fun ProfileScreen(
         }
     }
 
-    // Dialog 1: Edit Personal Profile (Name, Phone Number, Default City/Location) with 2-Step Phone OTP
+    // Dialog 1: Edit Personal Profile (Name, Phone Number, Default City/Location)
     if (showEditPersonalDialog) {
         val rawDigits = userProfile?.phone?.filter { it.isDigit() }.orEmpty()
         val initialPhone = if (rawDigits.length > 10 && rawDigits.startsWith("91")) {
@@ -857,57 +852,8 @@ fun ProfileScreen(
             initialCity = userProfile?.defaultCity?.ifBlank { appPreferences.defaultCity } ?: appPreferences.defaultCity,
             onDismiss = { showEditPersonalDialog = false },
             onSave = { updatedName, updatedPhone, updatedCity ->
-                val cleanNewDigits = updatedPhone.filter { it.isDigit() }.takeLast(10)
-                val phoneChanged = cleanNewDigits != initialPhone || userProfile?.isPhoneVerified != true
-                if (phoneChanged) {
-                    onRequestPhoneOtp(
-                        cleanNewDigits,
-                        { verifiedDigits, otp ->
-                            showEditPersonalDialog = false
-                            pendingProfileSave = Triple(updatedName, verifiedDigits, updatedCity)
-                            activeOtpPhone = verifiedDigits
-                            activeOtpCode = otp
-                            showTopSmsBanner = true
-                            com.example.ui.components.triggerAndroidSmsNotification(context, verifiedDigits, otp)
-                            showPhoneOtpModal = true
-                        },
-                        { err ->
-                            android.widget.Toast.makeText(context, err, android.widget.Toast.LENGTH_LONG).show()
-                        }
-                    )
-                } else {
-                    showEditPersonalDialog = false
-                    onUpdatePersonalProfile(updatedName, updatedPhone, updatedCity)
-                }
-            }
-        )
-    }
-
-    if (showPhoneOtpModal && activeOtpCode.length == 4) {
-        com.example.ui.components.VerifyMobileOtpDialog(
-            phoneTenDigits = activeOtpPhone,
-            expectedOtp = activeOtpCode,
-            title = "Verify Updated Mobile Number",
-            subtitle = "Enter the 4-digit OTP sent to +91 $activeOtpPhone to verify and save your updated mobile number.",
-            requireNewLoginPin = false,
-            onResendOtp = {
-                val refreshed = onGenerateNewOtpCode()
-                activeOtpCode = refreshed
-                showTopSmsBanner = true
-                com.example.ui.components.triggerAndroidSmsNotification(context, activeOtpPhone, refreshed)
-            },
-            onVerified = { _ ->
-                showPhoneOtpModal = false
-                showTopSmsBanner = false
-                activeOtpCode = ""
-                pendingProfileSave?.let { (uName, uPhone, uCity) ->
-                    onUpdatePersonalProfile(uName, uPhone, uCity)
-                }
-                pendingProfileSave = null
-            },
-            onDismiss = {
-                showPhoneOtpModal = false
-                showTopSmsBanner = false
+                showEditPersonalDialog = false
+                onUpdatePersonalProfile(updatedName, updatedPhone, updatedCity)
             }
         )
     }

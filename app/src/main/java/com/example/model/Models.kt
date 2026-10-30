@@ -47,8 +47,6 @@ data class UserProfile(
     val name: String = "",
     val email: String = "",
     val phone: String = "",
-    val password: String = "",
-    val loginPin: String = "",
     val isPhoneVerified: Boolean = false,
     val role: String = "customer", // "customer", "partner", or "admin"
     val isAdmin: Boolean = false,
@@ -67,27 +65,25 @@ data class UserProfile(
     val isEffectivelyBlocked: Boolean
         get() = isBlocked || isSuspended || effectiveCancellationStrikes >= 3
 
-    val effectivePassword: String
-        get() = password.ifBlank { loginPin }
-
-    fun toMap(): Map<String, Any?> = mapOf(
-        "id" to id,
-        "name" to name,
-        "email" to email,
-        "phone" to phone,
-        "password" to password.ifBlank { loginPin },
-        "loginPin" to loginPin.ifBlank { password },
-        "isPhoneVerified" to isPhoneVerified,
-        "role" to role,
-        "salonId" to salonId,
-        "hasRegisteredSalon" to hasRegisteredSalon,
-        "defaultCity" to defaultCity,
-        "cancellationCount" to effectiveCancellationStrikes,
-        "cancellationStrikes" to effectiveCancellationStrikes,
-        "isSuspended" to isEffectivelyBlocked,
-        "isBlocked" to isBlocked,
-        "createdAt" to createdAt
-    )
+    fun toMap(): Map<String, Any?> = buildMap {
+        put("id", id)
+        put("name", name)
+        put("email", email)
+        put("phone", phone)
+        put("isPhoneVerified", isPhoneVerified)
+        put("role", role)
+        if (isAdmin) {
+            put("isAdmin", true)
+        }
+        put("salonId", salonId)
+        put("hasRegisteredSalon", hasRegisteredSalon)
+        put("defaultCity", defaultCity)
+        put("cancellationCount", effectiveCancellationStrikes)
+        put("cancellationStrikes", effectiveCancellationStrikes)
+        put("isSuspended", isEffectivelyBlocked)
+        put("isBlocked", isBlocked)
+        put("createdAt", createdAt)
+    }
 }
 
 data class SalonService(

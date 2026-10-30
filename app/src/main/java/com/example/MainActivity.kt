@@ -112,7 +112,6 @@ fun TrimTimeApp(
     val authMode by viewModel.authMode.collectAsState()
     val isAuthLoading by viewModel.isLoading.collectAsState()
     val authError by viewModel.authError.collectAsState()
-    val showSha1FallbackDialog by viewModel.showSha1FallbackDialog.collectAsState()
 
     // Anti-Spam & Booking Rules State
     val hasActivePendingBooking by viewModel.hasActivePendingBooking.collectAsState()
@@ -185,64 +184,14 @@ fun TrimTimeApp(
                 AuthFullScreen(
                     isLoading = isAuthLoading,
                     errorMessage = authError,
-                    showSha1FallbackDialog = showSha1FallbackDialog,
-                    onDismissSha1FallbackDialog = {
-                        viewModel.dismissSha1FallbackDialog()
-                    },
-                    onLoginExistingUser = { identifier, loginPin, onNotFound ->
-                        viewModel.loginExistingUser(
-                            identifier = identifier,
-                            loginPin = loginPin,
-                            onAccountNotFound = onNotFound
-                        )
-                    },
-                    onSignInWithRealIdentity = { name, email, phone, asPartner, loginPin, isPhoneVerified ->
-                        viewModel.signInWithRealIdentity(
-                            name = name,
-                            email = email,
-                            phone = phone,
-                            asPartner = asPartner,
-                            loginPin = loginPin,
-                            isPhoneVerified = isPhoneVerified
-                        )
-                    },
-                    onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
-                        viewModel.requestPhoneVerificationOtp(
-                            rawPhone = rawPhone,
-                            excludeUserId = null,
-                            onOtpGenerated = onOtpGenerated,
-                            onError = onError
-                        )
-                    },
-                    onRequestForgotPinOtp = { rawIdentifier, onOtpGenerated, onError ->
-                        viewModel.requestForgotPinOtp(
-                            rawIdentifier = rawIdentifier,
-                            onOtpGenerated = onOtpGenerated,
-                            onError = onError
-                        )
-                    },
-                    onResetLoginPin = { rawIdentifier, newPin, onSuccess, onError ->
-                        viewModel.resetLoginPinAndAuthenticate(
-                            rawIdentifier = rawIdentifier,
-                            newPin = newPin,
-                            onSuccess = onSuccess,
-                            onError = onError
-                        )
-                    },
-                    onGenerateNewOtpCode = {
-                        viewModel.generateFourDigitOtp()
-                    },
                     onContinueWithGoogle = {
                         viewModel.signInWithGoogle(context)
-                    },
-                    onDeveloperTestLogin = {
-                        viewModel.developerTestLogin()
                     }
                 )
             }
 
             is AppAuthState.Authenticated -> {
-                if (showAdminDashboard && isSuperAdmin) {
+                if (showAdminDashboard && (isSuperAdmin || currentUserProfile?.isAdmin == true)) {
                     Scaffold(
                         modifier = Modifier.fillMaxSize(),
                         containerColor = DarkBackground,
@@ -286,17 +235,6 @@ fun TrimTimeApp(
                                     userEmail = currentProfile?.email ?: "",
                                     isLoading = isAuthLoading,
                                     errorMessage = authError,
-                                    onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
-                                        viewModel.requestPhoneVerificationOtp(
-                                            rawPhone = rawPhone,
-                                            excludeUserId = currentProfile?.id,
-                                            onOtpGenerated = onOtpGenerated,
-                                            onError = onError
-                                        )
-                                    },
-                                    onGenerateNewOtpCode = {
-                                        viewModel.generateFourDigitOtp()
-                                    },
                                     onSavePhone = { validPhone ->
                                         viewModel.savePhoneNumber(validPhone, isPhoneVerified = true) {
                                             viewModel.setNavTab(CustomerNavTab.SALONS)
@@ -318,17 +256,6 @@ fun TrimTimeApp(
                                         userProfile = currentProfile,
                                         isLoading = isAuthLoading,
                                         onCancel = { viewModel.dismissPartnerOnboarding() },
-                                        onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
-                                            viewModel.requestPhoneVerificationOtp(
-                                                rawPhone = rawPhone,
-                                                excludeUserId = currentProfile.id,
-                                                onOtpGenerated = onOtpGenerated,
-                                                onError = onError
-                                            )
-                                        },
-                                        onGenerateNewOtpCode = {
-                                            viewModel.generateFourDigitOtp()
-                                        },
                                         onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
                                             viewModel.registerPartnerSalon(
                                                 salonName = salonName,
@@ -476,20 +403,6 @@ fun TrimTimeApp(
                                                         onUpdatePersonalProfile = { name, phone, city ->
                                                             viewModel.updatePersonalProfile(name, phone, city, isPhoneVerified = true)
                                                         },
-                                                        onUpdateAccountIdentity = { name, email, phone, asPartner ->
-                                                            viewModel.signInWithRealIdentity(name, email, phone, asPartner)
-                                                        },
-                                                        onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
-                                                            viewModel.requestPhoneVerificationOtp(
-                                                                rawPhone = rawPhone,
-                                                                excludeUserId = currentCustomerUid,
-                                                                onOtpGenerated = onOtpGenerated,
-                                                                onError = onError
-                                                            )
-                                                        },
-                                                        onGenerateNewOtpCode = {
-                                                            viewModel.generateFourDigitOtp()
-                                                        },
                                                         onThemeModeChange = { viewModel.setThemeMode(it) },
                                                         onLanguageChange = { viewModel.setLanguage(it) },
                                                         onNotificationPreferencesChange = { bookingAlerts, queueReminders, offersDiscounts ->
@@ -526,17 +439,6 @@ fun TrimTimeApp(
                                         userProfile = currentUserProfile,
                                         isLoading = isAuthLoading,
                                         onCancel = { viewModel.switchToCustomerRole() },
-                                        onRequestPhoneOtp = { rawPhone, onOtpGenerated, onError ->
-                                            viewModel.requestPhoneVerificationOtp(
-                                                rawPhone = rawPhone,
-                                                excludeUserId = currentUserProfile?.id,
-                                                onOtpGenerated = onOtpGenerated,
-                                                onError = onError
-                                            )
-                                        },
-                                        onGenerateNewOtpCode = {
-                                            viewModel.generateFourDigitOtp()
-                                        },
                                         onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
                                             viewModel.registerPartnerSalon(
                                                 salonName = salonName,

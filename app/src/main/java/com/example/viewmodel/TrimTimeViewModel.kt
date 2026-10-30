@@ -49,7 +49,6 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val isCloudSynced: StateFlow<Boolean> = repository.isCloudSynced
     val isLoading: StateFlow<Boolean> = repository.isLoading
     val authError: StateFlow<String?> = repository.authError
-    val showSha1FallbackDialog: StateFlow<Boolean> = repository.showSha1FallbackDialog
     val showPartnerOnboarding: StateFlow<Boolean> = repository.showPartnerOnboarding
     val appPreferences: StateFlow<AppPreferences> = repository.appPreferences
 
@@ -211,6 +210,13 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
 
     fun setNavTab(tab: CustomerNavTab) {
         _currentNavTab.value = tab
+        if (tab == CustomerNavTab.PROFILE) {
+            repository.refreshCurrentUserProfile()
+        }
+    }
+
+    fun refreshCurrentUserProfile() {
+        repository.refreshCurrentUserProfile()
     }
 
     fun setSearchQuery(query: String) {
@@ -257,7 +263,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         _selectedTimeSlot.value = slot
     }
 
-    // Rule 1: Mandatory Phone Collection with 2-Step OTP Verification
+    // Rule 1: Mandatory Phone Collection (Post-Login)
     fun savePhoneNumber(
         phone: String,
         isPhoneVerified: Boolean = true,
@@ -265,67 +271,14 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     ) {
         repository.updateUserPhone(
             phone = phone,
+            isVerified = isPhoneVerified,
             onSuccess = {
-                _userMessage.value = "✓ Mobile number verified & saved to your profile!"
+                _userMessage.value = "✓ Mobile number saved to your profile!"
                 onSuccess()
             },
             onError = { err ->
                 _userMessage.value = err
             }
-        )
-    }
-
-    fun generateFourDigitOtp(): String = repository.generateFourDigitOtp()
-
-    fun requestPhoneVerificationOtp(
-        rawPhone: String,
-        excludeUserId: String? = null,
-        onOtpGenerated: (cleanTenDigits: String, otpCode: String) -> Unit,
-        onError: (String) -> Unit = { _userMessage.value = it }
-    ) {
-        repository.requestPhoneVerificationOtp(
-            phone = rawPhone,
-            excludeUserId = excludeUserId,
-            onOtpGenerated = onOtpGenerated,
-            onError = onError
-        )
-    }
-
-    fun requestForgotPinOtp(
-        rawIdentifier: String,
-        onOtpGenerated: (cleanTenDigits: String, otpCode: String, userId: String) -> Unit,
-        onError: (String) -> Unit = { _userMessage.value = it }
-    ) {
-        repository.requestForgotPinOtp(
-            identifier = rawIdentifier,
-            onOtpReady = { matchedUid, phoneTenDigits, otpCode ->
-                onOtpGenerated(phoneTenDigits, otpCode, matchedUid)
-            },
-            onError = onError
-        )
-    }
-
-    fun resetLoginPinAndAuthenticate(
-        rawIdentifier: String,
-        newPin: String,
-        onSuccess: () -> Unit = {},
-        onError: (String) -> Unit = { _userMessage.value = it }
-    ) {
-        repository.requestForgotPinOtp(
-            identifier = rawIdentifier,
-            onOtpReady = { matchedUid, _, _ ->
-                repository.resetLoginPinAndAuthenticate(
-                    uid = matchedUid,
-                    newLoginPin = newPin,
-                    onSuccess = { profile ->
-                        _userMessage.value = "✓ Password updated! Welcome back, ${profile.name}."
-                        _currentNavTab.value = CustomerNavTab.SALONS
-                        onSuccess()
-                    },
-                    onError = onError
-                )
-            },
-            onError = onError
         )
     }
 
@@ -411,80 +364,6 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     fun signInWithGoogle(context: Context, onSuccess: () -> Unit = {}) {
         repository.signInWithGoogle(
             context = context,
-            onSuccess = {
-                _userMessage.value = "Welcome to TrimTime!"
-                _currentNavTab.value = CustomerNavTab.SALONS
-                onSuccess()
-            },
-            onError = { err ->
-                _userMessage.value = err
-            }
-        )
-    }
-
-    fun dismissSha1FallbackDialog() {
-        repository.dismissSha1FallbackDialog()
-    }
-
-    /**
-     * Direct Account Sign-In / Registration with 2-Step Phone OTP & Password:
-     */
-    fun signInWithRealIdentity(
-        name: String,
-        email: String,
-        phone: String = "",
-        asPartner: Boolean = false,
-        loginPin: String = "",
-        isPhoneVerified: Boolean = true,
-        onSuccess: () -> Unit = {}
-    ) {
-        repository.signInWithRealIdentity(
-            name = name,
-            email = email,
-            phone = phone,
-            asPartner = asPartner,
-            loginPin = loginPin,
-            isPhoneVerified = isPhoneVerified,
-            onSuccess = {
-                _userMessage.value = "✓ Mobile verified & account created for $name"
-                _currentNavTab.value = CustomerNavTab.SALONS
-                onSuccess()
-            },
-            onError = { err ->
-                _userMessage.value = err
-            }
-        )
-    }
-
-    /**
-     * Login for Existing Users (Mobile Number OR Email Address + Password):
-     */
-    fun loginExistingUser(
-        identifier: String,
-        loginPin: String = "",
-        onAccountNotFound: (prefillEmail: String, prefillPhone: String) -> Unit = { _, _ -> },
-        onSuccess: () -> Unit = {}
-    ) {
-        repository.loginExistingUser(
-            identifier = identifier,
-            loginPin = loginPin,
-            onSuccess = { profile ->
-                _userMessage.value = "Welcome back, ${profile.name}!"
-                _currentNavTab.value = CustomerNavTab.SALONS
-                onSuccess()
-            },
-            onAccountNotFound = { prefillEmail, prefillPhone ->
-                _userMessage.value = "Account not found. Switching to Sign Up..."
-                onAccountNotFound(prefillEmail, prefillPhone)
-            },
-            onError = { err ->
-                _userMessage.value = err
-            }
-        )
-    }
-
-    fun developerTestLogin(onSuccess: () -> Unit = {}) {
-        repository.developerTestLogin(
             onSuccess = {
                 _userMessage.value = "Welcome to TrimTime!"
                 _currentNavTab.value = CustomerNavTab.SALONS
@@ -1159,7 +1038,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     // ==========================================
 
     fun openAdminDashboard() {
-        if (currentUserProfile.value?.isAdmin == true) {
+        if (currentUserProfile.value?.isAdmin == true || isSuperAdmin.value) {
             _showAdminDashboard.value = true
         } else {
             _showAdminDashboard.value = false
