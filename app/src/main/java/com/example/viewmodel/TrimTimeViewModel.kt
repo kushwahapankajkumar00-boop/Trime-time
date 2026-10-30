@@ -358,8 +358,52 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     // ==========================================
-    // Real Firebase Google Sign-In & Role Switching
+    // Real Firebase Auth (Email/Password + Google Sign-In) & Role Switching
     // ==========================================
+
+    fun clearAuthError() {
+        repository.clearAuthError()
+    }
+
+    fun signInWithEmail(
+        email: String,
+        password: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.signInWithEmailAndPassword(
+            email = email,
+            password = password,
+            onSuccess = {
+                _userMessage.value = "Welcome back to TrimTime!"
+                _currentNavTab.value = CustomerNavTab.SALONS
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun signUpWithEmail(
+        fullName: String,
+        email: String,
+        password: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.signUpWithEmailAndPassword(
+            fullName = fullName,
+            email = email,
+            password = password,
+            onSuccess = {
+                _userMessage.value = "Account created! Welcome to TrimTime."
+                _currentNavTab.value = CustomerNavTab.SALONS
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
 
     fun signInWithGoogle(context: Context, onSuccess: () -> Unit = {}) {
         repository.signInWithGoogle(

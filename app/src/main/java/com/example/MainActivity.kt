@@ -38,7 +38,7 @@ import com.example.model.AppAuthState
 import com.example.model.UserRole
 import com.example.ui.auth.AuthDialog
 import com.example.ui.auth.AuthFullScreen
-import com.example.ui.auth.MandatoryPhoneScreen
+import com.example.ui.auth.PhoneSetupScreen
 import com.example.ui.components.AppBottomNav
 import com.example.ui.components.AppTopBar
 import com.example.ui.components.PinDisplayDialog
@@ -186,12 +186,46 @@ fun TrimTimeApp(
                     errorMessage = authError,
                     onContinueWithGoogle = {
                         viewModel.signInWithGoogle(context)
+                    },
+                    onLoginWithEmail = { email, password ->
+                        viewModel.signInWithEmail(email, password)
+                    },
+                    onSignUpWithEmail = { fullName, email, password ->
+                        viewModel.signUpWithEmail(fullName, email, password)
+                    },
+                    onClearError = {
+                        viewModel.clearAuthError()
                     }
                 )
             }
 
             is AppAuthState.Authenticated -> {
-                if (showAdminDashboard && (isSuperAdmin || currentUserProfile?.isAdmin == true)) {
+                val currentProfile = currentUserProfile
+                val userPhoneDigits = currentProfile?.phone?.filter { it.isDigit() } ?: ""
+                val tenDigits = if (userPhoneDigits.length > 10 && userPhoneDigits.startsWith("91")) {
+                    userPhoneDigits.drop(2).take(10)
+                } else {
+                    userPhoneDigits.takeLast(10)
+                }
+                val needsPhone = currentProfile == null || tenDigits.length != 10
+
+                if (needsPhone) {
+                    PhoneSetupScreen(
+                        userName = currentProfile?.name ?: "Customer",
+                        userEmail = currentProfile?.email ?: "",
+                        isLoading = isAuthLoading,
+                        errorMessage = authError,
+                        onSavePhone = { validPhone ->
+                            viewModel.savePhoneNumber(validPhone, isPhoneVerified = true) {
+                                viewModel.setNavTab(CustomerNavTab.SALONS)
+                                viewModel.selectSalon(null)
+                            }
+                        },
+                        onSignOut = {
+                            viewModel.logout()
+                        }
+                    )
+                } else if (showAdminDashboard && (isSuperAdmin || currentUserProfile?.isAdmin == true)) {
                     Scaffold(
                         modifier = Modifier.fillMaxSize(),
                         containerColor = DarkBackground,
@@ -220,32 +254,7 @@ fun TrimTimeApp(
                     }
                 } else when (state.role) {
                     UserRole.CUSTOMER -> {
-                            val currentProfile = currentUserProfile
-                            val userPhoneDigits = currentProfile?.phone?.filter { it.isDigit() } ?: ""
-                            val tenDigits = if (userPhoneDigits.length > 10 && userPhoneDigits.startsWith("91")) {
-                                userPhoneDigits.drop(2).take(10)
-                            } else {
-                                userPhoneDigits.takeLast(10)
-                            }
-                            val needsPhone = currentProfile == null || tenDigits.length != 10
-
-                            if (needsPhone) {
-                                MandatoryPhoneScreen(
-                                    userName = currentProfile?.name ?: "Customer",
-                                    userEmail = currentProfile?.email ?: "",
-                                    isLoading = isAuthLoading,
-                                    errorMessage = authError,
-                                    onSavePhone = { validPhone ->
-                                        viewModel.savePhoneNumber(validPhone, isPhoneVerified = true) {
-                                            viewModel.setNavTab(CustomerNavTab.SALONS)
-                                            viewModel.selectSalon(null)
-                                        }
-                                    },
-                                    onSignOut = {
-                                        viewModel.logout()
-                                    }
-                                )
-                            } else if (showPartnerOnboarding) {
+                            if (showPartnerOnboarding) {
                                 // Mandatory "Partner Registration Form" (No 1-click bypass for unregistered users)
                                 Scaffold(
                                     modifier = Modifier.fillMaxSize(),

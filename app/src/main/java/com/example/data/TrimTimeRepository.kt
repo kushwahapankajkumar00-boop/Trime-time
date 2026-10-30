@@ -26,6 +26,7 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.auth.UserProfileChangeRequest
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.CoroutineScope
@@ -1012,6 +1013,174 @@ class TrimTimeRepository private constructor(context: Context) {
      * - If new user: writes new document to Firebase.firestore.collection("users").document(uid).set(...)
      * Navigation and session strictly depend on real Firebase response (NO mock/dummy fallback).
      */
+    /**
+     * Manual Sign Up with Full Name, Email, and Password using Firebase Authentication (Email/Password provider).
+     * Saves the user's `name` and `email` to Firestore (`users/{uid}`) upon signup.
+     * Leaves `phone` empty if not already present so the user is routed to `PhoneSetupScreen`.
+     */
+    fun signUpWithEmailAndPassword(
+        fullName: String,
+        email: String,
+        password: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val cleanName = SecurityValidator.sanitizeName(fullName, trimEdges = true)
+        if (cleanName.length < 2) {
+            val err = "Please enter your full name (at least 2 characters)."
+            _authError.value = err
+            onError(err)
+            return
+        }
+
+        val cleanEmail = email.trim()
+        if (cleanEmail.isBlank() || !cleanEmail.contains("@") || !cleanEmail.contains(".")) {
+            val err = "Please enter a valid email address."
+            _authError.value = err
+            onError(err)
+            return
+        }
+
+        if (password.length < 6) {
+            val err = "Password must be at least 6 characters long."
+            _authError.value = err
+            onError(err)
+            return
+        }
+
+        _isLoading.value = true
+        _authError.value = null
+        val firebaseAuth = auth
+        val firestoreDb = firestore
+
+        if (firebaseAuth == null || firestoreDb == null) {
+            _isLoading.value = false
+            val localProfile = UserProfile(
+                id = "email_uid_${cleanEmail.lowercase().hashCode()}",
+                name = cleanName,
+                email = cleanEmail,
+                phone = ""
+            )
+            _currentUserProfile.value = localProfile
+            _currentRole.value = UserRole.CUSTOMER
+            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+            onSuccess()
+            return
+        }
+
+        firebaseAuth.createUserWithEmailAndPassword(cleanEmail, password)
+            .addOnSuccessListener { authResult ->
+                val firebaseUser = authResult.user
+                if (firebaseUser == null) {
+                    _isLoading.value = false
+                    val err = "Failed to create account. Please try again."
+                    _authError.value = err
+                    onError(err)
+                    return@addOnSuccessListener
+                }
+
+                val uid = firebaseUser.uid
+                val profileUpdates = UserProfileChangeRequest.Builder()
+                    .setDisplayName(cleanName)
+                    .build()
+                firebaseUser.updateProfile(profileUpdates)
+
+                saveGoogleUserAndAuthenticate(
+                    uid = uid,
+                    displayName = cleanName,
+                    email = cleanEmail,
+                    onSuccess = onSuccess,
+                    onError = onError
+                )
+            }
+            .addOnFailureListener { err ->
+                _isLoading.value = false
+                val errMessage = err.localizedMessage ?: "Sign up failed. Please check your details and try again."
+                _authError.value = errMessage
+                Log.w(tag, "FirebaseAuth createUserWithEmailAndPassword failure: $errMessage")
+                onError(errMessage)
+            }
+    }
+
+    /**
+     * Manual Login with Email and Password using Firebase Authentication (Email/Password provider).
+     * Fetches the user's Firestore `users/{uid}` document so if `phone` is missing/invalid,
+     * the app automatically routes them to `PhoneSetupScreen`.
+     */
+    fun signInWithEmailAndPassword(
+        email: String,
+        password: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val cleanEmail = email.trim()
+        if (cleanEmail.isBlank() || !cleanEmail.contains("@") || !cleanEmail.contains(".")) {
+            val err = "Please enter a valid email address."
+            _authError.value = err
+            onError(err)
+            return
+        }
+
+        if (password.isBlank()) {
+            val err = "Please enter your password."
+            _authError.value = err
+            onError(err)
+            return
+        }
+
+        _isLoading.value = true
+        _authError.value = null
+        val firebaseAuth = auth
+        val firestoreDb = firestore
+
+        if (firebaseAuth == null || firestoreDb == null) {
+            _isLoading.value = false
+            val localProfile = UserProfile(
+                id = "email_uid_${cleanEmail.lowercase().hashCode()}",
+                name = cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() },
+                email = cleanEmail,
+                phone = ""
+            )
+            _currentUserProfile.value = localProfile
+            _currentRole.value = UserRole.CUSTOMER
+            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+            onSuccess()
+            return
+        }
+
+        firebaseAuth.signInWithEmailAndPassword(cleanEmail, password)
+            .addOnSuccessListener { authResult ->
+                val firebaseUser = authResult.user
+                if (firebaseUser == null) {
+                    _isLoading.value = false
+                    val err = "User session is null after login. Please try again."
+                    _authError.value = err
+                    onError(err)
+                    return@addOnSuccessListener
+                }
+
+                val uid = firebaseUser.uid
+                val displayName = firebaseUser.displayName?.takeIf { it.isNotBlank() }
+                    ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
+                val userEmail = firebaseUser.email?.takeIf { it.isNotBlank() } ?: cleanEmail
+
+                saveGoogleUserAndAuthenticate(
+                    uid = uid,
+                    displayName = displayName,
+                    email = userEmail,
+                    onSuccess = onSuccess,
+                    onError = onError
+                )
+            }
+            .addOnFailureListener { err ->
+                _isLoading.value = false
+                val errMessage = err.localizedMessage ?: "Invalid email or password. Please try again."
+                _authError.value = errMessage
+                Log.w(tag, "FirebaseAuth signInWithEmailAndPassword failure: $errMessage")
+                onError(errMessage)
+            }
+    }
+
     fun signInWithGoogle(
         context: Context,
         onSuccess: () -> Unit,
@@ -1281,13 +1450,13 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        val phoneErr = SecurityValidator.validateIndianMobileError(phone)
-        if (phoneErr != null) {
-            _authError.value = phoneErr
-            onError(phoneErr)
+        val tenDigits = SecurityValidator.extractTenDigitMobile(phone)
+        if (tenDigits.length != 10) {
+            val err = "Please enter a valid 10-digit mobile number."
+            _authError.value = err
+            onError(err)
             return
         }
-        val tenDigits = SecurityValidator.extractTenDigitMobile(phone)
 
         val formattedPhone = "+91 $tenDigits"
         val resolvedAdmin = resolveAdminFlagForUser(

@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,24 +23,35 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Storefront
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,6 +65,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -60,22 +77,34 @@ import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.AmberSecondary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
-import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
 
 /**
- * 100% Secure Google Sign-In Authentication Screen:
- * - Zero simulated OTPs or vulnerable passwords.
- * - Single primary action: "Continue with Google" powered by Firebase Auth & Credential Manager.
- * - Fetches displayName and email directly from the user's Google Account.
+ * Full-Screen Authentication UI (`AuthFullScreen`):
+ * 1. Login / Sign Up Tabs:
+ *    - Login Tab: Email + Password
+ *    - Sign Up Tab: Full Name + Email + Password
+ * 2. Alternative Option: "Continue with Google" button below the manual form.
  */
 @Composable
 fun AuthFullScreen(
     isLoading: Boolean,
     errorMessage: String?,
     onContinueWithGoogle: () -> Unit,
+    onLoginWithEmail: (email: String, password: String) -> Unit = { _, _ -> },
+    onSignUpWithEmail: (fullName: String, email: String, password: String) -> Unit = { _, _, _ -> },
+    onClearError: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    var isSignUpMode by rememberSaveable { mutableStateOf(false) }
+    var fullName by rememberSaveable { mutableStateOf("") }
+    var email by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
+    var passwordVisible by rememberSaveable { mutableStateOf(false) }
+    var localError by remember { mutableStateOf<String?>(null) }
+
+    val activeError = localError ?: errorMessage
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -96,14 +125,14 @@ fun AuthFullScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp, vertical = 28.dp),
+                .padding(horizontal = 24.dp, vertical = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Brand Logo Emblem
+            // App Logo Emblem
             Box(
                 modifier = Modifier
-                    .size(84.dp)
+                    .size(78.dp)
                     .shadow(
                         elevation = 16.dp,
                         shape = CircleShape,
@@ -136,19 +165,19 @@ fun AuthFullScreen(
                         imageVector = Icons.Default.ContentCut,
                         contentDescription = "Salon Scissors",
                         tint = AmberPrimary,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(26.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Icon(
                         imageVector = Icons.Default.Schedule,
                         contentDescription = "Instant Slots Clock",
                         tint = AmberSecondary,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             Text(
                 text = "TrimTime",
@@ -169,9 +198,9 @@ fun AuthFullScreen(
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(28.dp))
+            Spacer(modifier = Modifier.height(22.dp))
 
-            // Primary Google Sign-In Card
+            // Main Authentication Card
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -187,83 +216,193 @@ fun AuthFullScreen(
                         .fillMaxWidth()
                         .padding(22.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    // Security Badge
-                    Surface(
-                        color = GreenSuccess.copy(alpha = 0.14f),
-                        shape = RoundedCornerShape(50),
-                        border = androidx.compose.foundation.BorderStroke(
-                            1.dp,
-                            GreenSuccess.copy(alpha = 0.4f)
-                        )
+                    // Login / Sign Up Segmented Tabs
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xFF0F172A))
+                            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(14.dp))
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Shield,
-                                contentDescription = null,
-                                tint = GreenSuccess,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Text(
-                                text = "100% Secure Google Authentication",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = GreenSuccess
-                            )
-                        }
+                        AuthModeTabButton(
+                            title = "Login",
+                            selected = !isSignUpMode,
+                            onClick = {
+                                if (isSignUpMode) {
+                                    isSignUpMode = false
+                                    localError = null
+                                    onClearError()
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("auth_tab_login")
+                        )
+
+                        AuthModeTabButton(
+                            title = "Sign Up",
+                            selected = isSignUpMode,
+                            onClick = {
+                                if (!isSignUpMode) {
+                                    isSignUpMode = true
+                                    localError = null
+                                    onClearError()
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("auth_tab_signup")
+                        )
                     }
 
+                    // Heading
                     Text(
-                        text = "Welcome to TrimTime",
-                        style = MaterialTheme.typography.titleLarge.copy(
+                        text = if (isSignUpMode) "Create your TrimTime Account" else "Welcome back to TrimTime",
+                        style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.ExtraBold
                         ),
                         color = Color.White,
                         textAlign = TextAlign.Center
                     )
 
-                    Text(
-                        text = "Sign in or create your account seamlessly with Google. Your name and email are verified automatically by your Google Account.",
-                        fontSize = 13.sp,
-                        color = Color(0xFF94A3B8),
-                        textAlign = TextAlign.Center,
-                        lineHeight = 19.sp
-                    )
-
-                    // Feature highlights
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color(0xFF0F172A))
-                            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(14.dp))
-                            .padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        AuthFeatureRow(
-                            icon = Icons.Default.CheckCircle,
-                            tint = AmberPrimary,
-                            text = "Book live salon chairs with ₹0 advance payment"
-                        )
-                        AuthFeatureRow(
-                            icon = Icons.Default.Storefront,
-                            tint = Color(0xFF60A5FA),
-                            text = "Register & manage your salon in Partner Mode"
-                        )
-                    }
-
-                    // Error Message Banner
+                    // Full Name Input (Sign Up Mode only)
                     AnimatedVisibility(
-                        visible = !errorMessage.isNullOrBlank(),
+                        visible = isSignUpMode,
                         enter = fadeIn(),
                         exit = fadeOut()
                     ) {
-                        errorMessage?.let { errorText ->
+                        OutlinedTextField(
+                            value = fullName,
+                            onValueChange = {
+                                fullName = it
+                                localError = null
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("auth_name_input"),
+                            label = { Text("Full Name") },
+                            placeholder = { Text("Enter your full name", color = Color(0xFF64748B)) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Person,
+                                    contentDescription = "Full Name",
+                                    tint = AmberPrimary
+                                )
+                            },
+                            keyboardOptions = KeyboardOptions(
+                                capitalization = KeyboardCapitalization.Words,
+                                keyboardType = KeyboardType.Text,
+                                imeAction = ImeAction.Next
+                            ),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = AmberPrimary,
+                                unfocusedBorderColor = Color(0xFF334155),
+                                focusedContainerColor = Color(0xFF0F172A),
+                                unfocusedContainerColor = Color(0xFF0F172A),
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                    }
+
+                    // Email Input
+                    OutlinedTextField(
+                        value = email,
+                        onValueChange = {
+                            email = it
+                            localError = null
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("auth_email_input"),
+                        label = { Text("Email Address") },
+                        placeholder = { Text("you@example.com", color = Color(0xFF64748B)) },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Email,
+                                contentDescription = "Email",
+                                tint = AmberPrimary
+                            )
+                        },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Email,
+                            imeAction = ImeAction.Next
+                        ),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF334155),
+                            focusedContainerColor = Color(0xFF0F172A),
+                            unfocusedContainerColor = Color(0xFF0F172A),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+
+                    // Password Input
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = {
+                            password = it
+                            localError = null
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("auth_password_input"),
+                        label = { Text("Password") },
+                        placeholder = {
+                            Text(
+                                text = if (isSignUpMode) "At least 6 characters" else "Enter your password",
+                                color = Color(0xFF64748B)
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = "Password",
+                                tint = AmberPrimary
+                            )
+                        },
+                        trailingIcon = {
+                            IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                Icon(
+                                    imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = if (passwordVisible) "Hide Password" else "Show Password",
+                                    tint = Color(0xFF94A3B8)
+                                )
+                            }
+                        },
+                        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password,
+                            imeAction = ImeAction.Done
+                        ),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF334155),
+                            focusedContainerColor = Color(0xFF0F172A),
+                            unfocusedContainerColor = Color(0xFF0F172A),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+
+                    // Error Message Banner
+                    AnimatedVisibility(
+                        visible = !activeError.isNullOrBlank(),
+                        enter = fadeIn(),
+                        exit = fadeOut()
+                    ) {
+                        activeError?.let { errorText ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -291,13 +430,104 @@ fun AuthFullScreen(
                         }
                     }
 
-                    // Single Primary Button: "Continue with Google"
+                    // Primary Email/Password Submit Button (Login / Sign Up)
                     Button(
-                        onClick = onContinueWithGoogle,
+                        onClick = {
+                            val trimmedName = fullName.trim()
+                            val trimmedEmail = email.trim()
+
+                            if (isSignUpMode && trimmedName.length < 2) {
+                                localError = "Please enter your full name (at least 2 characters)."
+                                return@Button
+                            }
+                            if (trimmedEmail.isBlank() || !trimmedEmail.contains("@") || !trimmedEmail.contains(".")) {
+                                localError = "Please enter a valid email address."
+                                return@Button
+                            }
+                            if (isSignUpMode && password.length < 6) {
+                                localError = "Password must be at least 6 characters long."
+                                return@Button
+                            }
+                            if (!isSignUpMode && password.isBlank()) {
+                                localError = "Please enter your password."
+                                return@Button
+                            }
+
+                            localError = null
+                            if (isSignUpMode) {
+                                onSignUpWithEmail(trimmedName, trimmedEmail, password)
+                            } else {
+                                onLoginWithEmail(trimmedEmail, password)
+                            }
+                        },
                         enabled = !isLoading,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(54.dp)
+                            .height(52.dp)
+                            .testTag("auth_submit_button"),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AmberPrimary,
+                            contentColor = Color(0xFF1E1402),
+                            disabledContainerColor = Color(0xFF334155),
+                            disabledContentColor = Color(0xFF94A3B8)
+                        )
+                    ) {
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.5.dp,
+                                color = Color(0xFF1E1402)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = if (isSignUpMode) "Creating Account..." else "Signing in...",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp
+                            )
+                        } else {
+                            Text(
+                                text = if (isSignUpMode) "Sign Up" else "Login",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 16.sp
+                            )
+                        }
+                    }
+
+                    // Divider: "OR"
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        HorizontalDivider(
+                            modifier = Modifier.weight(1f),
+                            color = Color(0xFF334155)
+                        )
+                        Text(
+                            text = "OR",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF94A3B8)
+                        )
+                        HorizontalDivider(
+                            modifier = Modifier.weight(1f),
+                            color = Color(0xFF334155)
+                        )
+                    }
+
+                    // Alternative Option: "Continue with Google"
+                    Button(
+                        onClick = {
+                            localError = null
+                            onContinueWithGoogle()
+                        },
+                        enabled = !isLoading,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp)
                             .testTag("continue_with_google_button"),
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
@@ -308,29 +538,14 @@ fun AuthFullScreen(
                         ),
                         elevation = ButtonDefaults.buttonElevation(defaultElevation = 4.dp)
                     ) {
-                        if (isLoading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(22.dp),
-                                strokeWidth = 2.5.dp,
-                                color = AmberPrimary
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = "Signing in with Google...",
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 15.sp,
-                                color = Color.White
-                            )
-                        } else {
-                            GoogleLogoBadge(modifier = Modifier.size(22.dp))
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = "Continue with Google",
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 16.sp,
-                                color = Color(0xFF0F172A)
-                            )
-                        }
+                        GoogleLogoBadge(modifier = Modifier.size(22.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "Continue with Google",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 15.sp,
+                            color = if (isLoading) Color(0xFF94A3B8) else Color(0xFF0F172A)
+                        )
                     }
                 }
             }
@@ -339,26 +554,25 @@ fun AuthFullScreen(
 }
 
 @Composable
-private fun AuthFeatureRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    tint: Color,
-    text: String
+private fun AuthModeTabButton(
+    title: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    Box(
+        modifier = modifier
+            .height(42.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) AmberPrimary else Color.Transparent)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = tint,
-            modifier = Modifier.size(18.dp)
-        )
         Text(
-            text = text,
-            fontSize = 12.sp,
-            color = Color(0xFFE2E8F0),
-            fontWeight = FontWeight.Medium
+            text = title,
+            fontWeight = FontWeight.ExtraBold,
+            fontSize = 14.sp,
+            color = if (selected) Color(0xFF1E1402) else Color(0xFF94A3B8)
         )
     }
 }
