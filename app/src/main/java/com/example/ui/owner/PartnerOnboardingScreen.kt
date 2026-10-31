@@ -12,6 +12,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -86,12 +88,14 @@ import com.example.ui.components.LegalPolicyTab
 import com.example.ui.components.PartnerLocationPickerOsmMap
 import com.example.ui.components.fetchDeviceGpsLocation
 import com.example.ui.components.hasLocationPermission
+import com.example.ui.components.requestFreshHighAccuracyLocation
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.GreenSuccess
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PartnerOnboardingScreen(
     userProfile: UserProfile?,
@@ -194,17 +198,49 @@ fun PartnerOnboardingScreen(
     var termsAccepted by remember { mutableStateOf(false) }
     var validationError by remember { mutableStateOf<String?>(null) }
 
+    val gpsSettingsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            requestFreshHighAccuracyLocation(context) { lat, lng, isLive ->
+                if (isLive && lat != 0.0 && lng != 0.0) {
+                    latitude = lat
+                    longitude = lng
+                    gpsLocationConfirmed = true
+                    Toast.makeText(
+                        context,
+                        "Shop GPS pin updated to live location!",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        } else {
+            Toast.makeText(
+                context,
+                "Please turn on GPS Location to detect your shop's live coordinates.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
             permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
         if (granted) {
-            fetchDeviceGpsLocation(context) { lat, lng, _ ->
-                latitude = lat
-                longitude = lng
-                gpsLocationConfirmed = true
-                Toast.makeText(context, "Shop GPS pin updated to current location!", Toast.LENGTH_SHORT).show()
+            fetchDeviceGpsLocation(
+                context = context,
+                onResolutionRequired = { intentSenderRequest ->
+                    gpsSettingsLauncher.launch(intentSenderRequest)
+                }
+            ) { lat, lng, isLive ->
+                if (isLive && lat != 0.0 && lng != 0.0) {
+                    latitude = lat
+                    longitude = lng
+                    gpsLocationConfirmed = true
+                    Toast.makeText(context, "Shop GPS pin updated to current location!", Toast.LENGTH_SHORT).show()
+                }
             }
         } else {
             Toast.makeText(context, "GPS permission denied. Tap on the map to place your shop pin.", Toast.LENGTH_SHORT).show()
@@ -714,77 +750,100 @@ fun PartnerOnboardingScreen(
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.Top
                         ) {
-                            OutlinedTextField(
-                                value = openingTime,
-                                onValueChange = { openingTime = it },
-                                label = { Text("Opening Time *") },
-                                singleLine = true,
-                                colors = textFieldColors,
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("partner_reg_opening_time_input")
-                            )
-
-                            OutlinedTextField(
-                                value = closingTime,
-                                onValueChange = { closingTime = it },
-                                label = { Text("Closing Time *") },
-                                singleLine = true,
-                                colors = textFieldColors,
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("partner_reg_closing_time_input")
-                            )
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            openingOptions.forEach { preset ->
-                                Box(
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = openingTime,
+                                    onValueChange = { openingTime = it },
+                                    label = { Text("Opening Time *") },
+                                    singleLine = true,
+                                    colors = textFieldColors,
+                                    shape = RoundedCornerShape(12.dp),
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (openingTime == preset) AmberPrimary.copy(alpha = 0.2f) else DarkSurface)
-                                        .border(
-                                            1.dp,
-                                            if (openingTime == preset) AmberPrimary else Color(0xFF334155),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable { openingTime = preset }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        .fillMaxWidth()
+                                        .testTag("partner_reg_opening_time_input")
+                                )
+
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    Text(
-                                        text = "Open $preset",
-                                        fontSize = 10.sp,
-                                        color = if (openingTime == preset) AmberPrimary else Color(0xFF94A3B8),
-                                        fontWeight = FontWeight.SemiBold
-                                    )
+                                    openingOptions.forEach { preset ->
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(if (openingTime == preset) AmberPrimary.copy(alpha = 0.2f) else DarkSurface)
+                                                .border(
+                                                    1.dp,
+                                                    if (openingTime == preset) AmberPrimary else Color(0xFF334155),
+                                                    RoundedCornerShape(8.dp)
+                                                )
+                                                .clickable { openingTime = preset }
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = "Open $preset",
+                                                fontSize = 10.sp,
+                                                color = if (openingTime == preset) AmberPrimary else Color(0xFF94A3B8),
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                        }
+                                    }
                                 }
                             }
-                            closingOptions.take(2).forEach { preset ->
-                                Box(
+
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = closingTime,
+                                    onValueChange = { closingTime = it },
+                                    label = { Text("Closing Time *") },
+                                    singleLine = true,
+                                    colors = textFieldColors,
+                                    shape = RoundedCornerShape(12.dp),
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (closingTime == preset) AmberPrimary.copy(alpha = 0.2f) else DarkSurface)
-                                        .border(
-                                            1.dp,
-                                            if (closingTime == preset) AmberPrimary else Color(0xFF334155),
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable { closingTime = preset }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        .fillMaxWidth()
+                                        .testTag("partner_reg_closing_time_input")
+                                )
+
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    Text(
-                                        text = "Close $preset",
-                                        fontSize = 10.sp,
-                                        color = if (closingTime == preset) AmberPrimary else Color(0xFF94A3B8),
-                                        fontWeight = FontWeight.SemiBold
-                                    )
+                                    closingOptions.forEach { preset ->
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(if (closingTime == preset) AmberPrimary.copy(alpha = 0.2f) else DarkSurface)
+                                                .border(
+                                                    1.dp,
+                                                    if (closingTime == preset) AmberPrimary else Color(0xFF334155),
+                                                    RoundedCornerShape(8.dp)
+                                                )
+                                                .clickable { closingTime = preset }
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = "Close $preset",
+                                                fontSize = 10.sp,
+                                                color = if (closingTime == preset) AmberPrimary else Color(0xFF94A3B8),
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -993,15 +1052,22 @@ fun PartnerOnboardingScreen(
                         Button(
                             onClick = {
                                 if (hasLocationPermission(context)) {
-                                    fetchDeviceGpsLocation(context) { lat, lng, _ ->
-                                        latitude = lat
-                                        longitude = lng
-                                        gpsLocationConfirmed = true
-                                        Toast.makeText(
-                                            context,
-                                            "GPS coordinates locked: ${"%.4f".format(lat)}, ${"%.4f".format(lng)}",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
+                                    fetchDeviceGpsLocation(
+                                        context = context,
+                                        onResolutionRequired = { intentSenderRequest ->
+                                            gpsSettingsLauncher.launch(intentSenderRequest)
+                                        }
+                                    ) { lat, lng, isLive ->
+                                        if (isLive && lat != 0.0 && lng != 0.0) {
+                                            latitude = lat
+                                            longitude = lng
+                                            gpsLocationConfirmed = true
+                                            Toast.makeText(
+                                                context,
+                                                "GPS coordinates locked: ${"%.4f".format(lat)}, ${"%.4f".format(lng)}",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
                                     }
                                 } else {
                                     locationPermissionLauncher.launch(

@@ -17,7 +17,11 @@ import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.model.UserProfile
 import com.example.model.UserRole
+import com.example.ui.auth.formatStandardGoogleSignInError
+import com.example.ui.auth.setFilterByAuthorizedAccounts
 import com.example.util.SecurityValidator
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -416,20 +420,32 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 _userMessage.value = msg
                 return
             }
+            val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
+                .setFilterByAuthorizedAccounts(false)
+                .build()
+            val googleIdOption = GetGoogleIdOption.Builder()
+                .setServerClientId(serverClientId)
+                .setFilterByAuthorizedAccounts(false)
+                .setAutoSelectEnabled(false)
+                .build()
+
             repository.signInWithGoogle(
                 context = context,
+                signInWithGoogleOption = signInWithGoogleOption,
+                googleIdOption = googleIdOption,
                 onSuccess = {
                     _userMessage.value = "Welcome to TrimTime!"
                     _currentNavTab.value = CustomerNavTab.SALONS
                     onSuccess()
                 },
                 onError = { err ->
-                    Toast.makeText(context, err, Toast.LENGTH_LONG).show()
-                    _userMessage.value = err
+                    val cleanErr = formatStandardGoogleSignInError(err) ?: "Google Sign-In failed. Please try again."
+                    Toast.makeText(context, cleanErr, Toast.LENGTH_LONG).show()
+                    _userMessage.value = cleanErr
                 }
             )
         } catch (e: Exception) {
-            val errMsg = e.message ?: "Google Sign-In failed"
+            val errMsg = formatStandardGoogleSignInError(e.message) ?: "Google Sign-In failed. Please try again."
             Toast.makeText(context, errMsg, Toast.LENGTH_LONG).show()
             _userMessage.value = errMsg
         }

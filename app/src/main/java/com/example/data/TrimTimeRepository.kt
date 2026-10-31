@@ -1,15 +1,20 @@
 package com.example.data
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.widget.Toast
+import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.NoCredentialException
 import com.example.R
+import com.example.ui.auth.formatStandardGoogleSignInError
+import com.example.ui.auth.setFilterByAuthorizedAccounts
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -146,22 +151,13 @@ class TrimTimeRepository private constructor(context: Context) {
     )
     val userLongitude: StateFlow<Double> = _userLongitude.asStateFlow()
 
-    private val _userLocationTitle = MutableStateFlow(
-        settingsPrefs.getString("pref_default_city", null)
-            ?.takeIf { it.isNotBlank() && !it.equals("Patna, Bihar", ignoreCase = true) }
-            ?: "Detecting Live GPS..."
-    )
+    private val _userLocationTitle = MutableStateFlow("Detecting Live GPS...")
     val userLocationTitle: StateFlow<String> = _userLocationTitle.asStateFlow()
 
-    private val _userLocationSubtitle = MutableStateFlow(
-        settingsPrefs.getString("pref_location_subtitle", "Fetching your live GPS location...")
-            ?.ifBlank { "Fetching your live GPS location..." } ?: "Fetching your live GPS location..."
-    )
+    private val _userLocationSubtitle = MutableStateFlow("Fetching your live GPS location...")
     val userLocationSubtitle: StateFlow<String> = _userLocationSubtitle.asStateFlow()
 
-    private val _isLiveGpsActive = MutableStateFlow(
-        settingsPrefs.getBoolean("pref_has_live_gps", false)
-    )
+    private val _isLiveGpsActive = MutableStateFlow(false)
     val isLiveGpsActive: StateFlow<Boolean> = _isLiveGpsActive.asStateFlow()
 
     init {
@@ -1414,8 +1410,16 @@ class TrimTimeRepository private constructor(context: Context) {
             }
     }
 
+    private tailrec fun findActivity(context: Context): Activity? = when (context) {
+        is Activity -> context
+        is ContextWrapper -> findActivity(context.baseContext)
+        else -> null
+    }
+
     fun signInWithGoogle(
         context: Context,
+        signInWithGoogleOption: GetSignInWithGoogleOption? = null,
+        googleIdOption: GetGoogleIdOption? = null,
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
@@ -1440,28 +1444,43 @@ class TrimTimeRepository private constructor(context: Context) {
 
         CoroutineScope(Dispatchers.Main).launch {
             try {
-                val credentialManager = CredentialManager.create(context)
+                val activityContext = findActivity(context) ?: context
+                val credentialManager = CredentialManager.create(activityContext)
                 val serverClientId = context.getString(R.string.default_web_client_id)
 
-                val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
+                // Clear any stale cached credential state so Credential Manager performs a fresh
+                // standard Sign-In instead of attempting a reauthentication flow on an expired token.
+                try {
+                    credentialManager.clearCredentialState(ClearCredentialStateRequest())
+                } catch (_: Exception) {
+                }
+
+                val resolvedGoogleIdOption = googleIdOption ?: GetGoogleIdOption.Builder()
+                    .setServerClientId(serverClientId)
+                    .setFilterByAuthorizedAccounts(false)
+                    .setAutoSelectEnabled(false)
                     .build()
 
-                val request = GetCredentialRequest.Builder()
-                    .addCredentialOption(signInWithGoogleOption)
+                val resolvedSignInWithGoogleOption = signInWithGoogleOption ?: GetSignInWithGoogleOption.Builder(serverClientId)
+                    .setFilterByAuthorizedAccounts(false)
+                    .build()
+
+                val primaryRequest = GetCredentialRequest.Builder()
+                    .addCredentialOption(resolvedGoogleIdOption)
                     .build()
 
                 val result = try {
-                    credentialManager.getCredential(context = context, request = request)
-                } catch (noCredEx: NoCredentialException) {
-                    val googleIdOption = GetGoogleIdOption.Builder()
-                        .setFilterByAuthorizedAccounts(false)
-                        .setAutoSelectEnabled(false)
-                        .setServerClientId(serverClientId)
-                        .build()
+                    credentialManager.getCredential(context = activityContext, request = primaryRequest)
+                } catch (firstEx: Exception) {
+                    Log.w(tag, "Primary GetGoogleIdOption sign-in attempt fell back (${firstEx.message}), retrying with GetSignInWithGoogleOption...")
+                    try {
+                        credentialManager.clearCredentialState(ClearCredentialStateRequest())
+                    } catch (_: Exception) {
+                    }
                     val fallbackRequest = GetCredentialRequest.Builder()
-                        .addCredentialOption(googleIdOption)
+                        .addCredentialOption(resolvedSignInWithGoogleOption)
                         .build()
-                    credentialManager.getCredential(context = context, request = fallbackRequest)
+                    credentialManager.getCredential(context = activityContext, request = fallbackRequest)
                 }
 
                 val credential = result.credential
@@ -1495,7 +1514,8 @@ class TrimTimeRepository private constructor(context: Context) {
                         }
                         .addOnFailureListener { err ->
                             _isLoading.value = false
-                            val errMessage = err.message ?: err.localizedMessage ?: "Google Firebase sign-in failed."
+                            val errMessage = formatStandardGoogleSignInError(err.message ?: err.localizedMessage)
+                                ?: "Google Firebase sign-in failed."
                             _authError.value = errMessage
                             Log.e(tag, "FirebaseAuth signInWithCredential failure: $errMessage", err)
                             Handler(Looper.getMainLooper()).post {
@@ -1514,9 +1534,10 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
             } catch (e: Exception) {
                 _isLoading.value = false
-                val msg = e.message ?: e.localizedMessage ?: "Google Sign-In failed."
+                val msg = formatStandardGoogleSignInError(e.message ?: e.localizedMessage)
+                    ?: "Google Sign-In failed. Please try again."
                 _authError.value = msg
-                Log.e(tag, "Google Sign-In exception: $msg", e)
+                Log.e(tag, "Google Sign-In exception: ${e.message}", e)
                 Handler(Looper.getMainLooper()).post {
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 }

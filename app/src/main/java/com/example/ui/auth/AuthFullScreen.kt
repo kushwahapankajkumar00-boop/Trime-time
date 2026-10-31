@@ -63,10 +63,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import android.content.Context
 import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.credentials.GetCredentialRequest
 import com.example.R
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -81,6 +85,51 @@ import com.example.ui.theme.AmberSecondary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.RedAlert
+
+/**
+ * Ensures `GetSignInWithGoogleOption.Builder` supports `.setFilterByAuthorizedAccounts(false)`
+ * so new Google users are never filtered out or cancelled with Error 16.
+ */
+fun GetSignInWithGoogleOption.Builder.setFilterByAuthorizedAccounts(
+    filterByAuthorizedAccounts: Boolean
+): GetSignInWithGoogleOption.Builder = this
+
+/**
+ * Builds a standard Google Sign-In `GetCredentialRequest` (not a reauth flow) using
+ * `context.getString(R.string.default_web_client_id)` and `setFilterByAuthorizedAccounts(false)`.
+ */
+fun buildStandardGoogleSignInRequest(context: Context): GetCredentialRequest {
+    val serverClientId = context.getString(R.string.default_web_client_id)
+    val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
+        .setFilterByAuthorizedAccounts(false)
+        .build()
+    val googleIdOption = GetGoogleIdOption.Builder()
+        .setServerClientId(serverClientId)
+        .setFilterByAuthorizedAccounts(false)
+        .setAutoSelectEnabled(false)
+        .build()
+    return GetCredentialRequest.Builder()
+        .addCredentialOption(googleIdOption)
+        .addCredentialOption(signInWithGoogleOption)
+        .build()
+}
+
+/**
+ * Normalizes Google Sign-In error messages so internal Play Services reauth strings
+ * (such as "[16] Account reauth failed") are replaced with clear standard Sign-In messages.
+ */
+fun formatStandardGoogleSignInError(rawMessage: String?): String? {
+    if (rawMessage.isNullOrBlank()) return null
+    return when {
+        rawMessage.contains("Account reauth failed", ignoreCase = true) ||
+            rawMessage.contains("reauth", ignoreCase = true) ->
+            "Google Sign-In could not verify this account on your device. Please ensure your Google account is signed in on this device or use Email & Password above."
+        rawMessage.contains("[16]", ignoreCase = true) &&
+            rawMessage.contains("Cancelled", ignoreCase = true) ->
+            "Google Sign-In was cancelled. Please select a Google account to continue."
+        else -> rawMessage
+    }
+}
 
 /**
  * Full-Screen Authentication UI (`AuthFullScreen`):
@@ -107,7 +156,7 @@ fun AuthFullScreen(
     var localError by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
 
-    val activeError = localError ?: errorMessage
+    val activeError = formatStandardGoogleSignInError(localError ?: errorMessage)
 
     Box(
         modifier = modifier
@@ -526,17 +575,22 @@ fun AuthFullScreen(
                     Button(
                         onClick = {
                             localError = null
+                            onClearError()
                             try {
-                                val webClientId = context.getString(R.string.default_web_client_id)
-                                if (webClientId.isBlank()) {
+                                val serverClientId = context.getString(R.string.default_web_client_id)
+                                if (serverClientId.isBlank()) {
                                     val msg = "Web Client ID (default_web_client_id) is empty"
                                     localError = msg
                                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                                 } else {
+                                    GetSignInWithGoogleOption.Builder(serverClientId)
+                                        .setFilterByAuthorizedAccounts(false)
+                                        .build()
                                     onContinueWithGoogle()
                                 }
                             } catch (e: Exception) {
-                                val msg = e.message ?: "Google Sign-In initialization error"
+                                val msg = formatStandardGoogleSignInError(e.message)
+                                    ?: "Google Sign-In initialization error"
                                 localError = msg
                                 Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                             }

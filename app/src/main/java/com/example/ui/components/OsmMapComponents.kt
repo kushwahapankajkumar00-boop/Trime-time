@@ -2,7 +2,9 @@ package com.example.ui.components
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -19,7 +21,16 @@ import android.os.Bundle
 import android.os.Looper
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.google.android.gms.common.api.ResolvableApiException
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.LocationSettingsRequest
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -183,13 +194,22 @@ fun hasLocationPermission(context: Context): Boolean {
     return fine || coarse
 }
 
+private const val REQUEST_CHECK_LOCATION_SETTINGS = 9021
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 /**
- * Fetches the device's real GPS / Network location using both Google Play Services
- * `FusedLocationProviderClient` and Android's native `LocationManager`.
- * Immediately returns the best lastKnownLocation if available AND requests a fresh live GPS update.
+ * Forces a fresh, high-accuracy live GPS fix directly from the device sensors using
+ * `fusedLocationClient.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cancellationToken)`.
+ * Never uses `fusedLocationClient.lastLocation` or `locationManager.getLastKnownLocation`
+ * so stale cached coordinates are never returned.
  */
 @SuppressLint("MissingPermission")
-fun fetchDeviceGpsLocation(
+fun requestFreshHighAccuracyLocation(
     context: Context,
     fallbackLat: Double = DEFAULT_PATNA_LAT,
     fallbackLng: Double = DEFAULT_PATNA_LNG,
@@ -200,102 +220,180 @@ fun fetchDeviceGpsLocation(
         return
     }
 
-    var emittedLiveFix = false
-
-    // 1. Try FusedLocationProviderClient for fast & accurate real GPS
     try {
-        val fusedClient = com.google.android.gms.location.LocationServices.getFusedLocationProviderClient(context)
-        fusedClient.lastLocation.addOnSuccessListener { loc ->
-            if (loc != null && loc.latitude != 0.0 && loc.longitude != 0.0) {
-                emittedLiveFix = true
-                onLocationResult(loc.latitude, loc.longitude, true)
-            }
-        }
-        val cancellationTokenSource = com.google.android.gms.tasks.CancellationTokenSource()
+        val fusedClient = LocationServices.getFusedLocationProviderClient(context)
+        val cancellationTokenSource = CancellationTokenSource()
+
         fusedClient.getCurrentLocation(
-            com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY,
+            Priority.PRIORITY_HIGH_ACCURACY,
             cancellationTokenSource.token
         ).addOnSuccessListener { freshLoc ->
             if (freshLoc != null && freshLoc.latitude != 0.0 && freshLoc.longitude != 0.0) {
-                emittedLiveFix = true
                 onLocationResult(freshLoc.latitude, freshLoc.longitude, true)
+            } else {
+                // If GPS hardware is warming up (e.g., right after clicking "OK" on Turn On Location prompt),
+                // request a single fresh high-accuracy sensor update.
+                requestSingleFreshSensorUpdate(
+                    context = context,
+                    fusedClient = fusedClient,
+                    fallbackLat = fallbackLat,
+                    fallbackLng = fallbackLng,
+                    onLocationResult = onLocationResult
+                )
             }
+        }.addOnFailureListener {
+            requestSingleFreshSensorUpdate(
+                context = context,
+                fusedClient = fusedClient,
+                fallbackLat = fallbackLat,
+                fallbackLng = fallbackLng,
+                onLocationResult = onLocationResult
+            )
         }
     } catch (_: Exception) {
-        // Fallback to LocationManager below
+        onLocationResult(fallbackLat, fallbackLng, false)
+    }
+}
+
+@SuppressLint("MissingPermission")
+private fun requestSingleFreshSensorUpdate(
+    context: Context,
+    fusedClient: com.google.android.gms.location.FusedLocationProviderClient,
+    fallbackLat: Double,
+    fallbackLng: Double,
+    onLocationResult: (Double, Double, Boolean) -> Unit
+) {
+    var delivered = false
+    try {
+        val freshRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+            .setMinUpdateIntervalMillis(500L)
+            .setWaitForAccurateLocation(false)
+            .setMaxUpdates(1)
+            .build()
+
+        val callback = object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                fusedClient.removeLocationUpdates(this)
+                val loc = result.lastLocation
+                if (!delivered && loc != null && loc.latitude != 0.0 && loc.longitude != 0.0) {
+                    delivered = true
+                    onLocationResult(loc.latitude, loc.longitude, true)
+                } else if (!delivered) {
+                    delivered = true
+                    onLocationResult(fallbackLat, fallbackLng, false)
+                }
+            }
+        }
+        fusedClient.requestLocationUpdates(freshRequest, callback, Looper.getMainLooper())
+    } catch (_: Exception) {
+        // Fallback to active GPS_PROVIDER single live update (never getLastKnownLocation)
+        try {
+            val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+            val gpsEnabled = runCatching {
+                locationManager?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true
+            }.getOrDefault(false)
+            if (locationManager != null && gpsEnabled) {
+                val listener = object : LocationListener {
+                    override fun onLocationChanged(location: Location) {
+                        runCatching { locationManager.removeUpdates(this) }
+                        if (!delivered && location.latitude != 0.0 && location.longitude != 0.0) {
+                            delivered = true
+                            onLocationResult(location.latitude, location.longitude, true)
+                        }
+                    }
+
+                    @Deprecated("Deprecated in Android API")
+                    override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+                    override fun onProviderEnabled(provider: String) {}
+                    override fun onProviderDisabled(provider: String) {}
+                }
+                locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER, listener, Looper.getMainLooper())
+            } else if (!delivered) {
+                delivered = true
+                onLocationResult(fallbackLat, fallbackLng, false)
+            }
+        } catch (_: Exception) {
+            if (!delivered) {
+                delivered = true
+                onLocationResult(fallbackLat, fallbackLng, false)
+            }
+        }
+    }
+}
+
+/**
+ * Checks if device GPS/Location settings are ON using `LocationSettingsRequest`:
+ * - If GPS is ON: immediately calls `getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cancellationToken)`.
+ * - If GPS is OFF: catches `ResolvableApiException` and launches the Android "Turn on location" system prompt.
+ */
+@SuppressLint("MissingPermission")
+fun fetchDeviceGpsLocation(
+    context: Context,
+    fallbackLat: Double = DEFAULT_PATNA_LAT,
+    fallbackLng: Double = DEFAULT_PATNA_LNG,
+    onResolutionRequired: ((IntentSenderRequest) -> Unit)? = null,
+    onLocationResult: (Double, Double, Boolean) -> Unit
+) {
+    if (!hasLocationPermission(context)) {
+        onLocationResult(fallbackLat, fallbackLng, false)
+        return
     }
 
-    // 2. Also query native LocationManager for immediate cached & active GPS/Network fix
     try {
-        val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-        if (locationManager == null) {
-            if (!emittedLiveFix) onLocationResult(fallbackLat, fallbackLng, false)
-            return
-        }
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000L)
+            .setMinUpdateIntervalMillis(1000L)
+            .setWaitForAccurateLocation(false)
+            .build()
 
-        val providers = listOf(
-            LocationManager.GPS_PROVIDER,
-            LocationManager.NETWORK_PROVIDER,
-            LocationManager.PASSIVE_PROVIDER
-        )
+        val settingsRequest = LocationSettingsRequest.Builder()
+            .addLocationRequest(locationRequest)
+            .setAlwaysShow(true)
+            .build()
 
-        var bestLocation: Location? = null
-        for (provider in providers) {
-            val isEnabled = runCatching { locationManager.isProviderEnabled(provider) }.getOrDefault(false)
-            if (isEnabled || provider == LocationManager.PASSIVE_PROVIDER) {
-                val loc = runCatching { locationManager.getLastKnownLocation(provider) }.getOrNull()
-                if (loc != null && loc.latitude != 0.0 && loc.longitude != 0.0) {
-                    if (bestLocation == null ||
-                        loc.time > bestLocation.time + 120_000L ||
-                        (kotlin.math.abs(loc.time - bestLocation.time) <= 120_000L && loc.accuracy < bestLocation.accuracy)
-                    ) {
-                        bestLocation = loc
-                    }
-                }
+        val settingsClient = LocationServices.getSettingsClient(context)
+        settingsClient.checkLocationSettings(settingsRequest)
+            .addOnSuccessListener {
+                // Device GPS is confirmed ON: immediately fetch fresh high-accuracy location
+                requestFreshHighAccuracyLocation(
+                    context = context,
+                    fallbackLat = fallbackLat,
+                    fallbackLng = fallbackLng,
+                    onLocationResult = onLocationResult
+                )
             }
-        }
-
-        val emittedCachedFix = if (bestLocation != null) {
-            emittedLiveFix = true
-            onLocationResult(bestLocation.latitude, bestLocation.longitude, true)
-            true
-        } else {
-            false
-        }
-
-        // Also request a fresh live location fix from active GPS/Network provider
-        val activeProviders = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).filter {
-            runCatching { locationManager.isProviderEnabled(it) }.getOrDefault(false)
-        }
-        if (activeProviders.isNotEmpty()) {
-            val listener = object : LocationListener {
-                override fun onLocationChanged(location: Location) {
-                    runCatching { locationManager.removeUpdates(this) }
-                    if (location.latitude != 0.0 && location.longitude != 0.0) {
-                        emittedLiveFix = true
-                        onLocationResult(location.latitude, location.longitude, true)
-                    } else if (!emittedCachedFix && !emittedLiveFix) {
+            .addOnFailureListener { exception ->
+                if (exception is ResolvableApiException) {
+                    try {
+                        if (onResolutionRequired != null) {
+                            val intentSenderRequest = IntentSenderRequest.Builder(exception.resolution).build()
+                            onResolutionRequired(intentSenderRequest)
+                        } else {
+                            val activity = context.findActivity()
+                            if (activity != null) {
+                                exception.startResolutionForResult(activity, REQUEST_CHECK_LOCATION_SETTINGS)
+                            } else {
+                                onLocationResult(fallbackLat, fallbackLng, false)
+                            }
+                        }
+                    } catch (_: Exception) {
                         onLocationResult(fallbackLat, fallbackLng, false)
                     }
-                }
-
-                @Deprecated("Deprecated in Android API")
-                override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
-                override fun onProviderEnabled(provider: String) {}
-                override fun onProviderDisabled(provider: String) {}
-            }
-            for (prov in activeProviders) {
-                runCatching {
-                    locationManager.requestSingleUpdate(prov, listener, Looper.getMainLooper())
+                } else {
+                    requestFreshHighAccuracyLocation(
+                        context = context,
+                        fallbackLat = fallbackLat,
+                        fallbackLng = fallbackLng,
+                        onLocationResult = onLocationResult
+                    )
                 }
             }
-        } else if (!emittedCachedFix && !emittedLiveFix) {
-            onLocationResult(fallbackLat, fallbackLng, false)
-        }
     } catch (_: Exception) {
-        if (!emittedLiveFix) {
-            onLocationResult(fallbackLat, fallbackLng, false)
-        }
+        requestFreshHighAccuracyLocation(
+            context = context,
+            fallbackLat = fallbackLat,
+            fallbackLng = fallbackLng,
+            onLocationResult = onLocationResult
+        )
     }
 }
 
@@ -624,6 +722,28 @@ fun CustomerSalonsOsmMapSection(
     var selectedMapSalon by remember(salons) { mutableStateOf(salons.firstOrNull()) }
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
 
+    val gpsSettingsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            requestFreshHighAccuracyLocation(
+                context = context,
+                fallbackLat = userLat,
+                fallbackLng = userLng
+            ) { lat, lng, isLive ->
+                userLat = lat
+                userLng = lng
+                hasLiveGps = isLive
+                if (isLive && lat != 0.0 && lng != 0.0) {
+                    onGpsLocationDetected(lat, lng)
+                }
+                mapViewRef?.controller?.setZoom(DEFAULT_CUSTOMER_MAP_ZOOM)
+                mapViewRef?.controller?.animateTo(GeoPoint(lat, lng))
+                mapViewRef?.invalidate()
+            }
+        }
+    }
+
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -633,7 +753,10 @@ fun CustomerSalonsOsmMapSection(
             fetchDeviceGpsLocation(
                 context = context,
                 fallbackLat = userLat,
-                fallbackLng = userLng
+                fallbackLng = userLng,
+                onResolutionRequired = { intentSenderRequest ->
+                    gpsSettingsLauncher.launch(intentSenderRequest)
+                }
             ) { lat, lng, isLive ->
                 userLat = lat
                 userLng = lng
@@ -663,7 +786,10 @@ fun CustomerSalonsOsmMapSection(
             fetchDeviceGpsLocation(
                 context = context,
                 fallbackLat = userLat,
-                fallbackLng = userLng
+                fallbackLng = userLng,
+                onResolutionRequired = { intentSenderRequest ->
+                    gpsSettingsLauncher.launch(intentSenderRequest)
+                }
             ) { lat, lng, isLive ->
                 userLat = lat
                 userLng = lng
@@ -862,7 +988,10 @@ fun CustomerSalonsOsmMapSection(
                             fetchDeviceGpsLocation(
                                 context = context,
                                 fallbackLat = userLat,
-                                fallbackLng = userLng
+                                fallbackLng = userLng,
+                                onResolutionRequired = { intentSenderRequest ->
+                                    gpsSettingsLauncher.launch(intentSenderRequest)
+                                }
                             ) { lat, lng, isLive ->
                                 userLat = lat
                                 userLng = lng

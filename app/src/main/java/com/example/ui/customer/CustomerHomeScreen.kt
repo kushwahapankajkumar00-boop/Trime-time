@@ -1,6 +1,7 @@
 package com.example.ui.customer
 
 import android.Manifest
+import android.app.Activity
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -103,6 +104,7 @@ import com.example.ui.components.fetchDeviceGpsLocation
 import com.example.ui.components.hasLocationPermission
 import com.example.ui.components.initOsmDroidConfig
 import com.example.ui.components.launchGeoDirections
+import com.example.ui.components.requestFreshHighAccuracyLocation
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.AmberSecondary
 import com.example.ui.theme.DarkBackground
@@ -162,6 +164,32 @@ fun CustomerHomeScreen(
     var showLocationSheet by remember { mutableStateOf(false) }
     var isDetectingGps by remember { mutableStateOf(false) }
 
+    val gpsSettingsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            isDetectingGps = true
+            requestFreshHighAccuracyLocation(
+                context = context,
+                fallbackLat = userLatitude,
+                fallbackLng = userLongitude
+            ) { lat, lng, isLive ->
+                isDetectingGps = false
+                if (isLive && lat != 0.0 && lng != 0.0) {
+                    onDetectGpsLocation(lat, lng, true)
+                    showLocationSheet = false
+                }
+            }
+        } else {
+            isDetectingGps = false
+            Toast.makeText(
+                context,
+                "Please turn on GPS Location to detect your live location.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -172,7 +200,10 @@ fun CustomerHomeScreen(
             fetchDeviceGpsLocation(
                 context = context,
                 fallbackLat = userLatitude,
-                fallbackLng = userLongitude
+                fallbackLng = userLongitude,
+                onResolutionRequired = { intentSenderRequest ->
+                    gpsSettingsLauncher.launch(intentSenderRequest)
+                }
             ) { lat, lng, isLive ->
                 isDetectingGps = false
                 if (isLive && lat != 0.0 && lng != 0.0) {
@@ -196,7 +227,10 @@ fun CustomerHomeScreen(
             fetchDeviceGpsLocation(
                 context = context,
                 fallbackLat = userLatitude,
-                fallbackLng = userLongitude
+                fallbackLng = userLongitude,
+                onResolutionRequired = { intentSenderRequest ->
+                    gpsSettingsLauncher.launch(intentSenderRequest)
+                }
             ) { lat, lng, isLive ->
                 isDetectingGps = false
                 if (isLive && lat != 0.0 && lng != 0.0) {
@@ -268,14 +302,15 @@ fun CustomerHomeScreen(
                     fetchDeviceGpsLocation(
                         context = context,
                         fallbackLat = userLatitude,
-                        fallbackLng = userLongitude
+                        fallbackLng = userLongitude,
+                        onResolutionRequired = { intentSenderRequest ->
+                            gpsSettingsLauncher.launch(intentSenderRequest)
+                        }
                     ) { lat, lng, isLive ->
                         isDetectingGps = false
-                        if (lat != 0.0 && lng != 0.0) {
+                        if (isLive && lat != 0.0 && lng != 0.0) {
                             onDetectGpsLocation(lat, lng, true)
-                            if (isLive) {
-                                showLocationSheet = false
-                            }
+                            showLocationSheet = false
                         }
                     }
                 } else {
@@ -315,10 +350,13 @@ fun CustomerHomeScreen(
                         fetchDeviceGpsLocation(
                             context = context,
                             fallbackLat = userLatitude,
-                            fallbackLng = userLongitude
-                        ) { lat, lng, _ ->
+                            fallbackLng = userLongitude,
+                            onResolutionRequired = { intentSenderRequest ->
+                                gpsSettingsLauncher.launch(intentSenderRequest)
+                            }
+                        ) { lat, lng, isLive ->
                             isDetectingGps = false
-                            if (lat != 0.0 && lng != 0.0) {
+                            if (isLive && lat != 0.0 && lng != 0.0) {
                                 onDetectGpsLocation(lat, lng, true)
                             }
                         }
