@@ -52,6 +52,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -104,10 +105,14 @@ fun ProfileScreen(
     },
     isAdmin: Boolean = false,
     onOpenAdminPanel: () -> Unit = {},
+    onRefreshProfile: () -> Unit = {},
     onLogout: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    LaunchedEffect(userProfile?.id) {
+        onRefreshProfile()
+    }
     var showEditPersonalDialog by remember { mutableStateOf(false) }
     var showSupportDialog by remember { mutableStateOf(false) }
     var showFeedbackDialog by remember { mutableStateOf(false) }
@@ -273,7 +278,7 @@ fun ProfileScreen(
                         )
                     }
                     val user = userProfile
-                    if (user?.isAdmin == true) {
+                    if (user?.isAdmin == true || isAdmin) {
                         Button(
                             onClick = onOpenAdminPanel,
                             modifier = Modifier
@@ -300,7 +305,7 @@ fun ProfileScreen(
 
         // Secret Super Admin Access: ONLY visible if the logged-in user's Firestore document explicitly has isAdmin == true
         val user = userProfile
-        if (user?.isAdmin == true) {
+        if (user?.isAdmin == true || isAdmin) {
             item {
                 Card(
                     modifier = Modifier

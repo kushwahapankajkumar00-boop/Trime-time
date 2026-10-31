@@ -63,7 +63,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import com.example.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -102,6 +105,7 @@ fun AuthFullScreen(
     var password by rememberSaveable { mutableStateOf("") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
 
     val activeError = localError ?: errorMessage
 
@@ -522,7 +526,20 @@ fun AuthFullScreen(
                     Button(
                         onClick = {
                             localError = null
-                            onContinueWithGoogle()
+                            try {
+                                val webClientId = context.getString(R.string.default_web_client_id)
+                                if (webClientId.isBlank()) {
+                                    val msg = "Web Client ID (default_web_client_id) is empty"
+                                    localError = msg
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                } else {
+                                    onContinueWithGoogle()
+                                }
+                            } catch (e: Exception) {
+                                val msg = e.message ?: "Google Sign-In initialization error"
+                                localError = msg
+                                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                            }
                         },
                         enabled = !isLoading,
                         modifier = Modifier

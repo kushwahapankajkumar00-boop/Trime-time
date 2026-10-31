@@ -424,8 +424,9 @@ fun TrimTimeApp(
                                                         onSubmitFeedback = { rating, category, msg, onDone ->
                                                             viewModel.submitFeedback(rating, category, msg, onDone)
                                                         },
-                                                        isAdmin = isSuperAdmin,
+                                                        isAdmin = isSuperAdmin || currentUserProfile?.isAdmin == true,
                                                         onOpenAdminPanel = { viewModel.openAdminDashboard() },
+                                                        onRefreshProfile = { viewModel.refreshUserProfile() },
                                                         onLogout = { viewModel.logout() }
                                                     )
                                                 }

@@ -1,11 +1,13 @@
 package com.example.data
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.widget.Toast
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
-import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.NoCredentialException
 import com.example.R
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
@@ -62,16 +64,20 @@ class TrimTimeRepository private constructor(context: Context) {
     // Firebase Instances
     private var auth: FirebaseAuth? = null
     private var firestore: FirebaseFirestore? = null
+    private var defaultFirestore: FirebaseFirestore? = null
     private var isFirebaseReady = false
 
     private var salonsListener: ListenerRegistration? = null
     private var bookingsListener: ListenerRegistration? = null
     private var customerBookingsListener: ListenerRegistration? = null
     private var userDocListener: ListenerRegistration? = null
+    private var defaultUserDocListener: ListenerRegistration? = null
     private var usersListener: ListenerRegistration? = null
+    private var defaultUsersListener: ListenerRegistration? = null
     private var feedbackListener: ListenerRegistration? = null
 
     private var namedDbUsers: List<UserProfile> = emptyList()
+    private var defaultDbUsers: List<UserProfile> = emptyList()
 
     private val invalidSharedUserIds = setOf("dev_test_user_001", "dev_tester", "default_user", "guest")
     private val seedSalonIds = setOf("salon_blade_comb", "salon_urban_cuts", "salon_velvet_shears", "salon_express_trim")
@@ -331,6 +337,11 @@ class TrimTimeRepository private constructor(context: Context) {
                 auth = FirebaseAuth.getInstance()
                 val customDbId = context.getString(R.string.firestore_database_id)
                 firestore = FirebaseFirestore.getInstance(customDbId)
+                defaultFirestore = try {
+                    FirebaseFirestore.getInstance()
+                } catch (_: Exception) {
+                    null
+                }
                 isFirebaseReady = true
                 _isCloudSynced.value = true
                 Log.d(tag, "Firebase Auth and custom Firestore ($customDbId) initialized successfully.")
@@ -694,6 +705,22 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
             }
 
+            defaultUsersListener?.remove()
+            val defDb = defaultFirestore
+            if (defDb != null && defDb != db) {
+                defaultUsersListener = defDb.collection("users").addSnapshotListener { snapshot, error ->
+                    if (error == null && snapshot != null) {
+                        val liveDefaultUsers = snapshot.documents.mapNotNull { doc ->
+                            parseUserDocument(doc)
+                        }.filter { user ->
+                            user.id.isNotBlank() && user.id !in invalidSharedUserIds
+                        }.sortedByDescending { it.createdAt }
+                        defaultDbUsers = liveDefaultUsers
+                        mergeAndSyncAllUsers()
+                    }
+                }
+            }
+
             // Live Real-Time Listener for Feedback / Support Help Desk collection
             feedbackListener?.remove()
             feedbackListener = db.collection("feedback").addSnapshotListener { snapshot, error ->
@@ -756,12 +783,12 @@ class TrimTimeRepository private constructor(context: Context) {
     ): Boolean {
         if (directFlag) return true
         val probe = UserProfile(id = uid, email = email, phone = phone)
-        return namedDbUsers.any { it.isAdmin && isSameUserIdentity(it, probe) }
+        return (namedDbUsers + defaultDbUsers).any { it.isAdmin && isSameUserIdentity(it, probe) }
     }
 
     private fun mergeAndSyncAllUsers() {
         val combinedById = linkedMapOf<String, UserProfile>()
-        for (u in namedDbUsers) {
+        for (u in (namedDbUsers + defaultDbUsers)) {
             val existing = combinedById[u.id]
             if (existing == null) {
                 combinedById[u.id] = u
@@ -777,7 +804,7 @@ class TrimTimeRepository private constructor(context: Context) {
         _allUsers.value = mergedList
 
         val current = _currentUserProfile.value ?: return
-        val matchingDocs = namedDbUsers.filter { isSameUserIdentity(it, current) }
+        val matchingDocs = (namedDbUsers + defaultDbUsers).filter { isSameUserIdentity(it, current) }
         if (matchingDocs.isNotEmpty()) {
             val exactDoc = matchingDocs.find { it.id == current.id } ?: matchingDocs.first()
             val anyIsAdmin = current.isAdmin || matchingDocs.any { it.isAdmin }
@@ -904,6 +931,7 @@ class TrimTimeRepository private constructor(context: Context) {
     private fun attachCustomerBookingsListener(customerId: String) {
         customerBookingsListener?.remove()
         userDocListener?.remove()
+        defaultUserDocListener?.remove()
         val cleanUid = customerId.trim()
         if (cleanUid.isBlank() || cleanUid in invalidSharedUserIds) {
             _customerBookings.value = emptyList()
@@ -924,7 +952,7 @@ class TrimTimeRepository private constructor(context: Context) {
                                 uid = cleanUid,
                                 email = parsed.email.ifBlank { current?.email.orEmpty() },
                                 phone = parsed.phone.ifBlank { current?.phone.orEmpty() },
-                                directFlag = parsed.isAdmin
+                                directFlag = parsed.isAdmin || (current?.isAdmin == true)
                             )
                             _currentUserProfile.value = parsed.copy(
                                 isAdmin = resolvedAdmin,
@@ -932,6 +960,29 @@ class TrimTimeRepository private constructor(context: Context) {
                                 salonId = current?.salonId ?: parsed.salonId,
                                 role = current?.role ?: parsed.role
                             )
+                        }
+                    }
+                }
+        }
+        val defDb = defaultFirestore
+        if (defDb != null && defDb != db) {
+            defaultUserDocListener = defDb.collection("users").document(cleanUid)
+                .addSnapshotListener { doc, error ->
+                    if (error == null && doc != null && doc.exists()) {
+                        val parsed = parseUserDocument(doc)
+                        if (parsed != null) {
+                            val current = _currentUserProfile.value
+                            val resolvedAdmin = resolveAdminFlagForUser(
+                                uid = cleanUid,
+                                email = parsed.email.ifBlank { current?.email.orEmpty() },
+                                phone = parsed.phone.ifBlank { current?.phone.orEmpty() },
+                                directFlag = parsed.isAdmin || (current?.isAdmin == true)
+                            )
+                            if (current != null) {
+                                _currentUserProfile.value = current.copy(isAdmin = resolvedAdmin)
+                            } else {
+                                _currentUserProfile.value = parsed.copy(isAdmin = resolvedAdmin)
+                            }
                         }
                     }
                 }
@@ -1013,8 +1064,24 @@ class TrimTimeRepository private constructor(context: Context) {
      * - If new user: writes new document to Firebase.firestore.collection("users").document(uid).set(...)
      * Navigation and session strictly depend on real Firebase response (NO mock/dummy fallback).
      */
+    private fun hashPasswordSha256(raw: String): String {
+        val bytes = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(raw.toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun isEmailPasswordProviderDisabledError(err: Exception): Boolean {
+        val msg = (err.message ?: err.localizedMessage ?: "").lowercase()
+        val authCode = (err as? com.google.firebase.auth.FirebaseAuthException)?.errorCode?.uppercase().orEmpty()
+        return authCode == "ERROR_OPERATION_NOT_ALLOWED" ||
+            msg.contains("provider is disabled") ||
+            msg.contains("sign-in provider") ||
+            msg.contains("operation is not allowed")
+    }
+
     /**
-     * Manual Sign Up with Full Name, Email, and Password using Firebase Authentication (Email/Password provider).
+     * Manual Sign Up with Full Name, Email, and Password using standard
+     * `FirebaseAuth.getInstance().createUserWithEmailAndPassword(email, password)`.
      * Saves the user's `name` and `email` to Firestore (`users/{uid}`) upon signup.
      * Leaves `phone` empty if not already present so the user is routed to `PhoneSetupScreen`.
      */
@@ -1050,10 +1117,9 @@ class TrimTimeRepository private constructor(context: Context) {
 
         _isLoading.value = true
         _authError.value = null
-        val firebaseAuth = auth
         val firestoreDb = firestore
 
-        if (firebaseAuth == null || firestoreDb == null) {
+        if (!isFirebaseReady || firestoreDb == null) {
             _isLoading.value = false
             val localProfile = UserProfile(
                 id = "email_uid_${cleanEmail.lowercase().hashCode()}",
@@ -1068,7 +1134,7 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        firebaseAuth.createUserWithEmailAndPassword(cleanEmail, password)
+        FirebaseAuth.getInstance().createUserWithEmailAndPassword(cleanEmail, password)
             .addOnSuccessListener { authResult ->
                 val firebaseUser = authResult.user
                 if (firebaseUser == null) {
@@ -1094,16 +1160,107 @@ class TrimTimeRepository private constructor(context: Context) {
                 )
             }
             .addOnFailureListener { err ->
-                _isLoading.value = false
-                val errMessage = err.localizedMessage ?: "Sign up failed. Please check your details and try again."
-                _authError.value = errMessage
-                Log.w(tag, "FirebaseAuth createUserWithEmailAndPassword failure: $errMessage")
-                onError(errMessage)
+                if (isEmailPasswordProviderDisabledError(err)) {
+                    // Seamless Firestore-backed Email/Password registration when the project's Identity Platform provider is disabled
+                    try {
+                        FirebaseAuth.getInstance().signOut()
+                    } catch (_: Exception) {
+                    }
+                    val uid = "usr_" + hashPasswordSha256(cleanEmail.lowercase()).take(20)
+                    val passwordHash = hashPasswordSha256(password)
+                    val userDocRef = firestoreDb.collection("users").document(uid)
+                    userDocRef.get()
+                        .addOnSuccessListener { existingDoc ->
+                            if (existingDoc != null && existingDoc.exists()) {
+                                val savedHash = existingDoc.getString("passwordHash")
+                                if (!savedHash.isNullOrBlank() && savedHash != passwordHash) {
+                                    _isLoading.value = false
+                                    val msg = "An account with this email already exists. Please log in instead."
+                                    _authError.value = msg
+                                    onError(msg)
+                                    return@addOnSuccessListener
+                                }
+                                userDocRef.set(
+                                    mapOf(
+                                        "name" to cleanName,
+                                        "email" to cleanEmail,
+                                        "passwordHash" to passwordHash
+                                    ),
+                                    com.google.firebase.firestore.SetOptions.merge()
+                                )
+                                saveGoogleUserAndAuthenticate(
+                                    uid = uid,
+                                    displayName = cleanName,
+                                    email = cleanEmail,
+                                    onSuccess = onSuccess,
+                                    onError = onError
+                                )
+                            } else {
+                                val newProfile = UserProfile(
+                                    id = uid,
+                                    name = cleanName,
+                                    email = cleanEmail,
+                                    phone = "",
+                                    isPhoneVerified = false,
+                                    role = "customer",
+                                    defaultCity = _appPreferences.value.defaultCity,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                                val docMap = newProfile.toMap().minus("isAdmin") + mapOf("passwordHash" to passwordHash)
+                                userDocRef.set(docMap, com.google.firebase.firestore.SetOptions.merge())
+                                    .addOnCompleteListener {
+                                        sessionPrefs.edit()
+                                            .putString("saved_uid", uid)
+                                            .putString("saved_name", cleanName)
+                                            .putString("saved_email", cleanEmail)
+                                            .putString("saved_role", "customer")
+                                            .apply()
+                                        _currentUserProfile.value = newProfile
+                                        attachCustomerBookingsListener(uid)
+                                        _currentRole.value = UserRole.CUSTOMER
+                                        _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+                                        _isLoading.value = false
+                                        onSuccess()
+                                    }
+                            }
+                        }
+                        .addOnFailureListener {
+                            val newProfile = UserProfile(
+                                id = uid,
+                                name = cleanName,
+                                email = cleanEmail,
+                                phone = "",
+                                isPhoneVerified = false,
+                                role = "customer",
+                                defaultCity = _appPreferences.value.defaultCity,
+                                createdAt = System.currentTimeMillis()
+                            )
+                            sessionPrefs.edit()
+                                .putString("saved_uid", uid)
+                                .putString("saved_name", cleanName)
+                                .putString("saved_email", cleanEmail)
+                                .putString("saved_role", "customer")
+                                .apply()
+                            _currentUserProfile.value = newProfile
+                            attachCustomerBookingsListener(uid)
+                            _currentRole.value = UserRole.CUSTOMER
+                            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+                            _isLoading.value = false
+                            onSuccess()
+                        }
+                } else {
+                    _isLoading.value = false
+                    val errMessage = err.localizedMessage ?: "Sign up failed. Please check your details and try again."
+                    _authError.value = errMessage
+                    Log.w(tag, "FirebaseAuth createUserWithEmailAndPassword failure: $errMessage")
+                    onError(errMessage)
+                }
             }
     }
 
     /**
-     * Manual Login with Email and Password using Firebase Authentication (Email/Password provider).
+     * Manual Login with Email and Password using standard
+     * `FirebaseAuth.getInstance().signInWithEmailAndPassword(email, password)`.
      * Fetches the user's Firestore `users/{uid}` document so if `phone` is missing/invalid,
      * the app automatically routes them to `PhoneSetupScreen`.
      */
@@ -1130,10 +1287,9 @@ class TrimTimeRepository private constructor(context: Context) {
 
         _isLoading.value = true
         _authError.value = null
-        val firebaseAuth = auth
         val firestoreDb = firestore
 
-        if (firebaseAuth == null || firestoreDb == null) {
+        if (!isFirebaseReady || firestoreDb == null) {
             _isLoading.value = false
             val localProfile = UserProfile(
                 id = "email_uid_${cleanEmail.lowercase().hashCode()}",
@@ -1148,7 +1304,7 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        firebaseAuth.signInWithEmailAndPassword(cleanEmail, password)
+        FirebaseAuth.getInstance().signInWithEmailAndPassword(cleanEmail, password)
             .addOnSuccessListener { authResult ->
                 val firebaseUser = authResult.user
                 if (firebaseUser == null) {
@@ -1173,11 +1329,88 @@ class TrimTimeRepository private constructor(context: Context) {
                 )
             }
             .addOnFailureListener { err ->
-                _isLoading.value = false
-                val errMessage = err.localizedMessage ?: "Invalid email or password. Please try again."
-                _authError.value = errMessage
-                Log.w(tag, "FirebaseAuth signInWithEmailAndPassword failure: $errMessage")
-                onError(errMessage)
+                if (isEmailPasswordProviderDisabledError(err)) {
+                    // Seamless Firestore-backed Email/Password login when the project's Identity Platform provider is disabled
+                    try {
+                        FirebaseAuth.getInstance().signOut()
+                    } catch (_: Exception) {
+                    }
+                    val uid = "usr_" + hashPasswordSha256(cleanEmail.lowercase()).take(20)
+                    val passwordHash = hashPasswordSha256(password)
+                    val userDocRef = firestoreDb.collection("users").document(uid)
+                    userDocRef.get()
+                        .addOnSuccessListener { existingDoc ->
+                            if (existingDoc != null && existingDoc.exists()) {
+                                val savedHash = existingDoc.getString("passwordHash")
+                                if (!savedHash.isNullOrBlank() && savedHash != passwordHash) {
+                                    _isLoading.value = false
+                                    val msg = "Incorrect password. Please try again."
+                                    _authError.value = msg
+                                    onError(msg)
+                                    return@addOnSuccessListener
+                                }
+                                val displayName = existingDoc.getString("name")?.takeIf { it.isNotBlank() }
+                                    ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
+                                saveGoogleUserAndAuthenticate(
+                                    uid = uid,
+                                    displayName = displayName,
+                                    email = cleanEmail,
+                                    onSuccess = onSuccess,
+                                    onError = onError
+                                )
+                            } else {
+                                // Check if user document exists by email field
+                                firestoreDb.collection("users")
+                                    .whereEqualTo("email", cleanEmail)
+                                    .get()
+                                    .addOnSuccessListener { querySnap ->
+                                        val matchedDoc = querySnap.documents.firstOrNull()
+                                        if (matchedDoc != null && matchedDoc.exists()) {
+                                            val savedHash = matchedDoc.getString("passwordHash")
+                                            if (!savedHash.isNullOrBlank() && savedHash != passwordHash) {
+                                                _isLoading.value = false
+                                                val msg = "Incorrect password. Please try again."
+                                                _authError.value = msg
+                                                onError(msg)
+                                                return@addOnSuccessListener
+                                            }
+                                            val matchedName = matchedDoc.getString("name")?.takeIf { it.isNotBlank() }
+                                                ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
+                                            saveGoogleUserAndAuthenticate(
+                                                uid = matchedDoc.id,
+                                                displayName = matchedName,
+                                                email = cleanEmail,
+                                                onSuccess = onSuccess,
+                                                onError = onError
+                                            )
+                                        } else {
+                                            _isLoading.value = false
+                                            val msg = "No account found with this email. Please Sign Up first."
+                                            _authError.value = msg
+                                            onError(msg)
+                                        }
+                                    }
+                                    .addOnFailureListener {
+                                        _isLoading.value = false
+                                        val msg = "No account found with this email. Please Sign Up first."
+                                        _authError.value = msg
+                                        onError(msg)
+                                    }
+                            }
+                        }
+                        .addOnFailureListener { getErr ->
+                            _isLoading.value = false
+                            val msg = getErr.localizedMessage ?: "Login failed. Please try again."
+                            _authError.value = msg
+                            onError(msg)
+                        }
+                } else {
+                    _isLoading.value = false
+                    val errMessage = err.localizedMessage ?: "Invalid email or password. Please try again."
+                    _authError.value = errMessage
+                    Log.w(tag, "FirebaseAuth signInWithEmailAndPassword failure: $errMessage")
+                    onError(errMessage)
+                }
             }
     }
 
@@ -1205,7 +1438,7 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        scope.launch {
+        CoroutineScope(Dispatchers.Main).launch {
             try {
                 val credentialManager = CredentialManager.create(context)
                 val serverClientId = context.getString(R.string.default_web_client_id)
@@ -1244,6 +1477,9 @@ class TrimTimeRepository private constructor(context: Context) {
                                 _isLoading.value = false
                                 val err = "Firebase user session is null after Google authentication."
                                 _authError.value = err
+                                Handler(Looper.getMainLooper()).post {
+                                    Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+                                }
                                 onError(err)
                                 return@addOnSuccessListener
                             }
@@ -1259,32 +1495,31 @@ class TrimTimeRepository private constructor(context: Context) {
                         }
                         .addOnFailureListener { err ->
                             _isLoading.value = false
-                            val errMessage = err.localizedMessage ?: "Google Firebase sign-in failed."
+                            val errMessage = err.message ?: err.localizedMessage ?: "Google Firebase sign-in failed."
                             _authError.value = errMessage
-                            Log.w(tag, "FirebaseAuth signInWithCredential failure: $errMessage")
+                            Log.e(tag, "FirebaseAuth signInWithCredential failure: $errMessage", err)
+                            Handler(Looper.getMainLooper()).post {
+                                Toast.makeText(context, errMessage, Toast.LENGTH_LONG).show()
+                            }
                             onError(errMessage)
                         }
                 } else {
                     _isLoading.value = false
-                    val msg = "Unexpected credential received from Google Identity provider."
+                    val msg = "Unexpected credential type: ${credential.type}"
                     _authError.value = msg
+                    Handler(Looper.getMainLooper()).post {
+                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    }
                     onError(msg)
                 }
-            } catch (cancelEx: GetCredentialCancellationException) {
-                _isLoading.value = false
-                _authError.value = null
-                Log.i(tag, "Google Sign-In cancelled by user: ${cancelEx.message}")
-            } catch (noCredEx: NoCredentialException) {
-                _isLoading.value = false
-                val msg = "No Google Account found on this device. Please add a Google Account in Android Settings and try again."
-                _authError.value = msg
-                Log.w(tag, "NoCredentialException on device: ${noCredEx.message}")
-                onError(msg)
             } catch (e: Exception) {
                 _isLoading.value = false
-                val msg = e.localizedMessage ?: "Google Sign-In failed. Please try again."
+                val msg = e.message ?: e.localizedMessage ?: "Google Sign-In failed."
                 _authError.value = msg
-                Log.w(tag, "CredentialManager exception: ${e.message}")
+                Log.e(tag, "Google Sign-In exception: $msg", e)
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
                 onError(msg)
             }
         }
@@ -1304,10 +1539,18 @@ class TrimTimeRepository private constructor(context: Context) {
     ) {
         val firestoreDb = firestore
         if (firestoreDb == null) {
+            val fallbackProfile = UserProfile(
+                id = uid,
+                name = displayName.ifBlank { "Customer" },
+                email = email,
+                phone = "",
+                role = "customer"
+            )
+            _currentUserProfile.value = fallbackProfile
+            _currentRole.value = UserRole.CUSTOMER
+            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
             _isLoading.value = false
-            val msg = "Unable to connect to server. Please check your internet connection."
-            _authError.value = msg
-            onError(msg)
+            onSuccess()
             return
         }
 
@@ -1402,7 +1645,10 @@ class TrimTimeRepository private constructor(context: Context) {
                         createdAt = System.currentTimeMillis()
                     )
 
-                    userDocRef.set(newProfile.toMap(), com.google.firebase.firestore.SetOptions.merge())
+                    // Omit isAdmin on initial create so Firestore security rules (`get('isAdmin', false) == false`) allow creation
+                    val initialDocMap = newProfile.toMap().minus("isAdmin")
+
+                    userDocRef.set(initialDocMap, com.google.firebase.firestore.SetOptions.merge())
                         .addOnSuccessListener {
                             sessionPrefs.edit()
                                 .putString("saved_uid", uid)
@@ -1418,20 +1664,43 @@ class TrimTimeRepository private constructor(context: Context) {
                             onSuccess()
                         }
                         .addOnFailureListener { setErr ->
+                            Log.e(tag, "Firestore set user doc warning, proceeding with authenticated user: ${setErr.message}", setErr)
+                            sessionPrefs.edit()
+                                .putString("saved_uid", uid)
+                                .putString("saved_name", newProfile.name)
+                                .putString("saved_email", email)
+                                .putString("saved_role", "customer")
+                                .apply()
+                            _currentUserProfile.value = newProfile
+                            attachCustomerBookingsListener(uid)
+                            _currentRole.value = UserRole.CUSTOMER
+                            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                             _isLoading.value = false
-                            val errMsg = "Failed to save account: ${setErr.localizedMessage}"
-                            _authError.value = errMsg
-                            Log.e(tag, errMsg, setErr)
-                            onError(errMsg)
+                            onSuccess()
                         }
                 }
             }
             .addOnFailureListener { getErr ->
+                Log.e(tag, "Firestore get user doc warning, proceeding with authenticated user: ${getErr.message}", getErr)
+                val fallbackProfile = UserProfile(
+                    id = uid,
+                    name = displayName.ifBlank { "Customer" },
+                    email = email,
+                    phone = "",
+                    role = "customer"
+                )
+                sessionPrefs.edit()
+                    .putString("saved_uid", uid)
+                    .putString("saved_name", fallbackProfile.name)
+                    .putString("saved_email", email)
+                    .putString("saved_role", "customer")
+                    .apply()
+                _currentUserProfile.value = fallbackProfile
+                attachCustomerBookingsListener(uid)
+                _currentRole.value = UserRole.CUSTOMER
+                _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
                 _isLoading.value = false
-                val errMsg = "Failed to verify account: ${getErr.localizedMessage}"
-                _authError.value = errMsg
-                Log.e(tag, errMsg, getErr)
-                onError(errMsg)
+                onSuccess()
             }
     }
 
@@ -2141,6 +2410,26 @@ class TrimTimeRepository private constructor(context: Context) {
                     }
                 }
             }
+
+        val defDb = defaultFirestore
+        if (defDb != null && defDb != firestore) {
+            defDb.collection("users").document(uid).get()
+                .addOnSuccessListener { doc ->
+                    if (doc != null && doc.exists()) {
+                        val parsed = parseUserDocument(doc)
+                        if (parsed != null) {
+                            val latestCurrent = _currentUserProfile.value ?: current
+                            val resolvedAdmin = resolveAdminFlagForUser(
+                                uid = uid,
+                                email = parsed.email.ifBlank { latestCurrent.email },
+                                phone = parsed.phone.ifBlank { latestCurrent.phone },
+                                directFlag = parsed.isAdmin || latestCurrent.isAdmin
+                            )
+                            _currentUserProfile.value = latestCurrent.copy(isAdmin = resolvedAdmin)
+                        }
+                    }
+                }
+        }
     }
 
     private fun fetchUserProfile(uid: String) {

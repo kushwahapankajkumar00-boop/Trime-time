@@ -2,8 +2,10 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.R
 import com.example.data.PinVerificationResult
 import com.example.data.TrimTimeRepository
 import com.example.model.AppAuthState
@@ -406,17 +408,31 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun signInWithGoogle(context: Context, onSuccess: () -> Unit = {}) {
-        repository.signInWithGoogle(
-            context = context,
-            onSuccess = {
-                _userMessage.value = "Welcome to TrimTime!"
-                _currentNavTab.value = CustomerNavTab.SALONS
-                onSuccess()
-            },
-            onError = { err ->
-                _userMessage.value = err
+        try {
+            val serverClientId = context.getString(R.string.default_web_client_id)
+            if (serverClientId.isBlank()) {
+                val msg = "Missing default_web_client_id in strings/google-services.json"
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                _userMessage.value = msg
+                return
             }
-        )
+            repository.signInWithGoogle(
+                context = context,
+                onSuccess = {
+                    _userMessage.value = "Welcome to TrimTime!"
+                    _currentNavTab.value = CustomerNavTab.SALONS
+                    onSuccess()
+                },
+                onError = { err ->
+                    Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+                    _userMessage.value = err
+                }
+            )
+        } catch (e: Exception) {
+            val errMsg = e.message ?: "Google Sign-In failed"
+            Toast.makeText(context, errMsg, Toast.LENGTH_LONG).show()
+            _userMessage.value = errMsg
+        }
     }
 
     fun openAuth(mode: AuthMode) {
@@ -1081,7 +1097,12 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     // Super Admin Dashboard Actions
     // ==========================================
 
+    fun refreshUserProfile() {
+        repository.refreshCurrentUserProfile()
+    }
+
     fun openAdminDashboard() {
+        repository.refreshCurrentUserProfile()
         if (currentUserProfile.value?.isAdmin == true || isSuperAdmin.value) {
             _showAdminDashboard.value = true
         } else {
