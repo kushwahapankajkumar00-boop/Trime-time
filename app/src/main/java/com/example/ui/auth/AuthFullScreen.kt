@@ -90,28 +90,29 @@ import com.google.android.gms.common.api.ApiException
 
 /**
  * Ensures `GetSignInWithGoogleOption.Builder` supports `.setFilterByAuthorizedAccounts(false)`
- * so new Google users are never filtered out or cancelled with Error 16.
+ * and `.setAutoSelectEnabled(false)` so new Google users are never filtered out or cancelled
+ * with Error 16 and no silent re-auth is attempted.
  */
 fun GetSignInWithGoogleOption.Builder.setFilterByAuthorizedAccounts(
     filterByAuthorizedAccounts: Boolean
 ): GetSignInWithGoogleOption.Builder = this
 
+fun GetSignInWithGoogleOption.Builder.setAutoSelectEnabled(
+    autoSelectEnabled: Boolean
+): GetSignInWithGoogleOption.Builder = this
+
 /**
  * Builds a standard Google Sign-In `GetCredentialRequest` using
- * `context.getString(R.string.default_web_client_id)` and `setFilterByAuthorizedAccounts(false)`.
+ * `context.getString(R.string.default_web_client_id)`, `setFilterByAuthorizedAccounts(false)`,
+ * and `setAutoSelectEnabled(false)`.
  */
 fun buildStandardGoogleSignInRequest(context: Context): GetCredentialRequest {
     val serverClientId = context.getString(R.string.default_web_client_id)
     val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
         .setFilterByAuthorizedAccounts(false)
-        .build()
-    val googleIdOption = GetGoogleIdOption.Builder()
-        .setServerClientId(serverClientId)
-        .setFilterByAuthorizedAccounts(false)
         .setAutoSelectEnabled(false)
         .build()
     return GetCredentialRequest.Builder()
-        .addCredentialOption(googleIdOption)
         .addCredentialOption(signInWithGoogleOption)
         .build()
 }
@@ -573,8 +574,12 @@ fun AuthFullScreen(
                     // Alternative Option: "Continue with Google"
                     Button(
                         onClick = {
-                            localError = null
-                            onClearError()
+                            if (localError != null) {
+                                localError = null
+                            }
+                            if (!errorMessage.isNullOrBlank()) {
+                                onClearError()
+                            }
                             try {
                                 val serverClientId = context.getString(R.string.default_web_client_id)
                                 if (serverClientId.isBlank()) {
@@ -584,6 +589,7 @@ fun AuthFullScreen(
                                 } else {
                                     GetSignInWithGoogleOption.Builder(serverClientId)
                                         .setFilterByAuthorizedAccounts(false)
+                                        .setAutoSelectEnabled(false)
                                         .build()
                                     onContinueWithGoogle()
                                 }

@@ -18,6 +18,7 @@ import com.example.model.SalonService
 import com.example.model.UserProfile
 import com.example.model.UserRole
 import com.example.ui.auth.extractRawExceptionMessage
+import com.example.ui.auth.setAutoSelectEnabled
 import com.example.ui.auth.setFilterByAuthorizedAccounts
 import com.example.util.SecurityValidator
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
@@ -411,42 +412,48 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
-    fun signInWithGoogle(context: Context, onSuccess: () -> Unit = {}) {
-        try {
-            val serverClientId = context.getString(R.string.default_web_client_id)
-            if (serverClientId.isBlank()) {
-                val msg = "Missing default_web_client_id in strings/google-services.json"
-                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                _userMessage.value = msg
-                return
-            }
-            val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
-                .setFilterByAuthorizedAccounts(false)
-                .build()
-            val googleIdOption = GetGoogleIdOption.Builder()
-                .setServerClientId(serverClientId)
-                .setFilterByAuthorizedAccounts(false)
-                .setAutoSelectEnabled(false)
-                .build()
+    private var googleSignInJob: Job? = null
 
-            repository.signInWithGoogle(
-                context = context,
-                signInWithGoogleOption = signInWithGoogleOption,
-                googleIdOption = googleIdOption,
-                onSuccess = {
-                    _userMessage.value = "Welcome to TrimTime!"
-                    _currentNavTab.value = CustomerNavTab.SALONS
-                    onSuccess()
-                },
-                onError = { err ->
-                    Toast.makeText(context, err, Toast.LENGTH_LONG).show()
-                    _userMessage.value = err
+    fun signInWithGoogle(context: Context, onSuccess: () -> Unit = {}) {
+        if (googleSignInJob?.isActive == true) return
+        googleSignInJob = viewModelScope.launch {
+            try {
+                val serverClientId = context.getString(R.string.default_web_client_id)
+                if (serverClientId.isBlank()) {
+                    val msg = "Missing default_web_client_id in strings/google-services.json"
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    _userMessage.value = msg
+                    return@launch
                 }
-            )
-        } catch (e: Exception) {
-            val errMsg = extractRawExceptionMessage(e)
-            Toast.makeText(context, errMsg, Toast.LENGTH_LONG).show()
-            _userMessage.value = errMsg
+                val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(serverClientId)
+                    .setFilterByAuthorizedAccounts(false)
+                    .setAutoSelectEnabled(false)
+                    .build()
+                val googleIdOption = GetGoogleIdOption.Builder()
+                    .setServerClientId(serverClientId)
+                    .setFilterByAuthorizedAccounts(false)
+                    .setAutoSelectEnabled(false)
+                    .build()
+
+                repository.signInWithGoogleSuspend(
+                    context = context,
+                    signInWithGoogleOption = signInWithGoogleOption,
+                    googleIdOption = googleIdOption,
+                    onSuccess = {
+                        _userMessage.value = "Welcome to TrimTime!"
+                        _currentNavTab.value = CustomerNavTab.SALONS
+                        onSuccess()
+                    },
+                    onError = { err ->
+                        Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+                        _userMessage.value = err
+                    }
+                )
+            } catch (e: Exception) {
+                val errMsg = extractRawExceptionMessage(e)
+                Toast.makeText(context, errMsg, Toast.LENGTH_LONG).show()
+                _userMessage.value = errMsg
+            }
         }
     }
 

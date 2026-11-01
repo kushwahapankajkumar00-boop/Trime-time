@@ -14,6 +14,7 @@ import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.NoCredentialException
 import com.example.R
 import com.example.ui.auth.extractRawExceptionMessage
+import com.example.ui.auth.setAutoSelectEnabled
 import com.example.ui.auth.setFilterByAuthorizedAccounts
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
@@ -33,6 +34,7 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.auth.OAuthProvider
 import com.google.firebase.auth.UserProfileChangeRequest
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
@@ -1423,8 +1425,24 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
-        _isLoading.value = true
-        _authError.value = null
+        CoroutineScope(Dispatchers.Main).launch {
+            signInWithGoogleSuspend(
+                context = context,
+                signInWithGoogleOption = signInWithGoogleOption,
+                googleIdOption = googleIdOption,
+                onSuccess = onSuccess,
+                onError = onError
+            )
+        }
+    }
+
+    suspend fun signInWithGoogleSuspend(
+        context: Context,
+        signInWithGoogleOption: GetSignInWithGoogleOption? = null,
+        googleIdOption: GetGoogleIdOption? = null,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
         val firebaseAuth = auth
         val firestoreDb = firestore
 
@@ -1442,101 +1460,138 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        CoroutineScope(Dispatchers.Main).launch {
-            try {
-                val activityContext = findActivity(context) ?: context
-                val credentialManager = CredentialManager.create(activityContext)
-                val serverClientId = context.getString(R.string.default_web_client_id)
+        try {
+            val activity = findActivity(context)
+            val activityContext = activity ?: context
+            val credentialManager = CredentialManager.create(activityContext)
+            val serverClientId = context.getString(R.string.default_web_client_id)
 
-                // Clear any stale cached credential state so Credential Manager performs a fresh
-                // standard Sign-In instead of attempting a reauthentication flow on an expired token.
-                try {
-                    credentialManager.clearCredentialState(ClearCredentialStateRequest())
-                } catch (_: Exception) {
-                }
+            val resolvedSignInWithGoogleOption = signInWithGoogleOption ?: GetSignInWithGoogleOption.Builder(serverClientId)
+                .setFilterByAuthorizedAccounts(false)
+                .setAutoSelectEnabled(false)
+                .build()
 
-                val resolvedGoogleIdOption = googleIdOption ?: GetGoogleIdOption.Builder()
-                    .setServerClientId(serverClientId)
-                    .setFilterByAuthorizedAccounts(false)
-                    .setAutoSelectEnabled(false)
+            val resolvedGoogleIdOption = googleIdOption ?: GetGoogleIdOption.Builder()
+                .setServerClientId(serverClientId)
+                .setFilterByAuthorizedAccounts(false)
+                .setAutoSelectEnabled(false)
+                .build()
+
+            val primaryRequest = GetCredentialRequest.Builder()
+                .addCredentialOption(resolvedGoogleIdOption)
+                .build()
+
+            // Do NOT mutate _isLoading before getCredential completes so AuthFullScreen does not recompose
+            // and cancel the Credential Manager dialog while it is launching.
+            val result = try {
+                credentialManager.getCredential(context = activityContext, request = primaryRequest)
+            } catch (noCredEx: NoCredentialException) {
+                Log.w(tag, "GetGoogleIdOption threw NoCredentialException (${noCredEx.message}), retrying with GetSignInWithGoogleOption...")
+                val fallbackRequest = GetCredentialRequest.Builder()
+                    .addCredentialOption(resolvedSignInWithGoogleOption)
                     .build()
+                credentialManager.getCredential(context = activityContext, request = fallbackRequest)
+            }
 
-                val resolvedSignInWithGoogleOption = signInWithGoogleOption ?: GetSignInWithGoogleOption.Builder(serverClientId)
-                    .setFilterByAuthorizedAccounts(false)
-                    .build()
+            _isLoading.value = true
+            _authError.value = null
 
-                val primaryRequest = GetCredentialRequest.Builder()
-                    .addCredentialOption(resolvedGoogleIdOption)
-                    .build()
+            val credential = result.credential
+            if (credential is CustomCredential && credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+                val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
+                val idToken = googleIdTokenCredential.idToken
+                val authCredential = GoogleAuthProvider.getCredential(idToken, null)
 
-                val result = try {
-                    credentialManager.getCredential(context = activityContext, request = primaryRequest)
-                } catch (noCredEx: NoCredentialException) {
-                    Log.w(tag, "GetGoogleIdOption threw NoCredentialException (${noCredEx.message}), retrying with GetSignInWithGoogleOption...")
-                    val fallbackRequest = GetCredentialRequest.Builder()
-                        .addCredentialOption(resolvedSignInWithGoogleOption)
-                        .build()
-                    credentialManager.getCredential(context = activityContext, request = fallbackRequest)
-                }
-
-                val credential = result.credential
-                if (credential is CustomCredential && credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
-                    val idToken = googleIdTokenCredential.idToken
-                    val authCredential = GoogleAuthProvider.getCredential(idToken, null)
-
-                    firebaseAuth.signInWithCredential(authCredential)
-                        .addOnSuccessListener { authResult ->
-                            val firebaseUser = authResult.user
-                            if (firebaseUser == null) {
-                                _isLoading.value = false
-                                val err = "Firebase user session is null after Google authentication."
-                                _authError.value = err
-                                Handler(Looper.getMainLooper()).post {
-                                    Toast.makeText(context, err, Toast.LENGTH_LONG).show()
-                                }
-                                onError(err)
-                                return@addOnSuccessListener
-                            }
-
-                            val uid = firebaseUser.uid
-                            val displayName = firebaseUser.displayName
-                                ?: googleIdTokenCredential.displayName
-                                ?: "Customer"
-                            val email = firebaseUser.email
-                                ?: googleIdTokenCredential.id
-
-                            saveGoogleUserAndAuthenticate(uid, displayName, email, onSuccess, onError)
-                        }
-                        .addOnFailureListener { err ->
+                firebaseAuth.signInWithCredential(authCredential)
+                    .addOnSuccessListener { authResult ->
+                        val firebaseUser = authResult.user
+                        if (firebaseUser == null) {
                             _isLoading.value = false
-                            val errMessage = extractRawExceptionMessage(err)
-                            _authError.value = errMessage
-                            Log.e(tag, "FirebaseAuth signInWithCredential failure: $errMessage", err)
+                            val err = "Firebase user session is null after Google authentication."
+                            _authError.value = err
                             Handler(Looper.getMainLooper()).post {
-                                Toast.makeText(context, errMessage, Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, err, Toast.LENGTH_LONG).show()
                             }
-                            onError(errMessage)
+                            onError(err)
+                            return@addOnSuccessListener
                         }
-                } else {
-                    _isLoading.value = false
-                    val msg = "Unexpected credential type: ${credential.type}"
-                    _authError.value = msg
-                    Handler(Looper.getMainLooper()).post {
-                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+
+                        val uid = firebaseUser.uid
+                        val displayName = firebaseUser.displayName
+                            ?: googleIdTokenCredential.displayName
+                            ?: "Customer"
+                        val email = firebaseUser.email
+                            ?: googleIdTokenCredential.id
+
+                        saveGoogleUserAndAuthenticate(uid, displayName, email, onSuccess, onError)
                     }
-                    onError(msg)
-                }
-            } catch (e: Exception) {
+                    .addOnFailureListener { err ->
+                        _isLoading.value = false
+                        val errMessage = extractRawExceptionMessage(err)
+                        _authError.value = errMessage
+                        Log.e(tag, "FirebaseAuth signInWithCredential failure: $errMessage", err)
+                        Handler(Looper.getMainLooper()).post {
+                            Toast.makeText(context, errMessage, Toast.LENGTH_LONG).show()
+                        }
+                        onError(errMessage)
+                    }
+            } else {
                 _isLoading.value = false
-                val msg = extractRawExceptionMessage(e)
+                val msg = "Unexpected credential type: ${credential.type}"
                 _authError.value = msg
-                Log.e(tag, "Google Sign-In exception: $msg", e)
                 Handler(Looper.getMainLooper()).post {
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 }
                 onError(msg)
             }
+        } catch (e: Exception) {
+            // If Play Services GIS on the device throws [16] Account reauth failed, fall back to
+            // Firebase Auth's official Google OAuth provider activity flow so the user can sign in directly.
+            val activity = findActivity(context)
+            if (activity != null && e.message?.contains("Account reauth failed", ignoreCase = true) == true) {
+                Log.w(tag, "CredentialManager returned [16] Account reauth failed; launching Firebase OAuthProvider('google.com') fallback...")
+                val provider = OAuthProvider.newBuilder("google.com")
+                    .addCustomParameter("prompt", "select_account")
+                    .build()
+                firebaseAuth.startActivityForSignInWithProvider(activity, provider)
+                    .addOnSuccessListener { authResult ->
+                        val firebaseUser = authResult.user
+                        if (firebaseUser != null) {
+                            _isLoading.value = true
+                            saveGoogleUserAndAuthenticate(
+                                uid = firebaseUser.uid,
+                                displayName = firebaseUser.displayName ?: "Customer",
+                                email = firebaseUser.email ?: "",
+                                onSuccess = onSuccess,
+                                onError = onError
+                            )
+                        } else {
+                            _isLoading.value = false
+                            val msg = extractRawExceptionMessage(e)
+                            _authError.value = msg
+                            onError(msg)
+                        }
+                    }
+                    .addOnFailureListener { webErr ->
+                        _isLoading.value = false
+                        val msg = "${extractRawExceptionMessage(e)} | OAuthFallback: ${extractRawExceptionMessage(webErr)}"
+                        _authError.value = msg
+                        Handler(Looper.getMainLooper()).post {
+                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                        }
+                        onError(msg)
+                    }
+                return
+            }
+
+            _isLoading.value = false
+            val msg = extractRawExceptionMessage(e)
+            _authError.value = msg
+            Log.e(tag, "Google Sign-In exception: $msg", e)
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+            }
+            onError(msg)
         }
     }
 
