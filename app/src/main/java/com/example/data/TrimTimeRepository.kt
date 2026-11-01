@@ -13,7 +13,7 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.NoCredentialException
 import com.example.R
-import com.example.ui.auth.formatStandardGoogleSignInError
+import com.example.ui.auth.extractRawExceptionMessage
 import com.example.ui.auth.setFilterByAuthorizedAccounts
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
@@ -1471,12 +1471,8 @@ class TrimTimeRepository private constructor(context: Context) {
 
                 val result = try {
                     credentialManager.getCredential(context = activityContext, request = primaryRequest)
-                } catch (firstEx: Exception) {
-                    Log.w(tag, "Primary GetGoogleIdOption sign-in attempt fell back (${firstEx.message}), retrying with GetSignInWithGoogleOption...")
-                    try {
-                        credentialManager.clearCredentialState(ClearCredentialStateRequest())
-                    } catch (_: Exception) {
-                    }
+                } catch (noCredEx: NoCredentialException) {
+                    Log.w(tag, "GetGoogleIdOption threw NoCredentialException (${noCredEx.message}), retrying with GetSignInWithGoogleOption...")
                     val fallbackRequest = GetCredentialRequest.Builder()
                         .addCredentialOption(resolvedSignInWithGoogleOption)
                         .build()
@@ -1514,8 +1510,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         }
                         .addOnFailureListener { err ->
                             _isLoading.value = false
-                            val errMessage = formatStandardGoogleSignInError(err.message ?: err.localizedMessage)
-                                ?: "Google Firebase sign-in failed."
+                            val errMessage = extractRawExceptionMessage(err)
                             _authError.value = errMessage
                             Log.e(tag, "FirebaseAuth signInWithCredential failure: $errMessage", err)
                             Handler(Looper.getMainLooper()).post {
@@ -1534,10 +1529,9 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
             } catch (e: Exception) {
                 _isLoading.value = false
-                val msg = formatStandardGoogleSignInError(e.message ?: e.localizedMessage)
-                    ?: "Google Sign-In failed. Please try again."
+                val msg = extractRawExceptionMessage(e)
                 _authError.value = msg
-                Log.e(tag, "Google Sign-In exception: ${e.message}", e)
+                Log.e(tag, "Google Sign-In exception: $msg", e)
                 Handler(Looper.getMainLooper()).post {
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 }

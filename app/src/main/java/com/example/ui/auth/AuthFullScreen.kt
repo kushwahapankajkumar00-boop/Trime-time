@@ -86,6 +86,8 @@ import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.RedAlert
 
+import com.google.android.gms.common.api.ApiException
+
 /**
  * Ensures `GetSignInWithGoogleOption.Builder` supports `.setFilterByAuthorizedAccounts(false)`
  * so new Google users are never filtered out or cancelled with Error 16.
@@ -95,7 +97,7 @@ fun GetSignInWithGoogleOption.Builder.setFilterByAuthorizedAccounts(
 ): GetSignInWithGoogleOption.Builder = this
 
 /**
- * Builds a standard Google Sign-In `GetCredentialRequest` (not a reauth flow) using
+ * Builds a standard Google Sign-In `GetCredentialRequest` using
  * `context.getString(R.string.default_web_client_id)` and `setFilterByAuthorizedAccounts(false)`.
  */
 fun buildStandardGoogleSignInRequest(context: Context): GetCredentialRequest {
@@ -115,19 +117,16 @@ fun buildStandardGoogleSignInRequest(context: Context): GetCredentialRequest {
 }
 
 /**
- * Normalizes Google Sign-In error messages so internal Play Services reauth strings
- * (such as "[16] Account reauth failed") are replaced with clear standard Sign-In messages.
+ * Extracts the exact raw exception message (including ApiException statusCode if present)
+ * without hiding or replacing it with any custom fallback text.
  */
-fun formatStandardGoogleSignInError(rawMessage: String?): String? {
-    if (rawMessage.isNullOrBlank()) return null
-    return when {
-        rawMessage.contains("Account reauth failed", ignoreCase = true) ||
-            rawMessage.contains("reauth", ignoreCase = true) ->
-            "Google Sign-In could not verify this account on your device. Please ensure your Google account is signed in on this device or use Email & Password above."
-        rawMessage.contains("[16]", ignoreCase = true) &&
-            rawMessage.contains("Cancelled", ignoreCase = true) ->
-            "Google Sign-In was cancelled. Please select a Google account to continue."
-        else -> rawMessage
+fun extractRawExceptionMessage(e: Throwable): String {
+    val apiEx = (e as? ApiException) ?: (e.cause as? ApiException)
+    val baseMsg = e.message ?: e.localizedMessage ?: e.toString()
+    return if (apiEx != null) {
+        "ApiException(${apiEx.statusCode}): $baseMsg"
+    } else {
+        "${e.javaClass.simpleName}: $baseMsg"
     }
 }
 
@@ -156,7 +155,7 @@ fun AuthFullScreen(
     var localError by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
 
-    val activeError = formatStandardGoogleSignInError(localError ?: errorMessage)
+    val activeError = localError ?: errorMessage
 
     Box(
         modifier = modifier
@@ -589,8 +588,7 @@ fun AuthFullScreen(
                                     onContinueWithGoogle()
                                 }
                             } catch (e: Exception) {
-                                val msg = formatStandardGoogleSignInError(e.message)
-                                    ?: "Google Sign-In initialization error"
+                                val msg = extractRawExceptionMessage(e)
                                 localError = msg
                                 Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                             }

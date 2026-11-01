@@ -17,7 +17,7 @@ import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.model.UserProfile
 import com.example.model.UserRole
-import com.example.ui.auth.formatStandardGoogleSignInError
+import com.example.ui.auth.extractRawExceptionMessage
 import com.example.ui.auth.setFilterByAuthorizedAccounts
 import com.example.util.SecurityValidator
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
@@ -439,13 +439,12 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                     onSuccess()
                 },
                 onError = { err ->
-                    val cleanErr = formatStandardGoogleSignInError(err) ?: "Google Sign-In failed. Please try again."
-                    Toast.makeText(context, cleanErr, Toast.LENGTH_LONG).show()
-                    _userMessage.value = cleanErr
+                    Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+                    _userMessage.value = err
                 }
             )
         } catch (e: Exception) {
-            val errMsg = formatStandardGoogleSignInError(e.message) ?: "Google Sign-In failed. Please try again."
+            val errMsg = extractRawExceptionMessage(e)
             Toast.makeText(context, errMsg, Toast.LENGTH_LONG).show()
             _userMessage.value = errMsg
         }
