@@ -335,7 +335,12 @@ class TrimTimeRepository private constructor(context: Context) {
             if (apps.isNotEmpty()) {
                 auth = FirebaseAuth.getInstance()
                 val customDbId = context.getString(R.string.firestore_database_id)
-                firestore = FirebaseFirestore.getInstance(customDbId)
+                val projectId = FirebaseApp.getInstance().options.projectId
+                firestore = if (projectId == "trime-time") {
+                    FirebaseFirestore.getInstance()
+                } else {
+                    FirebaseFirestore.getInstance(customDbId)
+                }
                 defaultFirestore = try {
                     FirebaseFirestore.getInstance()
                 } catch (_: Exception) {
@@ -343,7 +348,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
                 isFirebaseReady = true
                 _isCloudSynced.value = true
-                Log.d(tag, "Firebase Auth and custom Firestore ($customDbId) initialized successfully.")
+                Log.d(tag, "Firebase Auth and Firestore (project=$projectId) initialized successfully.")
 
                 // Check real Firebase Auth state or persisted Firestore account session on startup
                 val firebaseUser = auth?.currentUser

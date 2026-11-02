@@ -1,0 +1,55 @@
+{
+  "project_info": {
+    "project_number": "114322323457",
+    "project_id": "trime-time",
+    "storage_bucket": "trime-time.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:114322323457:android:2326c9bb2017b29259e800",
+        "android_client_info": {
+          "package_name": "com.trimtime.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "114322323457-2o3dbktvggtqc8na21m8h8d7njpall1u.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.trimtime.app",
+            "certificate_hash": "9d75b640a696525658555b5088642858f738e3ef"
+          }
+        },
+        {
+          "client_id": "114322323457-6b06ltjn5otp6t6tacb4gu88n8ocpons.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.trimtime.app",
+            "certificate_hash": "9075b640469652565855583088642858f738e3ef"
+          }
+        },
+        {
+          "client_id": "114322323457-0p5t9qt2tju31t8fuiq7q98mfgclecag.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCUa452aBwjeHyJ9FplHanVcUhgaNisKLU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "114322323457-0p5t9qt2tju31t8fuiq7q98mfgclecag.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

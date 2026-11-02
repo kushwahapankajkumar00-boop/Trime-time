@@ -63,11 +63,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.widget.Toast
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.GetCredentialRequest
@@ -77,6 +84,7 @@ import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthException
+import java.security.MessageDigest
 import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -137,6 +145,51 @@ fun extractRawExceptionMessage(e: Throwable): String {
             "ApiException(${apiEx.statusCode}): $baseMsg"
         else ->
             "${e.javaClass.simpleName}: $baseMsg"
+    }
+}
+
+/**
+ * Temporarily restored helper function to retrieve the current APK's signing certificate SHA-1
+ * fingerprint formatted as `AA:BB:CC:...` so it can be copied into the Firebase Console.
+ */
+@Suppress("DEPRECATION", "PackageManagerGetSignatures")
+fun getAppSha1Fingerprint(context: Context): String {
+    return try {
+        val packageManager = context.packageManager
+        val packageName = context.packageName
+        val signatureBytes: ByteArray? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val packageInfo = packageManager.getPackageInfo(
+                packageName,
+                PackageManager.GET_SIGNING_CERTIFICATES
+            )
+            val signingInfo = packageInfo.signingInfo
+            val signatures = if (signingInfo != null) {
+                if (signingInfo.hasMultipleSigners()) {
+                    signingInfo.apkContentsSigners
+                } else {
+                    signingInfo.signingCertificateHistory
+                }
+            } else {
+                null
+            }
+            signatures?.firstOrNull()?.toByteArray()
+        } else {
+            val packageInfo = packageManager.getPackageInfo(
+                packageName,
+                PackageManager.GET_SIGNATURES
+            )
+            packageInfo.signatures?.firstOrNull()?.toByteArray()
+        }
+
+        if (signatureBytes == null) {
+            "Unavailable (No signature found)"
+        } else {
+            val md = MessageDigest.getInstance("SHA-1")
+            val digest = md.digest(signatureBytes)
+            digest.joinToString(":") { byte -> "%02X".format(byte) }
+        }
+    } catch (e: Exception) {
+        "Error reading SHA-1: ${e.message}"
     }
 }
 
@@ -647,6 +700,72 @@ fun AuthFullScreen(
                             color = if (isLoading) Color(0xFF94A3B8) else Color(0xFF0F172A)
                         )
                     }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Temporary SHA-1 Fingerprint Diagnostic Card at the bottom of AuthFullScreen
+            val sha1Fingerprint = remember(context) { getAppSha1Fingerprint(context) }
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("sha1_fingerprint_card")
+                    .clickable {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        clipboard?.setPrimaryClip(ClipData.newPlainText("APK SHA-1", sha1Fingerprint))
+                        Toast.makeText(context, "SHA-1 copied: $sha1Fingerprint", Toast.LENGTH_LONG).show()
+                    },
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                border = CardDefaults.outlinedCardBorder().copy(
+                    brush = SolidColor(AmberPrimary.copy(alpha = 0.55f))
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "APK SHA-1 FINGERPRINT (TAP TO COPY)",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = AmberPrimary
+                        )
+                        Icon(
+                            imageVector = Icons.Default.ContentCopy,
+                            contentDescription = "Copy SHA-1",
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    SelectionContainer {
+                        Text(
+                            text = sha1Fingerprint,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = Color.White,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("sha1_fingerprint_text")
+                        )
+                    }
+                    Text(
+                        text = "Package: ${context.packageName}",
+                        fontSize = 11.sp,
+                        color = Color(0xFF94A3B8),
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
         }
