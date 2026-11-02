@@ -21,8 +21,12 @@ import com.example.ui.auth.extractRawExceptionMessage
 import com.example.ui.auth.setAutoSelectEnabled
 import com.example.ui.auth.setFilterByAuthorizedAccounts
 import com.example.util.SecurityValidator
+import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.CredentialManager
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -377,18 +381,28 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         password: String,
         onSuccess: () -> Unit = {}
     ) {
-        repository.signInWithEmailAndPassword(
-            email = email,
-            password = password,
-            onSuccess = {
-                _userMessage.value = "Welcome back to TrimTime!"
-                _currentNavTab.value = CustomerNavTab.SALONS
-                onSuccess()
-            },
-            onError = { err ->
-                _userMessage.value = err
+        try {
+            FirebaseAuth.getInstance().signOut()
+        } catch (_: Exception) {
+        }
+        viewModelScope.launch {
+            try {
+                CredentialManager.create(getApplication()).clearCredentialState(ClearCredentialStateRequest())
+            } catch (_: Exception) {
             }
-        )
+            repository.signInWithEmailAndPassword(
+                email = email,
+                password = password,
+                onSuccess = {
+                    _userMessage.value = "Welcome back to TrimTime!"
+                    _currentNavTab.value = CustomerNavTab.SALONS
+                    onSuccess()
+                },
+                onError = { err ->
+                    _userMessage.value = err
+                }
+            )
+        }
     }
 
     fun signUpWithEmail(
@@ -397,19 +411,29 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         password: String,
         onSuccess: () -> Unit = {}
     ) {
-        repository.signUpWithEmailAndPassword(
-            fullName = fullName,
-            email = email,
-            password = password,
-            onSuccess = {
-                _userMessage.value = "Account created! Welcome to TrimTime."
-                _currentNavTab.value = CustomerNavTab.SALONS
-                onSuccess()
-            },
-            onError = { err ->
-                _userMessage.value = err
+        try {
+            FirebaseAuth.getInstance().signOut()
+        } catch (_: Exception) {
+        }
+        viewModelScope.launch {
+            try {
+                CredentialManager.create(getApplication()).clearCredentialState(ClearCredentialStateRequest())
+            } catch (_: Exception) {
             }
-        )
+            repository.signUpWithEmailAndPassword(
+                fullName = fullName,
+                email = email,
+                password = password,
+                onSuccess = {
+                    _userMessage.value = "Account created! Welcome to TrimTime."
+                    _currentNavTab.value = CustomerNavTab.SALONS
+                    onSuccess()
+                },
+                onError = { err ->
+                    _userMessage.value = err
+                }
+            )
+        }
     }
 
     private var googleSignInJob: Job? = null
@@ -418,6 +442,15 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         if (googleSignInJob?.isActive == true) return
         googleSignInJob = viewModelScope.launch {
             try {
+                try {
+                    FirebaseAuth.getInstance().signOut()
+                } catch (_: Exception) {
+                }
+                try {
+                    CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest())
+                } catch (_: Exception) {
+                }
+
                 val serverClientId = context.getString(R.string.default_web_client_id)
                 if (serverClientId.isBlank()) {
                     val msg = "Missing default_web_client_id in strings/google-services.json"
@@ -450,7 +483,13 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                     }
                 )
             } catch (e: Exception) {
-                val errMsg = extractRawExceptionMessage(e)
+                val firebaseErrCode = (e as? FirebaseAuthException)?.errorCode
+                    ?: (e.cause as? FirebaseAuthException)?.errorCode
+                val errMsg = if (!firebaseErrCode.isNullOrBlank() && !extractRawExceptionMessage(e).contains(firebaseErrCode)) {
+                    "FirebaseAuthException[$firebaseErrCode]: ${extractRawExceptionMessage(e)}"
+                } else {
+                    extractRawExceptionMessage(e)
+                }
                 Toast.makeText(context, errMsg, Toast.LENGTH_LONG).show()
                 _userMessage.value = errMsg
             }

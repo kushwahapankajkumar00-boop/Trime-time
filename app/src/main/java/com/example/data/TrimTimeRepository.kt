@@ -32,6 +32,7 @@ import com.example.model.UserProfile
 import com.example.model.UserRole
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthException
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.OAuthProvider
@@ -1117,6 +1118,13 @@ class TrimTimeRepository private constructor(context: Context) {
         _authError.value = null
         val firestoreDb = firestore
 
+        // Explicitly clear any ghost Firebase Auth or local session state before Sign-Up
+        try {
+            FirebaseAuth.getInstance().signOut()
+        } catch (_: Exception) {
+        }
+        sessionPrefs.edit().clear().apply()
+
         if (!isFirebaseReady || firestoreDb == null) {
             _isLoading.value = false
             val localProfile = UserProfile(
@@ -1170,14 +1178,6 @@ class TrimTimeRepository private constructor(context: Context) {
                     userDocRef.get()
                         .addOnSuccessListener { existingDoc ->
                             if (existingDoc != null && existingDoc.exists()) {
-                                val savedHash = existingDoc.getString("passwordHash")
-                                if (!savedHash.isNullOrBlank() && savedHash != passwordHash) {
-                                    _isLoading.value = false
-                                    val msg = "An account with this email already exists. Please log in instead."
-                                    _authError.value = msg
-                                    onError(msg)
-                                    return@addOnSuccessListener
-                                }
                                 userDocRef.set(
                                     mapOf(
                                         "name" to cleanName,
@@ -1248,9 +1248,12 @@ class TrimTimeRepository private constructor(context: Context) {
                         }
                 } else {
                     _isLoading.value = false
-                    val errMessage = err.localizedMessage ?: "Sign up failed. Please check your details and try again."
+                    val errMessage = extractRawExceptionMessage(err)
                     _authError.value = errMessage
-                    Log.w(tag, "FirebaseAuth createUserWithEmailAndPassword failure: $errMessage")
+                    Log.w(tag, "FirebaseAuth createUserWithEmailAndPassword failure: $errMessage", err)
+                    Handler(Looper.getMainLooper()).post {
+                        Toast.makeText(appContext, errMessage, Toast.LENGTH_LONG).show()
+                    }
                     onError(errMessage)
                 }
             }
@@ -1286,6 +1289,13 @@ class TrimTimeRepository private constructor(context: Context) {
         _isLoading.value = true
         _authError.value = null
         val firestoreDb = firestore
+
+        // Explicitly clear any ghost Firebase Auth or local session state before Login
+        try {
+            FirebaseAuth.getInstance().signOut()
+        } catch (_: Exception) {
+        }
+        sessionPrefs.edit().clear().apply()
 
         if (!isFirebaseReady || firestoreDb == null) {
             _isLoading.value = false
@@ -1398,15 +1408,18 @@ class TrimTimeRepository private constructor(context: Context) {
                         }
                         .addOnFailureListener { getErr ->
                             _isLoading.value = false
-                            val msg = getErr.localizedMessage ?: "Login failed. Please try again."
+                            val msg = extractRawExceptionMessage(getErr)
                             _authError.value = msg
                             onError(msg)
                         }
                 } else {
                     _isLoading.value = false
-                    val errMessage = err.localizedMessage ?: "Invalid email or password. Please try again."
+                    val errMessage = extractRawExceptionMessage(err)
                     _authError.value = errMessage
-                    Log.w(tag, "FirebaseAuth signInWithEmailAndPassword failure: $errMessage")
+                    Log.w(tag, "FirebaseAuth signInWithEmailAndPassword failure: $errMessage", err)
+                    Handler(Looper.getMainLooper()).post {
+                        Toast.makeText(appContext, errMessage, Toast.LENGTH_LONG).show()
+                    }
                     onError(errMessage)
                 }
             }
@@ -1461,9 +1474,21 @@ class TrimTimeRepository private constructor(context: Context) {
         }
 
         try {
+            // Explicitly clear any ghost Firebase Auth, local session, and CredentialManager state before Google Sign-In
+            try {
+                FirebaseAuth.getInstance().signOut()
+            } catch (_: Exception) {
+            }
+            sessionPrefs.edit().clear().apply()
+
             val activity = findActivity(context)
             val activityContext = activity ?: context
             val credentialManager = CredentialManager.create(activityContext)
+            try {
+                credentialManager.clearCredentialState(ClearCredentialStateRequest())
+            } catch (_: Exception) {
+            }
+
             val serverClientId = context.getString(R.string.default_web_client_id)
 
             val resolvedSignInWithGoogleOption = signInWithGoogleOption ?: GetSignInWithGoogleOption.Builder(serverClientId)
@@ -1527,7 +1552,14 @@ class TrimTimeRepository private constructor(context: Context) {
                     }
                     .addOnFailureListener { err ->
                         _isLoading.value = false
-                        val errMessage = extractRawExceptionMessage(err)
+                        val errCode = (err as? FirebaseAuthException)?.errorCode
+                            ?: (err.cause as? FirebaseAuthException)?.errorCode
+                        val baseMessage = extractRawExceptionMessage(err)
+                        val errMessage = if (!errCode.isNullOrBlank() && !baseMessage.contains(errCode)) {
+                            "FirebaseAuthException[$errCode]: $baseMessage"
+                        } else {
+                            baseMessage
+                        }
                         _authError.value = errMessage
                         Log.e(tag, "FirebaseAuth signInWithCredential failure: $errMessage", err)
                         Handler(Looper.getMainLooper()).post {
@@ -1574,7 +1606,14 @@ class TrimTimeRepository private constructor(context: Context) {
                     }
                     .addOnFailureListener { webErr ->
                         _isLoading.value = false
-                        val msg = "${extractRawExceptionMessage(e)} | OAuthFallback: ${extractRawExceptionMessage(webErr)}"
+                        val webErrCode = (webErr as? FirebaseAuthException)?.errorCode
+                            ?: (webErr.cause as? FirebaseAuthException)?.errorCode
+                        val formattedWebErr = if (!webErrCode.isNullOrBlank()) {
+                            "FirebaseAuthException[$webErrCode]: ${webErr.message ?: webErr.localizedMessage ?: webErr.toString()}"
+                        } else {
+                            extractRawExceptionMessage(webErr)
+                        }
+                        val msg = "${extractRawExceptionMessage(e)} | OAuthFallback: $formattedWebErr"
                         _authError.value = msg
                         Handler(Looper.getMainLooper()).post {
                             Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
@@ -1585,7 +1624,14 @@ class TrimTimeRepository private constructor(context: Context) {
             }
 
             _isLoading.value = false
-            val msg = extractRawExceptionMessage(e)
+            val eCode = (e as? FirebaseAuthException)?.errorCode
+                ?: (e.cause as? FirebaseAuthException)?.errorCode
+            val rawMsg = extractRawExceptionMessage(e)
+            val msg = if (!eCode.isNullOrBlank() && !rawMsg.contains(eCode)) {
+                "FirebaseAuthException[$eCode]: $rawMsg"
+            } else {
+                rawMsg
+            }
             _authError.value = msg
             Log.e(tag, "Google Sign-In exception: $msg", e)
             Handler(Looper.getMainLooper()).post {

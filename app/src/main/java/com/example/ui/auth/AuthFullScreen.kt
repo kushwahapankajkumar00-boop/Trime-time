@@ -65,12 +65,19 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import android.content.Context
 import android.widget.Toast
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.CredentialManager
 import androidx.credentials.GetCredentialRequest
 import com.example.R
+import com.google.android.gms.common.api.ApiException
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthException
+import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -85,8 +92,6 @@ import com.example.ui.theme.AmberSecondary
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCardSurface
 import com.example.ui.theme.RedAlert
-
-import com.google.android.gms.common.api.ApiException
 
 /**
  * Ensures `GetSignInWithGoogleOption.Builder` supports `.setFilterByAuthorizedAccounts(false)`
@@ -118,16 +123,20 @@ fun buildStandardGoogleSignInRequest(context: Context): GetCredentialRequest {
 }
 
 /**
- * Extracts the exact raw exception message (including ApiException statusCode if present)
- * without hiding or replacing it with any custom fallback text.
+ * Extracts the exact raw exception message (including `FirebaseAuthException.errorCode`
+ * or `ApiException.statusCode` if present) without hiding or replacing it.
  */
 fun extractRawExceptionMessage(e: Throwable): String {
+    val firebaseAuthEx = (e as? FirebaseAuthException) ?: (e.cause as? FirebaseAuthException)
     val apiEx = (e as? ApiException) ?: (e.cause as? ApiException)
     val baseMsg = e.message ?: e.localizedMessage ?: e.toString()
-    return if (apiEx != null) {
-        "ApiException(${apiEx.statusCode}): $baseMsg"
-    } else {
-        "${e.javaClass.simpleName}: $baseMsg"
+    return when {
+        firebaseAuthEx != null ->
+            "FirebaseAuthException[${firebaseAuthEx.errorCode}]: $baseMsg"
+        apiEx != null ->
+            "ApiException(${apiEx.statusCode}): $baseMsg"
+        else ->
+            "${e.javaClass.simpleName}: $baseMsg"
     }
 }
 
@@ -155,6 +164,7 @@ fun AuthFullScreen(
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
 
     val activeError = localError ?: errorMessage
 
@@ -507,10 +517,21 @@ fun AuthFullScreen(
                             }
 
                             localError = null
-                            if (isSignUpMode) {
-                                onSignUpWithEmail(trimmedName, trimmedEmail, password)
-                            } else {
-                                onLoginWithEmail(trimmedEmail, password)
+                            try {
+                                FirebaseAuth.getInstance().signOut()
+                            } catch (_: Exception) {
+                            }
+                            coroutineScope.launch {
+                                try {
+                                    CredentialManager.create(context)
+                                        .clearCredentialState(ClearCredentialStateRequest())
+                                } catch (_: Exception) {
+                                }
+                                if (isSignUpMode) {
+                                    onSignUpWithEmail(trimmedName, trimmedEmail, password)
+                                } else {
+                                    onLoginWithEmail(trimmedEmail, password)
+                                }
                             }
                         },
                         enabled = !isLoading,
@@ -579,6 +600,10 @@ fun AuthFullScreen(
                             }
                             if (!errorMessage.isNullOrBlank()) {
                                 onClearError()
+                            }
+                            try {
+                                FirebaseAuth.getInstance().signOut()
+                            } catch (_: Exception) {
                             }
                             try {
                                 val serverClientId = context.getString(R.string.default_web_client_id)
