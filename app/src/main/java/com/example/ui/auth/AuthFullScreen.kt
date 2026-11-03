@@ -570,21 +570,15 @@ fun AuthFullScreen(
                             }
 
                             localError = null
+                            onClearError()
                             try {
-                                FirebaseAuth.getInstance().signOut()
-                            } catch (_: Exception) {
-                            }
-                            coroutineScope.launch {
-                                try {
-                                    CredentialManager.create(context)
-                                        .clearCredentialState(ClearCredentialStateRequest())
-                                } catch (_: Exception) {
-                                }
                                 if (isSignUpMode) {
                                     onSignUpWithEmail(trimmedName, trimmedEmail, password)
                                 } else {
                                     onLoginWithEmail(trimmedEmail, password)
                                 }
+                            } catch (e: Exception) {
+                                localError = e.message ?: e.toString()
                             }
                         },
                         enabled = !isLoading,

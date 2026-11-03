@@ -201,31 +201,7 @@ fun TrimTimeApp(
 
             is AppAuthState.Authenticated -> {
                 val currentProfile = currentUserProfile
-                val userPhoneDigits = currentProfile?.phone?.filter { it.isDigit() } ?: ""
-                val tenDigits = if (userPhoneDigits.length > 10 && userPhoneDigits.startsWith("91")) {
-                    userPhoneDigits.drop(2).take(10)
-                } else {
-                    userPhoneDigits.takeLast(10)
-                }
-                val needsPhone = currentProfile == null || tenDigits.length != 10
-
-                if (needsPhone) {
-                    PhoneSetupScreen(
-                        userName = currentProfile?.name ?: "Customer",
-                        userEmail = currentProfile?.email ?: "",
-                        isLoading = isAuthLoading,
-                        errorMessage = authError,
-                        onSavePhone = { validPhone ->
-                            viewModel.savePhoneNumber(validPhone, isPhoneVerified = true) {
-                                viewModel.setNavTab(CustomerNavTab.SALONS)
-                                viewModel.selectSalon(null)
-                            }
-                        },
-                        onSignOut = {
-                            viewModel.logout()
-                        }
-                    )
-                } else if (showAdminDashboard && (isSuperAdmin || currentUserProfile?.isAdmin == true)) {
+                if (showAdminDashboard && (isSuperAdmin || currentUserProfile?.isAdmin == true)) {
                     Scaffold(
                         modifier = Modifier.fillMaxSize(),
                         containerColor = DarkBackground,
@@ -248,6 +224,9 @@ fun TrimTimeApp(
                                 },
                                 onResolveSupportTicket = { ticketId, resolved ->
                                     viewModel.resolveSupportTicket(ticketId, resolved)
+                                },
+                                onApproveLocationUnlock = { userId, salonId ->
+                                    viewModel.approveLocationUnlock(userId, salonId)
                                 }
                             )
                         }
@@ -426,6 +405,12 @@ fun TrimTimeApp(
                                                         },
                                                         isAdmin = isSuperAdmin || currentUserProfile?.isAdmin == true,
                                                         onOpenAdminPanel = { viewModel.openAdminDashboard() },
+                                                        onRequestLocationUnlock = {
+                                                            viewModel.requestLocationUnlock(
+                                                                userId = currentUserProfile?.id,
+                                                                salonId = ownedSalon?.id ?: currentUserProfile?.salonId
+                                                            )
+                                                        },
                                                         onRefreshProfile = { viewModel.refreshUserProfile() },
                                                         onLogout = { viewModel.logout() }
                                                     )
@@ -516,6 +501,12 @@ fun TrimTimeApp(
                                         },
                                         onSubmitFeedback = { rating, category, msg, onDone ->
                                             viewModel.submitFeedback(rating, category, msg, onDone)
+                                        },
+                                        onRequestLocationUnlock = { salonId ->
+                                            viewModel.requestLocationUnlock(
+                                                userId = currentUserProfile?.id,
+                                                salonId = salonId ?: currentUserProfile?.salonId
+                                            )
                                         },
                                         onResetSalonRegistration = { salonId ->
                                             viewModel.resetPartnerSalonRegistration(salonId)

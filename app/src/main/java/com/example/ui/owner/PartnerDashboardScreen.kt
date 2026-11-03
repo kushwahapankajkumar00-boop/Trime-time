@@ -158,6 +158,7 @@ fun PartnerDashboardScreen(
     onSubmitFeedback: (rating: Int, category: String, message: String, onDone: (Boolean, String) -> Unit) -> Unit = { _, _, _, onDone ->
         onDone(true, "Saved")
     },
+    onRequestLocationUnlock: (String?) -> Unit = {},
     onResetSalonRegistration: (String?) -> Unit = {},
     onExitPartnerMode: () -> Unit,
     modifier: Modifier = Modifier
@@ -262,6 +263,7 @@ fun PartnerDashboardScreen(
                     onSaveLocation = onSaveShopLocation,
                     onSaveFullProfile = onSaveFullProfile,
                     onSaveShopPhoto = onSaveShopPhoto,
+                    onRequestLocationUnlock = { onRequestLocationUnlock(currentSalon?.id) },
                     onOpenSupportCenter = { showSupportDialog = true },
                     onOpenFeedbackForm = { showFeedbackDialog = true },
                     onOpenTerms = { activeLegalTab = LegalPolicyTab.TERMS },
@@ -2339,6 +2341,7 @@ fun PartnerShopProfileTabContent(
         onSaveLocation(salonId, addr, lm, lat, lng)
     },
     onSaveShopPhoto: (String, String) -> Unit = { _, _ -> },
+    onRequestLocationUnlock: () -> Unit = {},
     onOpenSupportCenter: () -> Unit = {},
     onOpenFeedbackForm: () -> Unit = {},
     onOpenTerms: () -> Unit = {},
@@ -2947,10 +2950,50 @@ fun PartnerShopProfileTabContent(
 
                     HorizontalDivider(color = Color(0xFF1E293B))
 
-                    // PARTNER LOCATION LOCK (Urban Company Style):
-                    // Partners set their physical location ONCE during registration.
-                    // In Shop Profile, the address and GPS coordinates are locked and read-only.
-                    var showLocationChangeSupportDialog by remember { mutableStateOf(false) }
+                    // PARTNER LOCATION LOCK & UNLOCK REQUEST FLOW:
+                    // Checks `isLocationLocked` and `unlockRequestStatus` ("none", "pending", "approved").
+                    val resolvedUnlockStatus = when {
+                        partnerProfile?.unlockRequestStatus.equals("approved", ignoreCase = true) ||
+                            salon?.unlockRequestStatus.equals("approved", ignoreCase = true) -> "approved"
+                        partnerProfile?.unlockRequestStatus.equals("pending", ignoreCase = true) ||
+                            salon?.unlockRequestStatus.equals("pending", ignoreCase = true) -> "pending"
+                        else -> (partnerProfile?.unlockRequestStatus ?: salon?.unlockRequestStatus ?: "none")
+                    }
+                    val isLocationLocked = if (
+                        resolvedUnlockStatus.equals("approved", ignoreCase = true) ||
+                        partnerProfile?.isLocationLocked == false ||
+                        salon?.isLocationLocked == false
+                    ) {
+                        false
+                    } else {
+                        true
+                    }
+                    var localUnlockRequestSent by remember(resolvedUnlockStatus) {
+                        mutableStateOf(resolvedUnlockStatus.equals("pending", ignoreCase = true))
+                    }
+                    val isRequestPending = localUnlockRequestSent || resolvedUnlockStatus.equals("pending", ignoreCase = true)
+
+                    val gpsPermissionLauncher = rememberLauncherForActivityResult(
+                        contract = ActivityResultContracts.RequestMultiplePermissions()
+                    ) { permissions ->
+                        val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                            permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+                        if (granted && !isLocationLocked) {
+                            isFetchingGps = true
+                            fetchDeviceGpsLocation(
+                                context = context,
+                                fallbackLat = currentLatitude,
+                                fallbackLng = currentLongitude,
+                                onLocationResult = { lat, lng, _ ->
+                                    currentLatitude = lat
+                                    currentLongitude = lng
+                                    isGpsFetched = true
+                                    isFetchingGps = false
+                                    locationSaveSuccess = false
+                                }
+                            )
+                        }
+                    }
 
                     Card(
                         modifier = Modifier
@@ -2958,7 +3001,10 @@ fun PartnerShopProfileTabContent(
                             .testTag("partner_locked_location_card"),
                         shape = RoundedCornerShape(14.dp),
                         colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (!isLocationLocked) GreenSuccess.copy(alpha = 0.6f) else Color(0xFF334155)
+                        )
                     ) {
                         Column(
                             modifier = Modifier
@@ -2978,7 +3024,7 @@ fun PartnerShopProfileTabContent(
                                     Icon(
                                         imageVector = Icons.Default.LocationOn,
                                         contentDescription = null,
-                                        tint = AmberPrimary,
+                                        tint = if (!isLocationLocked) GreenSuccess else AmberPrimary,
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Text(
@@ -2993,130 +3039,290 @@ fun PartnerShopProfileTabContent(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(8.dp))
                                         .background(Color(0xFF1E293B))
-                                        .border(1.dp, AmberPrimary.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                                        .border(
+                                            1.dp,
+                                            if (!isLocationLocked) GreenSuccess.copy(alpha = 0.7f) else AmberPrimary.copy(alpha = 0.6f),
+                                            RoundedCornerShape(8.dp)
+                                        )
                                         .padding(horizontal = 8.dp, vertical = 4.dp)
                                         .testTag("location_locked_badge")
                                 ) {
                                     Text(
-                                        text = "🔒 Location Locked",
+                                        text = if (!isLocationLocked) "🔓 Location Unlocked" else "🔒 Location Locked",
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.ExtraBold,
-                                        color = AmberPrimary
+                                        color = if (!isLocationLocked) GreenSuccess else AmberPrimary
                                     )
                                 }
                             }
 
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(DarkSurface)
-                                    .padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Text(
-                                    text = fullAddress.ifBlank { salon?.location ?: "Registered Shop Address" },
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White
-                                )
-                                if (landmark.isNotBlank()) {
+                            if (isLocationLocked) {
+                                // Locked state: Location editing is disabled
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(DarkSurface)
+                                        .padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
                                     Text(
-                                        text = "Landmark: $landmark",
+                                        text = fullAddress.ifBlank { salon?.location ?: "Registered Shop Address" },
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                    if (landmark.isNotBlank()) {
+                                        Text(
+                                            text = "Landmark: $landmark",
+                                            fontSize = 11.sp,
+                                            color = Color(0xFFCBD5E1)
+                                        )
+                                    }
+                                    Text(
+                                        text = "Verified GPS Coordinates: ${String.format(java.util.Locale.US, "%.4f, %.4f", currentLatitude, currentLongitude)}",
                                         fontSize = 11.sp,
-                                        color = Color(0xFFCBD5E1)
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFF38BDF8)
                                     )
                                 }
+
+                                OutlinedTextField(
+                                    value = fullAddress.ifBlank { salon?.location ?: "" },
+                                    onValueChange = {},
+                                    enabled = false,
+                                    readOnly = true,
+                                    label = { Text("Shop Address (Locked)") },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = null,
+                                            tint = AmberPrimary
+                                        )
+                                    },
+                                    singleLine = true,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        disabledBorderColor = Color(0xFF334155),
+                                        disabledContainerColor = DarkSurface,
+                                        disabledTextColor = Color(0xFF94A3B8),
+                                        disabledLabelColor = Color(0xFF64748B)
+                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("locked_shop_address_input")
+                                )
+
                                 Text(
-                                    text = "Verified GPS Coordinates: ${String.format(java.util.Locale.US, "%.4f, %.4f", currentLatitude, currentLongitude)}",
+                                    text = "For customer trust and accurate distance discovery, your physical salon coordinates are locked after onboarding. Request an Admin unlock if you need to update your location.",
                                     fontSize = 11.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF38BDF8)
+                                    color = Color(0xFF94A3B8),
+                                    lineHeight = 15.sp
                                 )
-                            }
 
-                            Text(
-                                text = "For customer trust and accurate distance discovery, your physical salon coordinates are locked after onboarding.",
-                                fontSize = 11.sp,
-                                color = Color(0xFF94A3B8),
-                                lineHeight = 15.sp
-                            )
+                                if (isRequestPending) {
+                                    Surface(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("location_unlock_pending_banner"),
+                                        color = Color(0xFF064E3B).copy(alpha = 0.55f),
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = null,
+                                                tint = GreenSuccess,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "Request Sent to Admin",
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = GreenSuccess
+                                                )
+                                                Text(
+                                                    text = "Status: pending • Admin will approve & unlock your location shortly.",
+                                                    fontSize = 11.sp,
+                                                    color = Color(0xFFD1FAE5)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
 
-                            OutlinedButton(
-                                onClick = { showLocationChangeSupportDialog = true },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(42.dp)
-                                    .testTag("request_location_change_button"),
-                                shape = RoundedCornerShape(10.dp),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8))
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Lock,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Request Location Change",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                    }
-
-                    if (showLocationChangeSupportDialog) {
-                        androidx.compose.material3.AlertDialog(
-                            onDismissRequest = { showLocationChangeSupportDialog = false },
-                            containerColor = Color(0xFF111827),
-                            titleContentColor = Color.White,
-                            textContentColor = Color(0xFFCBD5E1),
-                            title = {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                Button(
+                                    onClick = {
+                                        localUnlockRequestSent = true
+                                        onRequestLocationUnlock()
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Request Sent to Admin",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(46.dp)
+                                        .testTag("request_location_unlock_button"),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (isRequestPending) Color(0xFF1E293B) else AmberPrimary,
+                                        contentColor = if (isRequestPending) AmberPrimary else Color.Black
+                                    )
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.Lock,
+                                        imageVector = if (isRequestPending) Icons.Default.CheckCircle else Icons.Default.LockOpen,
                                         contentDescription = null,
-                                        tint = AmberPrimary
+                                        modifier = Modifier.size(17.dp)
                                     )
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "Location Locked for Partner Safety",
-                                        fontSize = 16.sp,
+                                        text = if (isRequestPending) "Request Sent to Admin" else "Request Location Unlock",
+                                        fontSize = 13.sp,
                                         fontWeight = FontWeight.ExtraBold
                                     )
                                 }
-                            },
-                            text = {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text(
-                                        text = "To prevent fake listings and protect customer directions, partners cannot freely move their salon's GPS pin once the shop is live.",
-                                        fontSize = 13.sp,
-                                        lineHeight = 18.sp
-                                    )
-                                    Text(
-                                        text = "Have you relocated your physical shop? Please contact TrimTime Partner Support at support@trimtime.app with your Shop ID (${salon?.id ?: "Partner"}) and new address proof to update your pinned coordinates.",
-                                        fontSize = 12.sp,
-                                        color = AmberPrimary,
-                                        lineHeight = 17.sp
-                                    )
-                                }
-                            },
-                            confirmButton = {
-                                Button(
-                                    onClick = { showLocationChangeSupportDialog = false },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = AmberPrimary,
-                                        contentColor = Color.Black
-                                    )
+                            } else {
+                                // Unlocked state: Admin approved location unlock (`isLocationLocked == false`)
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = Color(0xFF064E3B).copy(alpha = 0.4f),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess.copy(alpha = 0.7f))
                                 ) {
-                                    Text("Understood", fontWeight = FontWeight.Bold)
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.LockOpen,
+                                            contentDescription = null,
+                                            tint = GreenSuccess,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "Admin approved your request! You can now edit your shop address and live GPS coordinates below.",
+                                            fontSize = 11.sp,
+                                            color = Color(0xFFD1FAE5),
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
+
+                                OutlinedTextField(
+                                    value = fullAddress,
+                                    onValueChange = {
+                                        fullAddress = SecurityValidator.sanitizeAddress(it, trimEdges = false)
+                                        locationSaveSuccess = false
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("unlocked_shop_address_input"),
+                                    label = { Text("Shop Address *", color = Color(0xFF94A3B8)) },
+                                    placeholder = { Text("Enter updated shop address", color = Color(0xFF64748B)) },
+                                    singleLine = false,
+                                    maxLines = 2,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = GreenSuccess,
+                                        unfocusedBorderColor = Color(0xFF475569),
+                                        focusedContainerColor = DarkSurface,
+                                        unfocusedContainerColor = DarkSurface,
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White
+                                    ),
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+
+                                OutlinedTextField(
+                                    value = landmark,
+                                    onValueChange = {
+                                        landmark = SecurityValidator.sanitizeName(it, trimEdges = false)
+                                        locationSaveSuccess = false
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("unlocked_shop_landmark_input"),
+                                    label = { Text("Nearby Landmark (Optional)", color = Color(0xFF94A3B8)) },
+                                    placeholder = { Text("e.g. Near Metro Gate 2", color = Color(0xFF64748B)) },
+                                    singleLine = true,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = GreenSuccess,
+                                        unfocusedBorderColor = Color(0xFF475569),
+                                        focusedContainerColor = DarkSurface,
+                                        unfocusedContainerColor = DarkSurface,
+                                        focusedTextColor = Color.White,
+                                        unfocusedTextColor = Color.White
+                                    ),
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+
+                                OutlinedButton(
+                                    onClick = {
+                                        if (hasLocationPermission(context)) {
+                                            isFetchingGps = true
+                                            fetchDeviceGpsLocation(
+                                                context = context,
+                                                fallbackLat = currentLatitude,
+                                                fallbackLng = currentLongitude,
+                                                onLocationResult = { lat, lng, _ ->
+                                                    currentLatitude = lat
+                                                    currentLongitude = lng
+                                                    isGpsFetched = true
+                                                    isFetchingGps = false
+                                                    locationSaveSuccess = false
+                                                }
+                                            )
+                                        } else {
+                                            gpsPermissionLauncher.launch(
+                                                arrayOf(
+                                                    Manifest.permission.ACCESS_FINE_LOCATION,
+                                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                                                )
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(42.dp)
+                                        .testTag("detect_unlocked_gps_button"),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenSuccess)
+                                ) {
+                                    if (isFetchingGps) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            color = GreenSuccess,
+                                            strokeWidth = 2.dp
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Detecting Live GPS...", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.MyLocation,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Detect Live GPS (${String.format(java.util.Locale.US, "%.4f, %.4f", currentLatitude, currentLongitude)})",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
                                 }
                             }
-                        )
+                        }
                     }
 
                     // Save Changes Action Button

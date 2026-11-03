@@ -392,7 +392,6 @@ class TrimTimeRepository private constructor(context: Context) {
             salonsListener = db.collection("salons").addSnapshotListener { snapshot, error ->
                 if (error != null) {
                     Log.e(tag, "Firestore salons listener error: ${error.message}")
-                    _authError.value = "Firestore: ${error.localizedMessage}"
                     return@addSnapshotListener
                 }
                 if (snapshot != null) {
@@ -564,6 +563,13 @@ class TrimTimeRepository private constructor(context: Context) {
                                 val adminCategoryTag = doc.getString("adminCategoryTag")?.takeIf { it.isNotBlank() } ?: "Standard"
                                 val approvalStatus = doc.getString("approvalStatus")?.takeIf { it.isNotBlank() } ?: "APPROVED"
                                 val isSalonSuspended = doc.getBoolean("isSuspended") ?: false
+                                val salonUnlockStatus = doc.getString("unlockRequestStatus")?.trim()?.lowercase()
+                                    ?.takeIf { it in setOf("none", "pending", "approved") } ?: "none"
+                                val isSalonLocationLocked = readBooleanField(
+                                    doc,
+                                    "isLocationLocked",
+                                    defaultValue = salonUnlockStatus != "approved"
+                                )
 
                                 // Purge any legacy auto-created or dummy salon document in Firestore
                                 if (!isSeedSalon && !isGenuinelyRegistered) {
@@ -605,7 +611,9 @@ class TrimTimeRepository private constructor(context: Context) {
                                     longitude = lng,
                                     isRegistrationCompleted = isGenuinelyRegistered,
                                     registrationFormSubmitted = isSeedSalon || isFormSubmittedFlag,
-                                    isPhoneVerified = isSalonPhoneVerified
+                                    isPhoneVerified = isSalonPhoneVerified,
+                                    isLocationLocked = isSalonLocationLocked,
+                                    unlockRequestStatus = salonUnlockStatus
                                 )
                             } catch (e: Exception) {
                                 Log.e(tag, "Error parsing salon doc ${doc.id}: ${e.message}")
@@ -797,10 +805,24 @@ class TrimTimeRepository private constructor(context: Context) {
             if (existing == null) {
                 combinedById[u.id] = u
             } else {
+                val resolvedUnlockStatus = when {
+                    existing.unlockRequestStatus.equals("approved", ignoreCase = true) ||
+                        u.unlockRequestStatus.equals("approved", ignoreCase = true) -> "approved"
+                    existing.unlockRequestStatus.equals("pending", ignoreCase = true) ||
+                        u.unlockRequestStatus.equals("pending", ignoreCase = true) -> "pending"
+                    else -> existing.unlockRequestStatus.ifBlank { u.unlockRequestStatus }.ifBlank { "none" }
+                }
+                val resolvedLocationLocked = if (resolvedUnlockStatus == "approved") {
+                    false
+                } else {
+                    existing.isLocationLocked && u.isLocationLocked
+                }
                 combinedById[u.id] = existing.copy(
                     isAdmin = existing.isAdmin || u.isAdmin,
                     isBlocked = existing.isBlocked || u.isBlocked,
-                    isSuspended = existing.isSuspended || u.isSuspended
+                    isSuspended = existing.isSuspended || u.isSuspended,
+                    isLocationLocked = resolvedLocationLocked,
+                    unlockRequestStatus = resolvedUnlockStatus
                 )
             }
         }
@@ -814,12 +836,20 @@ class TrimTimeRepository private constructor(context: Context) {
             val anyIsAdmin = current.isAdmin || matchingDocs.any { it.isAdmin }
             val anyIsBlocked = exactDoc.isBlocked
             val maxStrikes = maxOf(current.cancellationStrikes, exactDoc.cancellationStrikes)
+            val resolvedStatus = exactDoc.unlockRequestStatus.ifBlank { current.unlockRequestStatus }.ifBlank { "none" }
+            val resolvedLocked = if (resolvedStatus.equals("approved", ignoreCase = true) && !exactDoc.isLocationLocked) {
+                false
+            } else {
+                exactDoc.isLocationLocked
+            }
             val updated = current.copy(
                 isAdmin = anyIsAdmin,
                 isBlocked = anyIsBlocked,
                 isSuspended = exactDoc.isSuspended || anyIsBlocked,
                 cancellationCount = maxStrikes,
-                cancellationStrikes = maxStrikes
+                cancellationStrikes = maxStrikes,
+                isLocationLocked = resolvedLocked,
+                unlockRequestStatus = resolvedStatus
             )
             if (updated != current) {
                 _currentUserProfile.value = updated
@@ -845,6 +875,13 @@ class TrimTimeRepository private constructor(context: Context) {
             val phoneVal = doc.getString("phone") ?: ""
             val emailVal = doc.getString("email") ?: ""
             val isAdminFlag = readIsAdminFromDoc(doc)
+            val unlockStatusVal = doc.getString("unlockRequestStatus")?.trim()?.lowercase()
+                ?.takeIf { it in setOf("none", "pending", "approved") } ?: "none"
+            val isLocationLockedFlag = readBooleanField(
+                doc,
+                "isLocationLocked",
+                defaultValue = unlockStatusVal != "approved"
+            )
 
             UserProfile(
                 id = uid,
@@ -865,6 +902,8 @@ class TrimTimeRepository private constructor(context: Context) {
                 isSuspended = isSuspendedFlag,
                 isBlocked = isBlockedFlag,
                 isAdmin = isAdminFlag,
+                isLocationLocked = isLocationLockedFlag,
+                unlockRequestStatus = unlockStatusVal,
                 createdAt = doc.getLong("createdAt") ?: 0L
             )
         } catch (e: Exception) {
@@ -1086,8 +1125,9 @@ class TrimTimeRepository private constructor(context: Context) {
     /**
      * Manual Sign Up with Full Name, Email, and Password using standard
      * `FirebaseAuth.getInstance().createUserWithEmailAndPassword(email, password)`.
-     * Saves the user's `name` and `email` to Firestore (`users/{uid}`) upon signup.
-     * Leaves `phone` empty if not already present so the user is routed to `PhoneSetupScreen`.
+     * Saves the user's `name`, `email`, and `uid` to Firestore (`users/{uid}`) upon signup
+     * and immediately navigates to the main Home/Profile screen.
+     * Never swallows exceptions: displays the exact `e.message` in the red error banner on failure.
      */
     fun signUpWithEmailAndPassword(
         fullName: String,
@@ -1121,154 +1161,109 @@ class TrimTimeRepository private constructor(context: Context) {
 
         _isLoading.value = true
         _authError.value = null
-        val firestoreDb = firestore
 
-        // Explicitly clear any ghost Firebase Auth or local session state before Sign-Up
         try {
-            FirebaseAuth.getInstance().signOut()
-        } catch (_: Exception) {
-        }
-        sessionPrefs.edit().clear().apply()
-
-        if (!isFirebaseReady || firestoreDb == null) {
-            _isLoading.value = false
-            val localProfile = UserProfile(
-                id = "email_uid_${cleanEmail.lowercase().hashCode()}",
-                name = cleanName,
-                email = cleanEmail,
-                phone = ""
-            )
-            _currentUserProfile.value = localProfile
-            _currentRole.value = UserRole.CUSTOMER
-            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
-            onSuccess()
-            return
-        }
-
-        FirebaseAuth.getInstance().createUserWithEmailAndPassword(cleanEmail, password)
-            .addOnSuccessListener { authResult ->
-                val firebaseUser = authResult.user
-                if (firebaseUser == null) {
-                    _isLoading.value = false
-                    val err = "Failed to create account. Please try again."
-                    _authError.value = err
-                    onError(err)
-                    return@addOnSuccessListener
-                }
-
-                val uid = firebaseUser.uid
-                val profileUpdates = UserProfileChangeRequest.Builder()
-                    .setDisplayName(cleanName)
-                    .build()
-                firebaseUser.updateProfile(profileUpdates)
-
-                saveGoogleUserAndAuthenticate(
-                    uid = uid,
-                    displayName = cleanName,
-                    email = cleanEmail,
-                    onSuccess = onSuccess,
-                    onError = onError
-                )
+            try {
+                FirebaseAuth.getInstance().signOut()
+            } catch (_: Exception) {
             }
-            .addOnFailureListener { err ->
-                if (isEmailPasswordProviderDisabledError(err)) {
-                    // Seamless Firestore-backed Email/Password registration when the project's Identity Platform provider is disabled
-                    try {
-                        FirebaseAuth.getInstance().signOut()
-                    } catch (_: Exception) {
+            sessionPrefs.edit().clear().apply()
+
+            FirebaseAuth.getInstance().createUserWithEmailAndPassword(cleanEmail, password)
+                .addOnSuccessListener { authResult ->
+                    val firebaseUser = authResult.user
+                    if (firebaseUser == null) {
+                        _isLoading.value = false
+                        val err = "Firebase Auth returned a null user after createUserWithEmailAndPassword."
+                        _authError.value = err
+                        onError(err)
+                        return@addOnSuccessListener
                     }
-                    val uid = "usr_" + hashPasswordSha256(cleanEmail.lowercase()).take(20)
-                    val passwordHash = hashPasswordSha256(password)
-                    val userDocRef = firestoreDb.collection("users").document(uid)
-                    userDocRef.get()
-                        .addOnSuccessListener { existingDoc ->
-                            if (existingDoc != null && existingDoc.exists()) {
-                                userDocRef.set(
-                                    mapOf(
-                                        "name" to cleanName,
-                                        "email" to cleanEmail,
-                                        "passwordHash" to passwordHash
-                                    ),
-                                    com.google.firebase.firestore.SetOptions.merge()
-                                )
-                                saveGoogleUserAndAuthenticate(
-                                    uid = uid,
-                                    displayName = cleanName,
-                                    email = cleanEmail,
-                                    onSuccess = onSuccess,
-                                    onError = onError
-                                )
-                            } else {
-                                val newProfile = UserProfile(
-                                    id = uid,
-                                    name = cleanName,
-                                    email = cleanEmail,
-                                    phone = "",
-                                    isPhoneVerified = false,
-                                    role = "customer",
-                                    defaultCity = _appPreferences.value.defaultCity,
-                                    createdAt = System.currentTimeMillis()
-                                )
-                                val docMap = newProfile.toMap().minus("isAdmin") + mapOf("passwordHash" to passwordHash)
-                                userDocRef.set(docMap, com.google.firebase.firestore.SetOptions.merge())
-                                    .addOnCompleteListener {
-                                        sessionPrefs.edit()
-                                            .putString("saved_uid", uid)
-                                            .putString("saved_name", cleanName)
-                                            .putString("saved_email", cleanEmail)
-                                            .putString("saved_role", "customer")
-                                            .apply()
-                                        _currentUserProfile.value = newProfile
-                                        attachCustomerBookingsListener(uid)
-                                        _currentRole.value = UserRole.CUSTOMER
-                                        _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
-                                        _isLoading.value = false
-                                        onSuccess()
-                                    }
-                            }
+
+                    val uid = firebaseUser.uid
+                    val profileUpdates = UserProfileChangeRequest.Builder()
+                        .setDisplayName(cleanName)
+                        .build()
+                    firebaseUser.updateProfile(profileUpdates)
+
+                    val resolvedAdmin = resolveAdminFlagForUser(
+                        uid = uid,
+                        email = cleanEmail,
+                        phone = "",
+                        directFlag = false
+                    )
+                    val newProfile = UserProfile(
+                        id = uid,
+                        name = cleanName,
+                        email = cleanEmail,
+                        phone = "",
+                        isPhoneVerified = false,
+                        role = "customer",
+                        salonId = null,
+                        hasRegisteredSalon = false,
+                        defaultCity = _appPreferences.value.defaultCity,
+                        cancellationCount = 0,
+                        cancellationStrikes = 0,
+                        isSuspended = false,
+                        isBlocked = false,
+                        isAdmin = resolvedAdmin,
+                        createdAt = System.currentTimeMillis()
+                    )
+
+                    // Immediately save the user data (name, email, uid) to Firestore `users` collection
+                    val userDocMap = newProfile.toMap().minus("isAdmin") + mapOf(
+                        "uid" to uid,
+                        "id" to uid,
+                        "name" to cleanName,
+                        "email" to cleanEmail
+                    )
+                    firestore?.collection("users")?.document(uid)
+                        ?.set(userDocMap, com.google.firebase.firestore.SetOptions.merge())
+                        ?.addOnFailureListener { fsErr ->
+                            Log.e(tag, "Firestore users/$uid write warning: ${fsErr.message}", fsErr)
                         }
-                        .addOnFailureListener {
-                            val newProfile = UserProfile(
-                                id = uid,
-                                name = cleanName,
-                                email = cleanEmail,
-                                phone = "",
-                                isPhoneVerified = false,
-                                role = "customer",
-                                defaultCity = _appPreferences.value.defaultCity,
-                                createdAt = System.currentTimeMillis()
-                            )
-                            sessionPrefs.edit()
-                                .putString("saved_uid", uid)
-                                .putString("saved_name", cleanName)
-                                .putString("saved_email", cleanEmail)
-                                .putString("saved_role", "customer")
-                                .apply()
-                            _currentUserProfile.value = newProfile
-                            attachCustomerBookingsListener(uid)
-                            _currentRole.value = UserRole.CUSTOMER
-                            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
-                            _isLoading.value = false
-                            onSuccess()
-                        }
-                } else {
+
+                    sessionPrefs.edit()
+                        .putString("saved_uid", uid)
+                        .putString("saved_name", cleanName)
+                        .putString("saved_email", cleanEmail)
+                        .putString("saved_role", "customer")
+                        .apply()
+
+                    _currentUserProfile.value = newProfile
+                    attachCustomerBookingsListener(uid)
+                    _showPartnerOnboarding.value = false
+                    _currentRole.value = UserRole.CUSTOMER
                     _isLoading.value = false
-                    val errMessage = extractRawExceptionMessage(err)
-                    _authError.value = errMessage
-                    Log.w(tag, "FirebaseAuth createUserWithEmailAndPassword failure: $errMessage", err)
+                    _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+                    onSuccess()
+                }
+                .addOnFailureListener { e ->
+                    _isLoading.value = false
+                    val exactMessage = e.message ?: e.localizedMessage ?: e.toString()
+                    _authError.value = exactMessage
+                    Log.e(tag, "createUserWithEmailAndPassword failed: $exactMessage", e)
                     Handler(Looper.getMainLooper()).post {
-                        Toast.makeText(appContext, errMessage, Toast.LENGTH_LONG).show()
+                        Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
                     }
-                    onError(errMessage)
+                    onError(exactMessage)
                 }
+        } catch (e: Exception) {
+            _isLoading.value = false
+            val exactMessage = e.message ?: e.localizedMessage ?: e.toString()
+            _authError.value = exactMessage
+            Log.e(tag, "createUserWithEmailAndPassword exception: $exactMessage", e)
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
             }
+            onError(exactMessage)
+        }
     }
 
     /**
      * Manual Login with Email and Password using standard
      * `FirebaseAuth.getInstance().signInWithEmailAndPassword(email, password)`.
-     * Fetches the user's Firestore `users/{uid}` document so if `phone` is missing/invalid,
-     * the app automatically routes them to `PhoneSetupScreen`.
+     * Never swallows exceptions: displays the exact `e.message` in the red error banner on failure.
      */
     fun signInWithEmailAndPassword(
         email: String,
@@ -1293,141 +1288,58 @@ class TrimTimeRepository private constructor(context: Context) {
 
         _isLoading.value = true
         _authError.value = null
-        val firestoreDb = firestore
 
-        // Explicitly clear any ghost Firebase Auth or local session state before Login
         try {
-            FirebaseAuth.getInstance().signOut()
-        } catch (_: Exception) {
-        }
-        sessionPrefs.edit().clear().apply()
-
-        if (!isFirebaseReady || firestoreDb == null) {
-            _isLoading.value = false
-            val localProfile = UserProfile(
-                id = "email_uid_${cleanEmail.lowercase().hashCode()}",
-                name = cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() },
-                email = cleanEmail,
-                phone = ""
-            )
-            _currentUserProfile.value = localProfile
-            _currentRole.value = UserRole.CUSTOMER
-            _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
-            onSuccess()
-            return
-        }
-
-        FirebaseAuth.getInstance().signInWithEmailAndPassword(cleanEmail, password)
-            .addOnSuccessListener { authResult ->
-                val firebaseUser = authResult.user
-                if (firebaseUser == null) {
-                    _isLoading.value = false
-                    val err = "User session is null after login. Please try again."
-                    _authError.value = err
-                    onError(err)
-                    return@addOnSuccessListener
-                }
-
-                val uid = firebaseUser.uid
-                val displayName = firebaseUser.displayName?.takeIf { it.isNotBlank() }
-                    ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
-                val userEmail = firebaseUser.email?.takeIf { it.isNotBlank() } ?: cleanEmail
-
-                saveGoogleUserAndAuthenticate(
-                    uid = uid,
-                    displayName = displayName,
-                    email = userEmail,
-                    onSuccess = onSuccess,
-                    onError = onError
-                )
+            try {
+                FirebaseAuth.getInstance().signOut()
+            } catch (_: Exception) {
             }
-            .addOnFailureListener { err ->
-                if (isEmailPasswordProviderDisabledError(err)) {
-                    // Seamless Firestore-backed Email/Password login when the project's Identity Platform provider is disabled
-                    try {
-                        FirebaseAuth.getInstance().signOut()
-                    } catch (_: Exception) {
+            sessionPrefs.edit().clear().apply()
+
+            FirebaseAuth.getInstance().signInWithEmailAndPassword(cleanEmail, password)
+                .addOnSuccessListener { authResult ->
+                    val firebaseUser = authResult.user
+                    if (firebaseUser == null) {
+                        _isLoading.value = false
+                        val err = "User session is null after login. Please try again."
+                        _authError.value = err
+                        onError(err)
+                        return@addOnSuccessListener
                     }
-                    val uid = "usr_" + hashPasswordSha256(cleanEmail.lowercase()).take(20)
-                    val passwordHash = hashPasswordSha256(password)
-                    val userDocRef = firestoreDb.collection("users").document(uid)
-                    userDocRef.get()
-                        .addOnSuccessListener { existingDoc ->
-                            if (existingDoc != null && existingDoc.exists()) {
-                                val savedHash = existingDoc.getString("passwordHash")
-                                if (!savedHash.isNullOrBlank() && savedHash != passwordHash) {
-                                    _isLoading.value = false
-                                    val msg = "Incorrect password. Please try again."
-                                    _authError.value = msg
-                                    onError(msg)
-                                    return@addOnSuccessListener
-                                }
-                                val displayName = existingDoc.getString("name")?.takeIf { it.isNotBlank() }
-                                    ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
-                                saveGoogleUserAndAuthenticate(
-                                    uid = uid,
-                                    displayName = displayName,
-                                    email = cleanEmail,
-                                    onSuccess = onSuccess,
-                                    onError = onError
-                                )
-                            } else {
-                                // Check if user document exists by email field
-                                firestoreDb.collection("users")
-                                    .whereEqualTo("email", cleanEmail)
-                                    .get()
-                                    .addOnSuccessListener { querySnap ->
-                                        val matchedDoc = querySnap.documents.firstOrNull()
-                                        if (matchedDoc != null && matchedDoc.exists()) {
-                                            val savedHash = matchedDoc.getString("passwordHash")
-                                            if (!savedHash.isNullOrBlank() && savedHash != passwordHash) {
-                                                _isLoading.value = false
-                                                val msg = "Incorrect password. Please try again."
-                                                _authError.value = msg
-                                                onError(msg)
-                                                return@addOnSuccessListener
-                                            }
-                                            val matchedName = matchedDoc.getString("name")?.takeIf { it.isNotBlank() }
-                                                ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
-                                            saveGoogleUserAndAuthenticate(
-                                                uid = matchedDoc.id,
-                                                displayName = matchedName,
-                                                email = cleanEmail,
-                                                onSuccess = onSuccess,
-                                                onError = onError
-                                            )
-                                        } else {
-                                            _isLoading.value = false
-                                            val msg = "No account found with this email. Please Sign Up first."
-                                            _authError.value = msg
-                                            onError(msg)
-                                        }
-                                    }
-                                    .addOnFailureListener {
-                                        _isLoading.value = false
-                                        val msg = "No account found with this email. Please Sign Up first."
-                                        _authError.value = msg
-                                        onError(msg)
-                                    }
-                            }
-                        }
-                        .addOnFailureListener { getErr ->
-                            _isLoading.value = false
-                            val msg = extractRawExceptionMessage(getErr)
-                            _authError.value = msg
-                            onError(msg)
-                        }
-                } else {
+
+                    val uid = firebaseUser.uid
+                    val displayName = firebaseUser.displayName?.takeIf { it.isNotBlank() }
+                        ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
+                    val userEmail = firebaseUser.email?.takeIf { it.isNotBlank() } ?: cleanEmail
+
+                    saveGoogleUserAndAuthenticate(
+                        uid = uid,
+                        displayName = displayName,
+                        email = userEmail,
+                        onSuccess = onSuccess,
+                        onError = onError
+                    )
+                }
+                .addOnFailureListener { e ->
                     _isLoading.value = false
-                    val errMessage = extractRawExceptionMessage(err)
-                    _authError.value = errMessage
-                    Log.w(tag, "FirebaseAuth signInWithEmailAndPassword failure: $errMessage", err)
+                    val exactMessage = e.message ?: e.localizedMessage ?: e.toString()
+                    _authError.value = exactMessage
+                    Log.e(tag, "signInWithEmailAndPassword failed: $exactMessage", e)
                     Handler(Looper.getMainLooper()).post {
-                        Toast.makeText(appContext, errMessage, Toast.LENGTH_LONG).show()
+                        Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
                     }
-                    onError(errMessage)
+                    onError(exactMessage)
                 }
+        } catch (e: Exception) {
+            _isLoading.value = false
+            val exactMessage = e.message ?: e.localizedMessage ?: e.toString()
+            _authError.value = exactMessage
+            Log.e(tag, "signInWithEmailAndPassword exception: $exactMessage", e)
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
             }
+            onError(exactMessage)
+        }
     }
 
     private tailrec fun findActivity(context: Context): Activity? = when (context) {
@@ -1490,7 +1402,9 @@ class TrimTimeRepository private constructor(context: Context) {
             val activityContext = activity ?: context
             val credentialManager = CredentialManager.create(activityContext)
             try {
-                credentialManager.clearCredentialState(ClearCredentialStateRequest())
+                kotlinx.coroutines.withTimeoutOrNull(400L) {
+                    credentialManager.clearCredentialState(ClearCredentialStateRequest())
+                }
             } catch (_: Exception) {
             }
 
@@ -1706,6 +1620,13 @@ class TrimTimeRepository private constructor(context: Context) {
                         directFlag = readIsAdminFromDoc(existingDoc)
                     )
                     val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
+                    val existingUnlockStatus = existingDoc.getString("unlockRequestStatus")?.trim()?.lowercase()
+                        ?.takeIf { it in setOf("none", "pending", "approved") } ?: "none"
+                    val existingLocationLocked = readBooleanField(
+                        existingDoc,
+                        "isLocationLocked",
+                        defaultValue = existingUnlockStatus != "approved"
+                    )
 
                     val userProfile = UserProfile(
                         id = uid,
@@ -1722,6 +1643,8 @@ class TrimTimeRepository private constructor(context: Context) {
                         isSuspended = existingIsSuspended || existingIsBlocked,
                         isBlocked = existingIsBlocked,
                         isAdmin = existingIsAdmin,
+                        isLocationLocked = existingLocationLocked,
+                        unlockRequestStatus = existingUnlockStatus,
                         createdAt = existingCreatedAt
                     )
 
@@ -2599,6 +2522,14 @@ class TrimTimeRepository private constructor(context: Context) {
                         directFlag = readIsAdminFromDoc(doc)
                     )
 
+                    val existingUnlockStatusVal = doc.getString("unlockRequestStatus")?.trim()?.lowercase()
+                        ?.takeIf { it in setOf("none", "pending", "approved") } ?: "none"
+                    val existingLocationLockedVal = readBooleanField(
+                        doc,
+                        "isLocationLocked",
+                        defaultValue = existingUnlockStatusVal != "approved"
+                    )
+
                     // Every user MUST default to Customer Mode upon Login / Session Restore
                     val profile = UserProfile(
                         id = uid,
@@ -2615,6 +2546,8 @@ class TrimTimeRepository private constructor(context: Context) {
                         isSuspended = suspended || existingIsBlockedVal,
                         isBlocked = existingIsBlockedVal,
                         isAdmin = existingIsAdminVal,
+                        isLocationLocked = existingLocationLockedVal,
+                        unlockRequestStatus = existingUnlockStatusVal,
                         createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
                     )
                     sessionPrefs.edit().putString("saved_role", "customer").apply()
@@ -3686,6 +3619,191 @@ class TrimTimeRepository private constructor(context: Context) {
                 Log.e(tag, "Failed to resolve support ticket: ${err.message}")
                 onError(err.localizedMessage ?: "Failed to update support ticket.")
             }
+    }
+
+    /**
+     * Partner/User Action: Requests a location unlock from the Admin.
+     * Updates the user's Firestore document (`users/{uid}`) and any associated partner salon (`salons/{salonId}`)
+     * to set `isLocationLocked = true` and `unlockRequestStatus = "pending"`.
+     */
+    fun requestLocationUnlock(
+        userId: String? = null,
+        salonId: String? = null,
+        onComplete: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        val current = _currentUserProfile.value
+        val targetUid = userId?.trim()?.takeIf { it.isNotBlank() }
+            ?: current?.id?.trim()?.takeIf { it.isNotBlank() }
+            ?: auth?.currentUser?.uid?.trim().orEmpty()
+
+        if (targetUid.isBlank()) {
+            onComplete(false, "Please sign in to request a location unlock.")
+            return
+        }
+
+        val resolvedSalonId = salonId?.trim()?.takeIf { it.isNotBlank() }
+            ?: current?.salonId?.trim()?.takeIf { it.isNotBlank() }
+            ?: _salons.value.find { it.ownerId == targetUid || it.partnerId == targetUid }?.id
+
+        // Update in-memory user profile and allUsers list immediately
+        if (current != null && current.id == targetUid) {
+            _currentUserProfile.value = current.copy(
+                isLocationLocked = true,
+                unlockRequestStatus = "pending"
+            )
+        }
+        namedDbUsers = namedDbUsers.map { u ->
+            if (u.id == targetUid) u.copy(isLocationLocked = true, unlockRequestStatus = "pending") else u
+        }
+        defaultDbUsers = defaultDbUsers.map { u ->
+            if (u.id == targetUid) u.copy(isLocationLocked = true, unlockRequestStatus = "pending") else u
+        }
+        _allUsers.value = _allUsers.value.map { u ->
+            if (u.id == targetUid) u.copy(isLocationLocked = true, unlockRequestStatus = "pending") else u
+        }
+
+        // Update in-memory salon if partner owns one
+        if (!resolvedSalonId.isNullOrBlank()) {
+            _salons.value = _salons.value.map { s ->
+                if (s.id == resolvedSalonId || s.ownerId == targetUid || s.partnerId == targetUid) {
+                    s.copy(isLocationLocked = true, unlockRequestStatus = "pending")
+                } else s
+            }
+        }
+
+        val updates = mapOf(
+            "isLocationLocked" to true,
+            "unlockRequestStatus" to "pending"
+        )
+
+        val db = firestore
+        val defDb = defaultFirestore
+
+        if (db == null && defDb == null) {
+            onComplete(true, "Request Sent to Admin")
+            return
+        }
+
+        if (defDb != null && defDb != db) {
+            defDb.collection("users").document(targetUid)
+                .set(updates, com.google.firebase.firestore.SetOptions.merge())
+        }
+
+        if (!resolvedSalonId.isNullOrBlank()) {
+            db?.collection("salons")?.document(resolvedSalonId)
+                ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+            if (defDb != null && defDb != db) {
+                defDb.collection("salons").document(resolvedSalonId)
+                    .set(updates, com.google.firebase.firestore.SetOptions.merge())
+            }
+        }
+
+        val primaryDb = db ?: defDb
+        primaryDb?.collection("users")?.document(targetUid)
+            ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+            ?.addOnSuccessListener {
+                Log.d(tag, "Location unlock request sent for user $targetUid (unlockRequestStatus=pending)")
+                onComplete(true, "Request Sent to Admin")
+            }
+            ?.addOnFailureListener { err ->
+                Log.e(tag, "Failed to send location unlock request: ${err.message}", err)
+                onComplete(false, err.message ?: "Failed to send request to Admin.")
+            } ?: onComplete(true, "Request Sent to Admin")
+    }
+
+    /**
+     * Admin 1-Click Action: Approves & unlocks location editing for a User/Partner.
+     * Updates `users/{userId}` (and any salon owned by `userId` or matching `salonId`) in Firestore
+     * to set `isLocationLocked = false` and `unlockRequestStatus = "approved"`.
+     * Immediately updates `_allUsers` and `_salons` so the approved request disappears from the pending list.
+     */
+    fun approveLocationUnlock(
+        userId: String,
+        salonId: String? = null,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val adminProfile = _currentUserProfile.value
+        if (adminProfile == null || adminProfile.isAdmin != true) {
+            onError("Access Denied: Only Super Admins can approve location unlock requests.")
+            return
+        }
+        val targetUid = userId.trim()
+        val resolvedSalonId = salonId?.trim()?.takeIf { it.isNotBlank() }
+            ?: _salons.value.find { it.ownerId == targetUid || it.partnerId == targetUid }?.id
+
+        if (targetUid.isBlank() && resolvedSalonId.isNullOrBlank()) return
+
+        // Update in-memory user lists immediately so the approved request disappears from the pending list right away
+        if (targetUid.isNotBlank()) {
+            namedDbUsers = namedDbUsers.map { u ->
+                if (u.id == targetUid) u.copy(isLocationLocked = false, unlockRequestStatus = "approved") else u
+            }
+            defaultDbUsers = defaultDbUsers.map { u ->
+                if (u.id == targetUid) u.copy(isLocationLocked = false, unlockRequestStatus = "approved") else u
+            }
+            _allUsers.value = _allUsers.value.map { u ->
+                if (u.id == targetUid) u.copy(isLocationLocked = false, unlockRequestStatus = "approved") else u
+            }
+            _currentUserProfile.value?.let { current ->
+                if (current.id == targetUid) {
+                    _currentUserProfile.value = current.copy(
+                        isLocationLocked = false,
+                        unlockRequestStatus = "approved"
+                    )
+                }
+            }
+        }
+
+        // Also update any matching salon in memory
+        _salons.value = _salons.value.map { s ->
+            if ((!resolvedSalonId.isNullOrBlank() && s.id == resolvedSalonId) ||
+                (targetUid.isNotBlank() && (s.ownerId == targetUid || s.partnerId == targetUid))
+            ) {
+                s.copy(isLocationLocked = false, unlockRequestStatus = "approved")
+            } else s
+        }
+
+        val updates = mapOf(
+            "isLocationLocked" to false,
+            "unlockRequestStatus" to "approved"
+        )
+
+        val db = firestore
+        val defDb = defaultFirestore
+        if (db == null && defDb == null) {
+            onSuccess()
+            return
+        }
+
+        if (!resolvedSalonId.isNullOrBlank()) {
+            db?.collection("salons")?.document(resolvedSalonId)
+                ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+            if (defDb != null && defDb != db) {
+                defDb.collection("salons").document(resolvedSalonId)
+                    .set(updates, com.google.firebase.firestore.SetOptions.merge())
+            }
+        }
+
+        if (targetUid.isNotBlank()) {
+            if (defDb != null && defDb != db) {
+                defDb.collection("users").document(targetUid)
+                    .set(updates, com.google.firebase.firestore.SetOptions.merge())
+            }
+            val primaryDb = db ?: defDb
+            primaryDb?.collection("users")?.document(targetUid)
+                ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+                ?.addOnSuccessListener {
+                    Log.d(tag, "Admin approved & unlocked location for user $targetUid")
+                    onSuccess()
+                }
+                ?.addOnFailureListener { err ->
+                    Log.e(tag, "Failed to approve location unlock for $targetUid: ${err.message}", err)
+                    onError(err.localizedMessage ?: "Failed to approve location unlock.")
+                } ?: onSuccess()
+        } else {
+            onSuccess()
+        }
     }
 
     companion object {

@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
@@ -66,6 +67,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -105,6 +107,7 @@ fun ProfileScreen(
     },
     isAdmin: Boolean = false,
     onOpenAdminPanel: () -> Unit = {},
+    onRequestLocationUnlock: () -> Unit = {},
     onRefreshProfile: () -> Unit = {},
     onLogout: () -> Unit,
     modifier: Modifier = Modifier
@@ -117,6 +120,21 @@ fun ProfileScreen(
     var showSupportDialog by remember { mutableStateOf(false) }
     var showFeedbackDialog by remember { mutableStateOf(false) }
     var activeLegalTab by remember { mutableStateOf<LegalPolicyTab?>(null) }
+    var showAdminPasswordDialog by remember { mutableStateOf(false) }
+    var enteredAdminPassword by remember { mutableStateOf("") }
+
+    val currentUser = userProfile
+    val firebaseCurrentUserEmail = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.email
+    val isSuperAdmin = (currentUser?.email == "kushwahapankajkumar00@gmail.com") ||
+        (firebaseCurrentUserEmail == "kushwahapankajkumar00@gmail.com")
+
+    val isUserLocationLocked = userProfile?.let {
+        it.isLocationLocked && !it.unlockRequestStatus.equals("approved", ignoreCase = true)
+    } ?: true
+    var localUnlockRequestSent by remember(userProfile?.unlockRequestStatus) {
+        mutableStateOf(userProfile?.unlockRequestStatus.equals("pending", ignoreCase = true))
+    }
+    val isUnlockPending = localUnlockRequestSent || userProfile?.unlockRequestStatus.equals("pending", ignoreCase = true)
 
     val isHinglish = appPreferences.language == AppLanguage.HINDI_HINGLISH
     val bgColor = MaterialTheme.colorScheme.background
@@ -277,10 +295,86 @@ fun ProfileScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    val user = userProfile
-                    if (user?.isAdmin == true || isAdmin) {
+
+                    // Location Lock & Unlock Request Section on Profile Card
+                    if (isUserLocationLocked) {
+                        if (isUnlockPending) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(Color(0xFF064E3B).copy(alpha = 0.5f))
+                                    .border(1.dp, GreenSuccess, RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .testTag("profile_unlock_request_sent_banner")
+                            ) {
+                                Text(
+                                    text = "✓ Request Sent to Admin (Status: pending)",
+                                    color = GreenSuccess,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        }
+
                         Button(
-                            onClick = onOpenAdminPanel,
+                            onClick = {
+                                localUnlockRequestSent = true
+                                onRequestLocationUnlock()
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Request Sent to Admin",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 44.dp)
+                                .testTag("profile_request_location_unlock_btn"),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isUnlockPending) Color(0xFF1E293B) else AmberPrimary,
+                                contentColor = if (isUnlockPending) AmberPrimary else Color.Black
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LocationOn,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isUnlockPending) "Request Sent to Admin" else "Request Location Unlock",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 12.sp
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF064E3B).copy(alpha = 0.4f))
+                                .border(1.dp, GreenSuccess.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                .testTag("profile_location_unlocked_banner")
+                        ) {
+                            Text(
+                                text = "🔓 Location Unlocked by Admin — You can edit your location in Edit Profile.",
+                                color = GreenSuccess,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    val user = userProfile
+                    if (isSuperAdmin || user?.isAdmin == true || isAdmin) {
+                        Button(
+                            onClick = {
+                                enteredAdminPassword = ""
+                                showAdminPasswordDialog = true
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = 48.dp)
@@ -303,9 +397,9 @@ fun ProfileScreen(
             }
         }
 
-        // Secret Super Admin Access: ONLY visible if the logged-in user's Firestore document explicitly has isAdmin == true
+        // Secret Super Admin Access: Visible for Super Admin email or explicit isAdmin flag
         val user = userProfile
-        if (user?.isAdmin == true || isAdmin) {
+        if (isSuperAdmin || user?.isAdmin == true || isAdmin) {
             item {
                 Card(
                     modifier = Modifier
@@ -360,7 +454,10 @@ fun ProfileScreen(
                         }
 
                         Button(
-                            onClick = onOpenAdminPanel,
+                            onClick = {
+                                enteredAdminPassword = ""
+                                showAdminPasswordDialog = true
+                            },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = 50.dp)
@@ -855,6 +952,17 @@ fun ProfileScreen(
             initialName = userProfile?.name ?: "",
             initialPhone = initialPhone,
             initialCity = userProfile?.defaultCity?.ifBlank { appPreferences.defaultCity } ?: appPreferences.defaultCity,
+            isLocationLocked = isUserLocationLocked,
+            isUnlockPending = isUnlockPending,
+            onRequestLocationUnlock = {
+                localUnlockRequestSent = true
+                onRequestLocationUnlock()
+                android.widget.Toast.makeText(
+                    context,
+                    "Request Sent to Admin",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            },
             onDismiss = { showEditPersonalDialog = false },
             onSave = { updatedName, updatedPhone, updatedCity ->
                 showEditPersonalDialog = false
@@ -897,6 +1005,102 @@ fun ProfileScreen(
         LegalPoliciesViewerDialog(
             initialTab = tab,
             onDismiss = { activeLegalTab = null }
+        )
+    }
+
+    // Dialog 6: Admin Password Verification Dialog
+    if (showAdminPasswordDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showAdminPasswordDialog = false
+                enteredAdminPassword = ""
+            },
+            containerColor = Color(0xFF1E293B),
+            title = {
+                Text(
+                    text = "👑 Admin Security Verification",
+                    color = Color.White,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Enter the Super Admin password to unlock the Admin Panel:",
+                        color = Color(0xFFCBD5E1),
+                        fontSize = 13.sp
+                    )
+                    OutlinedTextField(
+                        value = enteredAdminPassword,
+                        onValueChange = { enteredAdminPassword = it },
+                        label = { Text("Admin Password") },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = "Admin Password",
+                                tint = AmberPrimary
+                            )
+                        },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AmberPrimary,
+                            unfocusedBorderColor = Color(0xFF475569),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedLabelColor = AmberPrimary,
+                            unfocusedLabelColor = Color(0xFF94A3B8),
+                            cursorColor = AmberPrimary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_password_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (enteredAdminPassword == "[Pankajkumar@6200092115@]" ||
+                            enteredAdminPassword == "Pankajkumar@6200092115@"
+                        ) {
+                            showAdminPasswordDialog = false
+                            enteredAdminPassword = ""
+                            onOpenAdminPanel()
+                        } else {
+                            enteredAdminPassword = ""
+                            android.widget.Toast.makeText(
+                                context,
+                                "Incorrect Admin Password!",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AmberPrimary,
+                        contentColor = Color.Black
+                    ),
+                    modifier = Modifier.testTag("admin_password_submit_button")
+                ) {
+                    Text("Submit", fontWeight = FontWeight.ExtraBold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showAdminPasswordDialog = false
+                        enteredAdminPassword = ""
+                    },
+                    modifier = Modifier.testTag("admin_password_cancel_button")
+                ) {
+                    Text("Cancel", color = Color(0xFF94A3B8))
+                }
+            }
         )
     }
 }
@@ -954,6 +1158,9 @@ private fun EditPersonalProfileDialog(
     initialName: String,
     initialPhone: String,
     initialCity: String,
+    isLocationLocked: Boolean = true,
+    isUnlockPending: Boolean = false,
+    onRequestLocationUnlock: () -> Unit = {},
     onDismiss: () -> Unit,
     onSave: (name: String, phone: String, city: String) -> Unit
 ) {
@@ -969,6 +1176,9 @@ private fun EditPersonalProfileDialog(
         unfocusedTextColor = Color.White,
         focusedLabelColor = AmberPrimary,
         unfocusedLabelColor = Color(0xFF94A3B8),
+        disabledBorderColor = Color(0xFF334155),
+        disabledTextColor = Color(0xFF94A3B8),
+        disabledLabelColor = Color(0xFF64748B),
         cursorColor = AmberPrimary
     )
 
@@ -1023,10 +1233,16 @@ private fun EditPersonalProfileDialog(
                 OutlinedTextField(
                     value = city,
                     onValueChange = {
-                        city = it
-                        errorText = null
+                        if (!isLocationLocked) {
+                            city = it
+                            errorText = null
+                        }
                     },
-                    label = { Text("Default City / Location") },
+                    enabled = !isLocationLocked,
+                    readOnly = isLocationLocked,
+                    label = {
+                        Text(if (isLocationLocked) "Default City / Location (Locked)" else "Default City / Location")
+                    },
                     leadingIcon = { Icon(Icons.Default.LocationOn, contentDescription = null, tint = AmberPrimary) },
                     singleLine = true,
                     colors = fieldColors,
@@ -1034,6 +1250,34 @@ private fun EditPersonalProfileDialog(
                         .fillMaxWidth()
                         .testTag("edit_profile_city_input")
                 )
+
+                if (isLocationLocked) {
+                    if (isUnlockPending) {
+                        Text(
+                            text = "✓ Request Sent to Admin (pending approval)",
+                            color = GreenSuccess,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Button(
+                        onClick = onRequestLocationUnlock,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isUnlockPending) Color(0xFF0F172A) else AmberPrimary,
+                            contentColor = if (isUnlockPending) AmberPrimary else Color.Black
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("dialog_request_location_unlock_btn")
+                    ) {
+                        Text(
+                            text = if (isUnlockPending) "Request Sent to Admin" else "Request Location Unlock",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
 
                 if (!errorText.isNullOrBlank()) {
                     Text(
@@ -1050,7 +1294,7 @@ private fun EditPersonalProfileDialog(
                 onClick = {
                     val cleanName = name.trim()
                     val cleanPhone = phone.filter { it.isDigit() }
-                    val cleanCity = city.trim().ifBlank { "Current Location" }
+                    val cleanCity = if (isLocationLocked) initialCity else city.trim().ifBlank { "Current Location" }
                     when {
                         cleanName.length < 2 -> errorText = "Please enter your full name."
                         cleanPhone.length != 10 -> errorText = "Please enter a valid 10-digit phone number."

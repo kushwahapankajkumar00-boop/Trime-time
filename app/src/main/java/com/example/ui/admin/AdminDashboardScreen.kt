@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.HolidayVillage
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Restore
@@ -60,6 +61,18 @@ private val StatusGreen = Color(0xFF10B981)
 private val AlertRed = Color(0xFFEF4444)
 private val WarningAmber = Color(0xFFF59E0B)
 
+private data class PendingLocationRequestItem(
+    val key: String,
+    val userId: String,
+    val salonId: String?,
+    val displayName: String,
+    val salonName: String?,
+    val roleLabel: String,
+    val phone: String,
+    val email: String,
+    val currentLocation: String
+)
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AdminDashboardScreen(
@@ -70,7 +83,8 @@ fun AdminDashboardScreen(
     onUpdateSalonApproval: (salonId: String, approvalStatus: String, isSuspended: Boolean) -> Unit,
     onUpdateSalonCategory: (salonId: String, categoryTag: String) -> Unit,
     onUpdateUserBlockStatus: (userId: String, isBlocked: Boolean) -> Unit,
-    onResolveSupportTicket: (ticketId: String, isResolved: Boolean) -> Unit
+    onResolveSupportTicket: (ticketId: String, isResolved: Boolean) -> Unit,
+    onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit = { _, _ -> }
 ) {
     BackHandler { onBack() }
 
@@ -86,6 +100,55 @@ fun AdminDashboardScreen(
     }
     val suspendedSalonsCount = remember(salons) {
         salons.count { it.isSuspended || it.approvalStatus.equals("REJECTED", ignoreCase = true) }
+    }
+    val pendingLocationRequests = remember(users, salons) {
+        val byUserId = linkedMapOf<String, PendingLocationRequestItem>()
+
+        // 1. Users/Partners where unlockRequestStatus == "pending"
+        users.filter { it.unlockRequestStatus.equals("pending", ignoreCase = true) }.forEach { u ->
+            val ownedSalon = salons.find {
+                it.ownerId == u.id || it.partnerId == u.id || (!u.salonId.isNullOrBlank() && it.id == u.salonId)
+            }
+            val key = u.id.ifBlank { ownedSalon?.id ?: u.email }
+            byUserId[key] = PendingLocationRequestItem(
+                key = key,
+                userId = u.id,
+                salonId = ownedSalon?.id ?: u.salonId,
+                displayName = u.name.ifBlank { ownedSalon?.ownerName ?: "Salon Partner" },
+                salonName = ownedSalon?.name,
+                roleLabel = if (ownedSalon != null || u.hasRegisteredSalon || u.role.equals("partner", ignoreCase = true)) {
+                    "Salon Partner"
+                } else {
+                    "User"
+                },
+                phone = u.phone.ifBlank { ownedSalon?.phone.orEmpty() },
+                email = u.email,
+                currentLocation = ownedSalon?.shopAddress?.ifBlank { ownedSalon.location }
+                    ?: u.defaultCity.ifBlank { "Locked Location" }
+            )
+        }
+
+        // 2. Any Salon document where unlockRequestStatus == "pending" not already added
+        salons.filter { it.unlockRequestStatus.equals("pending", ignoreCase = true) }.forEach { s ->
+            val ownerUid = s.ownerId.ifBlank { s.partnerId }
+            val key = ownerUid.ifBlank { s.id }
+            if (!byUserId.containsKey(key)) {
+                val matchingUser = users.find { it.id == ownerUid }
+                byUserId[key] = PendingLocationRequestItem(
+                    key = key,
+                    userId = ownerUid,
+                    salonId = s.id,
+                    displayName = matchingUser?.name?.ifBlank { s.ownerName } ?: s.ownerName.ifBlank { s.name },
+                    salonName = s.name,
+                    roleLabel = "Salon Partner",
+                    phone = s.phone.ifBlank { matchingUser?.phone.orEmpty() },
+                    email = matchingUser?.email.orEmpty(),
+                    currentLocation = s.shopAddress.ifBlank { s.location }
+                )
+            }
+        }
+
+        byUserId.values.toList()
     }
 
     Scaffold(
@@ -170,6 +233,13 @@ fun AdminDashboardScreen(
                     )
                     AdminMetricPill(
                         modifier = Modifier.weight(1f),
+                        label = "Location Req",
+                        value = "${pendingLocationRequests.size}",
+                        subValue = if (pendingLocationRequests.isNotEmpty()) "${pendingLocationRequests.size} pending" else "0 pending",
+                        accentColor = if (pendingLocationRequests.isNotEmpty()) WarningAmber else StatusGreen
+                    )
+                    AdminMetricPill(
+                        modifier = Modifier.weight(1f),
                         label = "Help Desk",
                         value = "${supportTickets.size}",
                         subValue = "$openTicketsCount open",
@@ -177,11 +247,12 @@ fun AdminDashboardScreen(
                     )
                 }
 
-                // 3 Core Management Tabs
-                TabRow(
+                // 4 Core Management Tabs (including Pending Location Requests)
+                ScrollableTabRow(
                     selectedTabIndex = selectedTabIndex,
                     containerColor = Color.Transparent,
                     contentColor = Color.White,
+                    edgePadding = 12.dp,
                     divider = {
                         HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
                     }
@@ -194,7 +265,7 @@ fun AdminDashboardScreen(
                             Text(
                                 text = "Salons (${salons.size})",
                                 fontWeight = if (selectedTabIndex == 0) FontWeight.ExtraBold else FontWeight.Medium,
-                                fontSize = 13.sp,
+                                fontSize = 12.sp,
                                 maxLines = 1
                             )
                         },
@@ -214,7 +285,7 @@ fun AdminDashboardScreen(
                             Text(
                                 text = "Users (${users.size})",
                                 fontWeight = if (selectedTabIndex == 1) FontWeight.ExtraBold else FontWeight.Medium,
-                                fontSize = 13.sp,
+                                fontSize = 12.sp,
                                 maxLines = 1
                             )
                         },
@@ -234,7 +305,7 @@ fun AdminDashboardScreen(
                             Text(
                                 text = "Support ($openTicketsCount)",
                                 fontWeight = if (selectedTabIndex == 2) FontWeight.ExtraBold else FontWeight.Medium,
-                                fontSize = 13.sp,
+                                fontSize = 12.sp,
                                 maxLines = 1
                             )
                         },
@@ -242,6 +313,28 @@ fun AdminDashboardScreen(
                             Icon(
                                 imageVector = Icons.Default.SupportAgent,
                                 contentDescription = "Support Help Desk",
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    )
+                    Tab(
+                        selected = selectedTabIndex == 3,
+                        onClick = { selectedTabIndex = 3 },
+                        modifier = Modifier.testTag("admin_tab_location_requests"),
+                        text = {
+                            Text(
+                                text = "Pending Location Requests (${pendingLocationRequests.size})",
+                                fontWeight = if (selectedTabIndex == 3) FontWeight.ExtraBold else FontWeight.Medium,
+                                fontSize = 12.sp,
+                                color = if (pendingLocationRequests.isNotEmpty()) TrimTimeGold else Color.White,
+                                maxLines = 1
+                            )
+                        },
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Default.LocationOn,
+                                contentDescription = "Pending Location Requests",
+                                tint = if (pendingLocationRequests.isNotEmpty()) TrimTimeGold else Color.White,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -263,7 +356,8 @@ fun AdminDashboardScreen(
                     val hint = when (selectedTabIndex) {
                         0 -> "Search salons by name, owner, phone, or tag..."
                         1 -> "Search users by name, mobile, or email..."
-                        else -> "Search tickets by user, phone, or message..."
+                        2 -> "Search tickets by user, phone, or message..."
+                        else -> "Search pending location requests by partner, salon, or phone..."
                     }
                     Text(hint, fontSize = 13.sp)
                 },
@@ -288,9 +382,18 @@ fun AdminDashboardScreen(
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                    .padding(horizontal = 16.dp, vertical = 10.dp)
                     .testTag("admin_search_input")
             )
+
+            // Prominent "Pending Location Requests" Quick-Action Section at the top of Salons/Users tabs whenever pending requests exist
+            if (selectedTabIndex != 3 && pendingLocationRequests.isNotEmpty()) {
+                AdminPendingLocationRequestsBannerSection(
+                    requests = pendingLocationRequests,
+                    onApproveLocationUnlock = onApproveLocationUnlock,
+                    onViewAllClick = { selectedTabIndex = 3 }
+                )
+            }
 
             when (selectedTabIndex) {
                 0 -> AdminSalonsVerificationTab(
@@ -298,6 +401,7 @@ fun AdminDashboardScreen(
                     searchQuery = searchQuery,
                     onUpdateSalonApproval = onUpdateSalonApproval,
                     onUpdateSalonCategory = onUpdateSalonCategory,
+                    onApproveLocationUnlock = onApproveLocationUnlock,
                     onCallPhone = { phone ->
                         val clean = phone.filter { it.isDigit() || it == '+' }
                         if (clean.isNotBlank()) {
@@ -309,6 +413,7 @@ fun AdminDashboardScreen(
                     users = users,
                     searchQuery = searchQuery,
                     onUpdateUserBlockStatus = onUpdateUserBlockStatus,
+                    onApproveLocationUnlock = onApproveLocationUnlock,
                     onCallPhone = { phone ->
                         val clean = phone.filter { it.isDigit() || it == '+' }
                         if (clean.isNotBlank()) {
@@ -321,6 +426,17 @@ fun AdminDashboardScreen(
                     searchQuery = searchQuery,
                     onResolveSupportTicket = onResolveSupportTicket,
                     onCallUser = { phone ->
+                        val clean = phone.filter { it.isDigit() || it == '+' }
+                        if (clean.isNotBlank()) {
+                            context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$clean")))
+                        }
+                    }
+                )
+                3 -> AdminPendingLocationRequestsTab(
+                    requests = pendingLocationRequests,
+                    searchQuery = searchQuery,
+                    onApproveLocationUnlock = onApproveLocationUnlock,
+                    onCallPhone = { phone ->
                         val clean = phone.filter { it.isDigit() || it == '+' }
                         if (clean.isNotBlank()) {
                             context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$clean")))
@@ -380,6 +496,7 @@ private fun AdminSalonsVerificationTab(
     searchQuery: String,
     onUpdateSalonApproval: (salonId: String, approvalStatus: String, isSuspended: Boolean) -> Unit,
     onUpdateSalonCategory: (salonId: String, categoryTag: String) -> Unit,
+    onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit = { _, _ -> },
     onCallPhone: (String) -> Unit
 ) {
     val categoryTags = remember { listOf("Premium", "Standard", "Rural/Local") }
@@ -694,6 +811,36 @@ private fun AdminSalonsVerificationTab(
                         }
                     }
 
+                    if (salon.unlockRequestStatus.equals("pending", ignoreCase = true)) {
+                        Button(
+                            onClick = {
+                                val ownerUid = salon.ownerId.ifBlank { salon.partnerId }
+                                onApproveLocationUnlock(ownerUid, salon.id)
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(42.dp)
+                                .testTag("admin_salon_approve_location_unlock_${salon.id}"),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = StatusGreen,
+                                contentColor = Color.White
+                            )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LockOpen,
+                                contentDescription = "Approve & Unlock",
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Approve & Unlock",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+
                     if (salon.phone.isNotBlank()) {
                         TextButton(
                             onClick = { onCallPhone(salon.phone) },
@@ -725,6 +872,7 @@ private fun AdminUsersSpamTab(
     users: List<UserProfile>,
     searchQuery: String,
     onUpdateUserBlockStatus: (userId: String, isBlocked: Boolean) -> Unit,
+    onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit = { _, _ -> },
     onCallPhone: (String) -> Unit
 ) {
     val filteredUsers = remember(users, searchQuery) {
@@ -974,6 +1122,64 @@ private fun AdminUsersSpamTab(
                             )
                         }
                     }
+
+                    // If this user has a pending Location Unlock Request, show 1-click green "Approve & Unlock" button
+                    if (user.unlockRequestStatus.equals("pending", ignoreCase = true)) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.LocationOn,
+                                    contentDescription = null,
+                                    tint = TrimTimeGold,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Pending Location Unlock Request",
+                                    color = TrimTimeGold,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                            }
+
+                            Button(
+                                onClick = {
+                                    onApproveLocationUnlock(user.id, user.salonId)
+                                },
+                                modifier = Modifier
+                                    .height(38.dp)
+                                    .testTag("admin_user_approve_location_unlock_${user.id}"),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = StatusGreen,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 14.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.LockOpen,
+                                    contentDescription = "Approve & Unlock",
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Approve & Unlock",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1212,6 +1418,404 @@ private fun AdminSupportHelpDeskTab(
                                 fontSize = 13.sp,
                                 maxLines = 1
                             )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdminPendingLocationRequestsBannerSection(
+    requests: List<PendingLocationRequestItem>,
+    onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit,
+    onViewAllClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .testTag("admin_pending_location_requests_section"),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+        border = BorderStroke(1.dp, TrimTimeGold.copy(alpha = 0.7f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.LocationOn,
+                        contentDescription = null,
+                        tint = TrimTimeGold,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        text = "Pending Location Requests (${requests.size})",
+                        color = Color.White,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 14.sp
+                    )
+                }
+
+                TextButton(
+                    onClick = onViewAllClick,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = "Open Tab",
+                        color = TrimTimeGold,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
+            requests.take(3).forEach { req ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF0F172A))
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                    ) {
+                        Text(
+                            text = if (!req.salonName.isNullOrBlank()) {
+                                "${req.displayName} • ${req.salonName}"
+                            } else {
+                                "${req.displayName} (${req.roleLabel})"
+                            },
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = req.currentLocation.ifBlank { req.phone.ifBlank { req.email } },
+                            color = Color(0xFF94A3B8),
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            onApproveLocationUnlock(req.userId, req.salonId)
+                        },
+                        modifier = Modifier
+                            .height(36.dp)
+                            .testTag("admin_banner_approve_unlock_${req.key}"),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = StatusGreen,
+                            contentColor = Color.White
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LockOpen,
+                            contentDescription = "Approve & Unlock",
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Approve & Unlock",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdminPendingLocationRequestsTab(
+    requests: List<PendingLocationRequestItem>,
+    searchQuery: String,
+    onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit,
+    onCallPhone: (String) -> Unit
+) {
+    val filteredRequests = remember(requests, searchQuery) {
+        if (searchQuery.isBlank()) {
+            requests
+        } else {
+            requests.filter {
+                it.displayName.contains(searchQuery, ignoreCase = true) ||
+                    (it.salonName?.contains(searchQuery, ignoreCase = true) == true) ||
+                    it.phone.contains(searchQuery, ignoreCase = true) ||
+                    it.email.contains(searchQuery, ignoreCase = true) ||
+                    it.currentLocation.contains(searchQuery, ignoreCase = true)
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("admin_pending_location_requests_tab")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Pending Location Requests",
+                color = MaterialTheme.colorScheme.onBackground,
+                fontWeight = FontWeight.ExtraBold,
+                fontSize = 16.sp
+            )
+            Surface(
+                color = if (filteredRequests.isNotEmpty()) TrimTimeGold.copy(alpha = 0.2f) else StatusGreen.copy(alpha = 0.15f),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text(
+                    text = "${filteredRequests.size} Pending",
+                    color = if (filteredRequests.isNotEmpty()) TrimTimeGold else StatusGreen,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                )
+            }
+        }
+
+        if (filteredRequests.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(32.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = "No Pending Location Requests",
+                        tint = StatusGreen,
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "No Pending Location Requests",
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "When a Salon Partner or User clicks 'Request Location Unlock', their request will appear here for 1-click approval.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+            return
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(filteredRequests, key = { it.key }) { req ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("admin_location_request_card_${req.key}"),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    ),
+                    border = BorderStroke(1.dp, TrimTimeGold.copy(alpha = 0.6f))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 8.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = req.displayName,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 16.sp
+                                    )
+                                    Surface(
+                                        color = TrimTimeGold.copy(alpha = 0.18f),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = req.roleLabel.uppercase(),
+                                            color = TrimTimeGold,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontSize = 10.sp,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+
+                                if (!req.salonName.isNullOrBlank()) {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "Salon: ${req.salonName}",
+                                        color = TrimTimeGold,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp
+                                    )
+                                }
+
+                                val contactLine = listOfNotNull(
+                                    req.phone.takeIf { it.isNotBlank() },
+                                    req.email.takeIf { it.isNotBlank() }
+                                ).joinToString(" • ")
+                                if (contactLine.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = contactLine,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 12.sp,
+                                        modifier = Modifier.clickable(enabled = req.phone.isNotBlank()) {
+                                            onCallPhone(req.phone)
+                                        }
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                color = WarningAmber.copy(alpha = 0.18f),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = "PENDING UNLOCK",
+                                    color = WarningAmber,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.LocationOn,
+                                    contentDescription = null,
+                                    tint = TrimTimeGold,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Locked Location: ${req.currentLocation.ifBlank { "Registered Shop Location" }}",
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (req.phone.isNotBlank()) {
+                                OutlinedButton(
+                                    onClick = { onCallPhone(req.phone) },
+                                    modifier = Modifier
+                                        .weight(0.9f)
+                                        .height(42.dp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(1.dp, TrimTimeGold)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Call,
+                                        contentDescription = "Call Partner",
+                                        tint = TrimTimeGold,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Call",
+                                        color = TrimTimeGold,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                            }
+
+                            Button(
+                                onClick = {
+                                    onApproveLocationUnlock(req.userId, req.salonId)
+                                },
+                                modifier = Modifier
+                                    .weight(1.4f)
+                                    .height(42.dp)
+                                    .testTag("admin_approve_location_unlock_${req.key}"),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = StatusGreen,
+                                    contentColor = Color.White
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.LockOpen,
+                                    contentDescription = "Approve & Unlock",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Approve & Unlock",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 13.sp,
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
                 }

@@ -381,28 +381,18 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         password: String,
         onSuccess: () -> Unit = {}
     ) {
-        try {
-            FirebaseAuth.getInstance().signOut()
-        } catch (_: Exception) {
-        }
-        viewModelScope.launch {
-            try {
-                CredentialManager.create(getApplication()).clearCredentialState(ClearCredentialStateRequest())
-            } catch (_: Exception) {
+        repository.signInWithEmailAndPassword(
+            email = email,
+            password = password,
+            onSuccess = {
+                _userMessage.value = "Welcome back to TrimTime!"
+                _currentNavTab.value = CustomerNavTab.SALONS
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
             }
-            repository.signInWithEmailAndPassword(
-                email = email,
-                password = password,
-                onSuccess = {
-                    _userMessage.value = "Welcome back to TrimTime!"
-                    _currentNavTab.value = CustomerNavTab.SALONS
-                    onSuccess()
-                },
-                onError = { err ->
-                    _userMessage.value = err
-                }
-            )
-        }
+        )
     }
 
     fun signUpWithEmail(
@@ -411,29 +401,19 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         password: String,
         onSuccess: () -> Unit = {}
     ) {
-        try {
-            FirebaseAuth.getInstance().signOut()
-        } catch (_: Exception) {
-        }
-        viewModelScope.launch {
-            try {
-                CredentialManager.create(getApplication()).clearCredentialState(ClearCredentialStateRequest())
-            } catch (_: Exception) {
+        repository.signUpWithEmailAndPassword(
+            fullName = fullName,
+            email = email,
+            password = password,
+            onSuccess = {
+                _userMessage.value = "Account created! Welcome to TrimTime."
+                _currentNavTab.value = CustomerNavTab.SALONS
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
             }
-            repository.signUpWithEmailAndPassword(
-                fullName = fullName,
-                email = email,
-                password = password,
-                onSuccess = {
-                    _userMessage.value = "Account created! Welcome to TrimTime."
-                    _currentNavTab.value = CustomerNavTab.SALONS
-                    onSuccess()
-                },
-                onError = { err ->
-                    _userMessage.value = err
-                }
-            )
-        }
+        )
     }
 
     private var googleSignInJob: Job? = null
@@ -447,7 +427,9 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 } catch (_: Exception) {
                 }
                 try {
-                    CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest())
+                    kotlinx.coroutines.withTimeoutOrNull(400L) {
+                        CredentialManager.create(context).clearCredentialState(ClearCredentialStateRequest())
+                    }
                 } catch (_: Exception) {
                 }
 
@@ -1249,6 +1231,35 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 } else {
                     "Support ticket reopened."
                 }
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun requestLocationUnlock(
+        userId: String? = null,
+        salonId: String? = null
+    ) {
+        repository.requestLocationUnlock(
+            userId = userId,
+            salonId = salonId,
+            onComplete = { _, msg ->
+                _userMessage.value = msg
+            }
+        )
+    }
+
+    fun approveLocationUnlock(
+        userId: String,
+        salonId: String? = null
+    ) {
+        repository.approveLocationUnlock(
+            userId = userId,
+            salonId = salonId,
+            onSuccess = {
+                _userMessage.value = "✓ Location unlocked & approved!"
             },
             onError = { err ->
                 _userMessage.value = err

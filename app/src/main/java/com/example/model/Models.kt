@@ -57,6 +57,8 @@ data class UserProfile(
     val cancellationStrikes: Int = cancellationCount,
     val isSuspended: Boolean = false,
     val isBlocked: Boolean = false,
+    val isLocationLocked: Boolean = true,
+    val unlockRequestStatus: String = "none", // "none", "pending", "approved"
     val createdAt: Long = System.currentTimeMillis()
 ) {
     val effectiveCancellationStrikes: Int
@@ -82,6 +84,8 @@ data class UserProfile(
         put("cancellationStrikes", effectiveCancellationStrikes)
         put("isSuspended", isEffectivelyBlocked)
         put("isBlocked", isBlocked)
+        put("isLocationLocked", isLocationLocked)
+        put("unlockRequestStatus", unlockRequestStatus)
         put("createdAt", createdAt)
     }
 }
@@ -139,7 +143,9 @@ data class Salon(
     val longitude: Double? = null,
     val isRegistrationCompleted: Boolean = false,
     val registrationFormSubmitted: Boolean = false,
-    val isPhoneVerified: Boolean = true
+    val isPhoneVerified: Boolean = true,
+    val isLocationLocked: Boolean = true,
+    val unlockRequestStatus: String = "none" // "none", "pending", "approved"
 ) {
     val isBusy: Boolean
         get() = currentStatus.equals("BUSY", ignoreCase = true)
@@ -188,6 +194,8 @@ data class Salon(
         "isRegistrationCompleted" to isRegistrationCompleted,
         "registrationFormSubmitted" to registrationFormSubmitted,
         "isPhoneVerified" to isPhoneVerified,
+        "isLocationLocked" to isLocationLocked,
+        "unlockRequestStatus" to unlockRequestStatus,
         "coordinates" to if (latitude != null && longitude != null) mapOf(
             "lat" to latitude,
             "lng" to longitude
