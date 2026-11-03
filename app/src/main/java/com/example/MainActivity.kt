@@ -46,6 +46,7 @@ import com.example.ui.components.PinVerificationDialog
 import com.example.ui.customer.BookingBottomSheet
 import com.example.ui.customer.CustomerBookingsContent
 import com.example.ui.customer.CustomerHomeScreen
+import com.example.ui.customer.MyBookingsScreen
 import com.example.ui.customer.ProfileScreen
 import com.example.ui.customer.SalonDetailScreen
 import com.example.ui.admin.AdminDashboardScreen
@@ -279,7 +280,7 @@ fun TrimTimeApp(
                                     contentWindowInsets = WindowInsets(0, 0, 0, 0),
                                     snackbarHost = { SnackbarHost(snackbarHostState) },
                                     topBar = {
-                                        if (selectedSalon == null) {
+                                        if (selectedSalon == null && currentNavTab != CustomerNavTab.MY_BOOKINGS) {
                                             AppTopBar(
                                                 isCloudSynced = isCloudSynced,
                                                 hasRegisteredPartnerSalon = hasRegisteredPartnerSalon,
@@ -364,20 +365,25 @@ fun TrimTimeApp(
                                                         },
                                                         onProfileClick = {
                                                             viewModel.setNavTab(CustomerNavTab.PROFILE)
+                                                        },
+                                                        onOpenMyBookings = {
+                                                            viewModel.setNavTab(CustomerNavTab.MY_BOOKINGS)
                                                         }
                                                     )
                                                 }
 
                                                 CustomerNavTab.MY_BOOKINGS -> {
-                                                    CustomerBookingsContent(
-                                                        bookings = customerBookings,
-                                                        currentUserId = currentCustomerUid,
-                                                        salons = allSalons,
-                                                        cancellationCount = currentUserProfile?.effectiveCancellationStrikes ?: 0,
-                                                        isSuspended = isUserSuspended,
-                                                        onViewBookingDetails = { /* detail */ },
-                                                        onCancelBooking = { viewModel.cancelBooking(it) },
-                                                        onSwitchToSalonsTab = { viewModel.setNavTab(CustomerNavTab.SALONS) }
+                                                    MyBookingsScreen(
+                                                        localBookings = customerBookings,
+                                                        onBackClick = {
+                                                            viewModel.setNavTab(CustomerNavTab.SALONS)
+                                                        },
+                                                        onCancelBooking = { bookingId ->
+                                                            viewModel.cancelBooking(bookingId)
+                                                        },
+                                                        onBrowseSalons = {
+                                                            viewModel.setNavTab(CustomerNavTab.SALONS)
+                                                        }
                                                     )
                                                 }
 
@@ -423,6 +429,9 @@ fun TrimTimeApp(
                                                             )
                                                         },
                                                         onRefreshProfile = { viewModel.refreshUserProfile() },
+                                                        onOpenMyBookings = {
+                                                            viewModel.setNavTab(CustomerNavTab.MY_BOOKINGS)
+                                                        },
                                                         onLogout = { viewModel.logout() }
                                                     )
                                                 }

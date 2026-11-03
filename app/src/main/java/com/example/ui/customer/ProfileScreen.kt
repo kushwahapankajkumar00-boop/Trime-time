@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Edit
@@ -109,6 +110,7 @@ fun ProfileScreen(
     onOpenAdminPanel: () -> Unit = {},
     onRequestLocationUnlock: () -> Unit = {},
     onRefreshProfile: () -> Unit = {},
+    onOpenMyBookings: () -> Unit = {},
     onLogout: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -293,6 +295,31 @@ fun ProfileScreen(
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Button(
+                        onClick = onOpenMyBookings,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .testTag("profile_my_bookings_btn"),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AmberPrimary,
+                            contentColor = Color.Black
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CalendarMonth,
+                            contentDescription = "My Bookings",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isHinglish) "मेरी बुकिंग्स (My Bookings)" else "My Bookings",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 13.sp
                         )
                     }
 

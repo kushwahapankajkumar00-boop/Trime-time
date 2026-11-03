@@ -176,6 +176,27 @@ fun AuthFullScreen(
 
     val activeError = localError ?: errorMessage
 
+    // Temporarily display the active Firebase projectId so the user can verify which project Auth is connected to
+    LaunchedEffect(Unit) {
+        try {
+            if (FirebaseApp.getApps(context).isEmpty()) {
+                FirebaseApp.initializeApp(context)
+            }
+            val activeProjectId = FirebaseApp.getInstance().options.projectId ?: "unknown"
+            Toast.makeText(
+                context,
+                "Firebase Project ID: $activeProjectId",
+                Toast.LENGTH_LONG
+            ).show()
+        } catch (e: Exception) {
+            Toast.makeText(
+                context,
+                "Firebase Project ID Error: ${e.message}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
     // Automatically prompt to Sign Up when Firebase returns invalid credentials in Login mode
     LaunchedEffect(activeError) {
         if (!isSignUpMode && activeError != null) {

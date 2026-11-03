@@ -35,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
@@ -148,6 +149,7 @@ fun CustomerHomeScreen(
     pastBooking: Booking? = null,
     onRebook: (Booking) -> Unit = {},
     onProfileClick: () -> Unit = {},
+    onOpenMyBookings: () -> Unit = {},
     onRateSalon: (Salon, Int, String) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
@@ -386,6 +388,45 @@ fun CustomerHomeScreen(
                 searchQuery = searchQuery,
                 onSearchChanged = onSearchChanged
             )
+        }
+
+        // 2b. Quick Access 'My Bookings' Button on Home Screen
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                OutlinedButton(
+                    onClick = onOpenMyBookings,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.75f)),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = DarkCardSurface,
+                        contentColor = AmberPrimary
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("home_my_bookings_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CalendarMonth,
+                        contentDescription = "My Bookings",
+                        tint = AmberPrimary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "My Bookings • View Upcoming & Past Appointments",
+                        color = AmberPrimary,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 13.sp
+                    )
+                }
+            }
         }
 
         // 3. Quick Re-book Section (Strictly shown ONLY when the logged-in customer has a COMPLETED past booking)

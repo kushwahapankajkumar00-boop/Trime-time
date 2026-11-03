@@ -156,7 +156,7 @@ object SecurityValidator {
      */
     fun isBookingActiveStatus(status: String): Boolean {
         val normalized = status.trim().uppercase()
-        return normalized == "PENDING" || normalized == "ACCEPTED" || normalized == "IN_PROGRESS"
+        return normalized == "PENDING" || normalized == "CONFIRMED" || normalized == "ACCEPTED" || normalized == "IN_PROGRESS"
     }
 
     /**

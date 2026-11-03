@@ -232,53 +232,6 @@ data class Salon(
         get() = if (averageRating > 0.0) averageRating else rating
 }
 
-enum class BookingStatus(val displayName: String) {
-    PENDING("Pending Arrival"),
-    ACCEPTED("Accepted • Confirmed"),
-    IN_PROGRESS("In Chair"),
-    COMPLETED("Completed"),
-    REJECTED("Rejected"),
-    CANCELLED("Cancelled")
-}
-
-data class Booking(
-    val id: String = "",
-    val customerId: String = "",
-    val customerName: String = "",
-    val customerPhone: String = "",
-    val salonId: String = "",
-    val salonName: String = "",
-    val service: String = "",
-    val servicePrice: Int = 100,
-    val timeSlot: String = "",
-    val bookingDate: String = "Today",
-    val status: String = "pending", // pending, accepted, in_progress, completed, rejected, cancelled
-    val pin: String = "", // 4-digit Service PIN
-    val createdAt: Long = System.currentTimeMillis(),
-    val completedAt: Long? = null
-) {
-    val servicePin: String
-        get() = pin
-
-    fun toMap(): Map<String, Any?> = mapOf(
-        "id" to id,
-        "customerId" to customerId,
-        "customerName" to customerName,
-        "customerPhone" to customerPhone,
-        "salonId" to salonId,
-        "salonName" to salonName,
-        "service" to service,
-        "servicePrice" to servicePrice,
-        "timeSlot" to timeSlot,
-        "bookingDate" to bookingDate,
-        "status" to status,
-        "pin" to pin,
-        "servicePin" to pin,
-        "createdAt" to createdAt,
-        "completedAt" to completedAt
-    )
-}
-
 data class FeedbackSubmission(
     val id: String = "",
     val userId: String = "",

@@ -345,24 +345,18 @@ class TrimTimeRepository private constructor(context: Context) {
 
     private fun initFirebase(context: Context) {
         try {
+            if (FirebaseApp.getApps(context).isEmpty()) {
+                FirebaseApp.initializeApp(context)
+            }
             val apps = FirebaseApp.getApps(context)
             if (apps.isNotEmpty()) {
                 auth = FirebaseAuth.getInstance()
-                val customDbId = context.getString(R.string.firestore_database_id)
+                firestore = FirebaseFirestore.getInstance()
+                defaultFirestore = firestore
                 val projectId = FirebaseApp.getInstance().options.projectId
-                firestore = if (projectId == "trime-time") {
-                    FirebaseFirestore.getInstance()
-                } else {
-                    FirebaseFirestore.getInstance(customDbId)
-                }
-                defaultFirestore = try {
-                    FirebaseFirestore.getInstance()
-                } catch (_: Exception) {
-                    null
-                }
                 isFirebaseReady = true
                 _isCloudSynced.value = true
-                Log.d(tag, "Firebase Auth and Firestore (project=$projectId) initialized successfully.")
+                Log.d(tag, "Firebase Auth and Firestore (project=$projectId) initialized strictly from default google-services.json.")
 
                 // Verify real Firebase Auth state against the server on startup
                 val firebaseUser = auth?.currentUser
@@ -1014,18 +1008,35 @@ class TrimTimeRepository private constructor(context: Context) {
             val resolvedPin = doc.getString("servicePin")?.takeIf { it.isNotBlank() }
                 ?: doc.getString("pin")?.takeIf { it.isNotBlank() }
                 ?: "0000"
+            val docId = doc.getString("bookingId")?.takeIf { it.isNotBlank() }
+                ?: doc.getString("id")?.takeIf { it.isNotBlank() }
+                ?: doc.id
+            val resolvedUser = doc.getString("userId")?.trim()?.takeIf { it.isNotBlank() }
+                ?: doc.getString("customerId")?.trim().orEmpty()
+            val resolvedPartner = doc.getString("partnerId")?.trim()?.takeIf { it.isNotBlank() }
+                ?: doc.getString("salonId")?.trim().orEmpty()
+            val resolvedDate = doc.getString("date")?.takeIf { it.isNotBlank() }
+                ?: doc.getString("bookingDate")?.takeIf { it.isNotBlank() }
+                ?: "Today"
+            val resolvedTime = doc.getString("time")?.takeIf { it.isNotBlank() }
+                ?: doc.getString("timeSlot").orEmpty()
             Booking(
-                id = doc.getString("id")?.takeIf { it.isNotBlank() } ?: doc.id,
-                customerId = doc.getString("customerId")?.trim() ?: "",
+                bookingId = docId,
+                userId = resolvedUser,
+                partnerId = resolvedPartner,
+                salonName = doc.getString("salonName")?.trim() ?: "",
+                date = resolvedDate,
+                time = resolvedTime,
+                status = doc.getString("status") ?: "Pending",
+                id = docId,
+                customerId = resolvedUser,
                 customerName = doc.getString("customerName")?.trim() ?: "",
                 customerPhone = doc.getString("customerPhone")?.trim() ?: "",
-                salonId = doc.getString("salonId")?.trim() ?: "",
-                salonName = doc.getString("salonName")?.trim() ?: "",
+                salonId = resolvedPartner,
                 service = doc.getString("service")?.trim() ?: "",
                 servicePrice = doc.getLong("servicePrice")?.toInt() ?: 100,
-                timeSlot = doc.getString("timeSlot") ?: "",
-                bookingDate = doc.getString("bookingDate") ?: "Today",
-                status = doc.getString("status") ?: "pending",
+                timeSlot = resolvedTime,
+                bookingDate = resolvedDate,
                 pin = resolvedPin,
                 createdAt = doc.getLong("createdAt") ?: 0L,
                 completedAt = doc.getLong("completedAt")
@@ -1119,6 +1130,15 @@ class TrimTimeRepository private constructor(context: Context) {
                     return@addSnapshotListener
                 }
                 if (snapshot != null) {
+                    // Backfill userId / bookingId / partnerId / date / time on any legacy documents
+                    snapshot.documents.forEach { doc ->
+                        if (doc.getString("userId").isNullOrBlank()) {
+                            val parsed = parseBookingDocument(doc)
+                            if (parsed != null) {
+                                doc.reference.set(parsed.toMap(), com.google.firebase.firestore.SetOptions.merge())
+                            }
+                        }
+                    }
                     val userBookings = snapshot.documents
                         .mapNotNull { doc -> parseBookingDocument(doc) }
                         .filter { it.customerId == cleanUid && it.id != "past_demo_1" }
@@ -2826,18 +2846,28 @@ class TrimTimeRepository private constructor(context: Context) {
         val generatedPin = String.format("%04d", Random.nextInt(1000, 9999))
         val newBookingId = "bk_" + System.currentTimeMillis().toString().takeLast(6) + "_" + Random.nextInt(10, 99)
 
+        val cleanSalonId = salonId.trim()
+        val cleanSalonName = SecurityValidator.sanitizeName(salonName, trimEdges = true)
+        val cleanTimeSlot = SecurityValidator.sanitizeName(timeSlot, trimEdges = true)
+        val cleanBookingDate = SecurityValidator.sanitizeName(bookingDate, trimEdges = true)
+
         val newBooking = Booking(
+            bookingId = newBookingId,
+            userId = resolvedCustomerId,
+            partnerId = cleanSalonId,
+            salonName = cleanSalonName,
+            date = cleanBookingDate,
+            time = cleanTimeSlot,
+            status = "Pending",
             id = newBookingId,
             customerId = resolvedCustomerId,
             customerName = resolvedCustomerName,
             customerPhone = resolvedCustomerPhone,
-            salonId = salonId.trim(),
-            salonName = SecurityValidator.sanitizeName(salonName, trimEdges = true),
+            salonId = cleanSalonId,
             service = SecurityValidator.sanitizeName(service, trimEdges = true),
             servicePrice = servicePrice.coerceIn(SecurityValidator.MIN_SERVICE_PRICE, SecurityValidator.MAX_SERVICE_PRICE),
-            timeSlot = SecurityValidator.sanitizeName(timeSlot, trimEdges = true),
-            bookingDate = SecurityValidator.sanitizeName(bookingDate, trimEdges = true),
-            status = BookingStatus.PENDING.name.lowercase(),
+            timeSlot = cleanTimeSlot,
+            bookingDate = cleanBookingDate,
             pin = generatedPin,
             createdAt = System.currentTimeMillis()
         )
