@@ -4,6 +4,7 @@ import android.Manifest
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -58,6 +60,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import coil.compose.AsyncImage
+import com.google.firebase.storage.FirebaseStorage
+import com.example.util.SalonImageUtils
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -115,7 +122,9 @@ fun PartnerOnboardingScreen(
         closingTime: String,
         initialServices: List<SalonService>,
         latitude: Double,
-        longitude: Double
+        longitude: Double,
+        isAcSalon: Boolean,
+        imageUrl: String
     ) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -190,6 +199,46 @@ fun PartnerOnboardingScreen(
     var newServicePrice by remember { mutableStateOf("") }
     var newServiceDuration by remember { mutableStateOf("20") }
     var newServiceCategory by remember { mutableStateOf("Haircut") }
+
+    var isAcSalon by remember { mutableStateOf(false) }
+    var uploadedImageUrl by remember { mutableStateOf("") }
+    var isUploadingImage by remember { mutableStateOf(false) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            isUploadingImage = true
+            val storageRef = FirebaseStorage.getInstance().reference
+                .child("salon_images/onboarding_${System.currentTimeMillis()}.jpg")
+            
+            storageRef.putFile(uri)
+                .addOnSuccessListener {
+                    storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
+                        uploadedImageUrl = downloadUri.toString()
+                        isUploadingImage = false
+                        Toast.makeText(context, "Salon photo uploaded successfully!", Toast.LENGTH_SHORT).show()
+                    }.addOnFailureListener {
+                        val base64 = SalonImageUtils.encodeUriToBase64Jpeg(context, uri)
+                        if (!base64.isNullOrBlank()) {
+                            uploadedImageUrl = base64
+                            Toast.makeText(context, "Salon photo attached!", Toast.LENGTH_SHORT).show()
+                        }
+                        isUploadingImage = false
+                    }
+                }
+                .addOnFailureListener { ex ->
+                    val base64 = SalonImageUtils.encodeUriToBase64Jpeg(context, uri)
+                    if (!base64.isNullOrBlank()) {
+                        uploadedImageUrl = base64
+                        Toast.makeText(context, "Photo attached locally (cloud storage offline)", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "Image upload failed: ${ex.message}", Toast.LENGTH_LONG).show()
+                    }
+                    isUploadingImage = false
+                }
+        }
+    }
 
     // 6. GPS / Map Location Pin & Terms Confirmation
     var latitude by remember { mutableDoubleStateOf(DEFAULT_PATNA_LAT) }
@@ -466,8 +515,110 @@ fun PartnerOnboardingScreen(
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .testTag("partner_reg_phone_input")
                         )
+
+                        // Salon Storefront Photo (Optional)
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                            border = BorderStroke(1.dp, if (uploadedImageUrl.isNotBlank()) AmberPrimary.copy(alpha = 0.5f) else Color(0xFF334155))
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.AddPhotoAlternate,
+                                            contentDescription = null,
+                                            tint = AmberPrimary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Text(
+                                            text = "Salon Storefront Photo (Optional)",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
+                                    if (uploadedImageUrl.isNotBlank()) {
+                                        Text(
+                                            text = "✓ Attached",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = GreenSuccess
+                                        )
+                                    }
+                                }
+
+                                if (uploadedImageUrl.isNotBlank()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(130.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                    ) {
+                                        AsyncImage(
+                                            model = uploadedImageUrl,
+                                            contentDescription = "Salon Photo Preview",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                        )
+                                    }
+                                }
+
+                                Button(
+                                    onClick = {
+                                        photoPickerLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                        )
+                                    },
+                                    enabled = !isUploadingImage,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("partner_reg_upload_photo_btn"),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (uploadedImageUrl.isBlank()) AmberPrimary.copy(alpha = 0.15f) else DarkBackground,
+                                        contentColor = if (uploadedImageUrl.isBlank()) AmberPrimary else Color(0xFFCBD5E1)
+                                    ),
+                                    border = BorderStroke(1.dp, AmberPrimary)
+                                ) {
+                                    if (isUploadingImage) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            color = AmberPrimary,
+                                            strokeWidth = 2.dp
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Uploading Photo to Cloud...", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Default.AddPhotoAlternate,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = if (uploadedImageUrl.isBlank()) "Choose Photo from Gallery" else "Change Salon Photo",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -845,6 +996,66 @@ fun PartnerOnboardingScreen(
                                         }
                                     }
                                 }
+                            }
+                        }
+
+                        // AC / Non-AC Facility Option
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                            border = BorderStroke(1.dp, if (isAcSalon) Color(0xFF06B6D4) else Color(0xFF334155))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (isAcSalon) Color(0xFF06B6D4).copy(alpha = 0.2f) else Color(0xFF1E293B)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (isAcSalon) "❄️" else "🌬️",
+                                            fontSize = 18.sp
+                                        )
+                                    }
+                                    Column {
+                                        Text(
+                                            text = "Is this an Air-Conditioned (AC) Salon?",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                        Text(
+                                            text = if (isAcSalon) "AC badge will be displayed to customers" else "Non-AC salon",
+                                            fontSize = 11.sp,
+                                            color = if (isAcSalon) Color(0xFF67E8F9) else Color(0xFF94A3B8)
+                                        )
+                                    }
+                                }
+
+                                Switch(
+                                    checked = isAcSalon,
+                                    onCheckedChange = { isAcSalon = it },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = Color.White,
+                                        checkedTrackColor = Color(0xFF06B6D4),
+                                        uncheckedThumbColor = Color(0xFF94A3B8),
+                                        uncheckedTrackColor = Color(0xFF1E293B)
+                                    ),
+                                    modifier = Modifier.testTag("partner_reg_ac_switch")
+                                )
                             }
                         }
                     }
@@ -1321,7 +1532,9 @@ fun PartnerOnboardingScreen(
                                     closingTime.trim(),
                                     initialServices.toList(),
                                     latitude,
-                                    longitude
+                                    longitude,
+                                    isAcSalon,
+                                    uploadedImageUrl
                                 )
                             }
                         }

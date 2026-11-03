@@ -80,8 +80,9 @@ fun AdminDashboardScreen(
     users: List<UserProfile>,
     supportTickets: List<FeedbackSubmission>,
     onBack: () -> Unit,
-    onUpdateSalonApproval: (salonId: String, approvalStatus: String, isSuspended: Boolean) -> Unit,
-    onUpdateSalonCategory: (salonId: String, categoryTag: String) -> Unit,
+    onUpdateSalonApproval: (salonId: String, approvalStatus: String, isSuspended: Boolean) -> Unit = { _, _, _ -> },
+    onUpdateSalonCategory: (partnerId: String, categoryTag: String) -> Unit,
+    onUpdateSalonStatus: (partnerId: String, status: String) -> Unit = { _, _ -> },
     onUpdateUserBlockStatus: (userId: String, isBlocked: Boolean) -> Unit,
     onResolveSupportTicket: (ticketId: String, isResolved: Boolean) -> Unit,
     onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit = { _, _ -> }
@@ -91,6 +92,17 @@ fun AdminDashboardScreen(
     val context = LocalContext.current
     var selectedTabIndex by remember { mutableIntStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
+    var locallyApprovedPartnerIds by remember { mutableStateOf(setOf<String>()) }
+
+    val handleApproveUnlock: (String, String?) -> Unit = { targetUid, salonId ->
+        val cleanUid = targetUid.trim()
+        val cleanSalon = salonId?.trim().orEmpty()
+        val newSet = locallyApprovedPartnerIds.toMutableSet()
+        if (cleanUid.isNotBlank()) newSet.add(cleanUid)
+        if (cleanSalon.isNotBlank()) newSet.add(cleanSalon)
+        locallyApprovedPartnerIds = newSet
+        onApproveLocationUnlock(cleanUid, salonId)
+    }
 
     val openTicketsCount = remember(supportTickets) {
         supportTickets.count { !it.isResolved && !it.status.equals("RESOLVED", ignoreCase = true) }
@@ -101,38 +113,50 @@ fun AdminDashboardScreen(
     val suspendedSalonsCount = remember(salons) {
         salons.count { it.isSuspended || it.approvalStatus.equals("REJECTED", ignoreCase = true) }
     }
-    val pendingLocationRequests = remember(users, salons) {
+    val pendingLocationRequests = remember(users, salons, locallyApprovedPartnerIds) {
         val byUserId = linkedMapOf<String, PendingLocationRequestItem>()
 
         // 1. Users/Partners where unlockRequestStatus == "pending"
-        users.filter { it.unlockRequestStatus.equals("pending", ignoreCase = true) }.forEach { u ->
+        users.filter { 
+            it.unlockRequestStatus.equals("pending", ignoreCase = true) && 
+            !it.unlockRequestStatus.equals("approved", ignoreCase = true) &&
+            it.id !in locallyApprovedPartnerIds
+        }.forEach { u ->
             val ownedSalon = salons.find {
                 it.ownerId == u.id || it.partnerId == u.id || (!u.salonId.isNullOrBlank() && it.id == u.salonId)
             }
             val key = u.id.ifBlank { ownedSalon?.id ?: u.email }
-            byUserId[key] = PendingLocationRequestItem(
-                key = key,
-                userId = u.id,
-                salonId = ownedSalon?.id ?: u.salonId,
-                displayName = u.name.ifBlank { ownedSalon?.ownerName ?: "Salon Partner" },
-                salonName = ownedSalon?.name,
-                roleLabel = if (ownedSalon != null || u.hasRegisteredSalon || u.role.equals("partner", ignoreCase = true)) {
-                    "Salon Partner"
-                } else {
-                    "User"
-                },
-                phone = u.phone.ifBlank { ownedSalon?.phone.orEmpty() },
-                email = u.email,
-                currentLocation = ownedSalon?.shopAddress?.ifBlank { ownedSalon.location }
-                    ?: u.defaultCity.ifBlank { "Locked Location" }
-            )
+            if (key !in locallyApprovedPartnerIds && (ownedSalon == null || ownedSalon.id !in locallyApprovedPartnerIds)) {
+                byUserId[key] = PendingLocationRequestItem(
+                    key = key,
+                    userId = u.id,
+                    salonId = ownedSalon?.id ?: u.salonId,
+                    displayName = u.name.ifBlank { ownedSalon?.ownerName ?: "Salon Partner" },
+                    salonName = ownedSalon?.name,
+                    roleLabel = if (ownedSalon != null || u.hasRegisteredSalon || u.role.equals("partner", ignoreCase = true)) {
+                        "Salon Partner"
+                    } else {
+                        "User"
+                    },
+                    phone = u.phone.ifBlank { ownedSalon?.phone.orEmpty() },
+                    email = u.email,
+                    currentLocation = ownedSalon?.shopAddress?.ifBlank { ownedSalon.location }
+                        ?: u.defaultCity.ifBlank { "Locked Location" }
+                )
+            }
         }
 
         // 2. Any Salon document where unlockRequestStatus == "pending" not already added
-        salons.filter { it.unlockRequestStatus.equals("pending", ignoreCase = true) }.forEach { s ->
+        salons.filter { 
+            it.unlockRequestStatus.equals("pending", ignoreCase = true) && 
+            !it.unlockRequestStatus.equals("approved", ignoreCase = true) &&
+            it.id !in locallyApprovedPartnerIds &&
+            it.ownerId !in locallyApprovedPartnerIds &&
+            it.partnerId !in locallyApprovedPartnerIds
+        }.forEach { s ->
             val ownerUid = s.ownerId.ifBlank { s.partnerId }
             val key = ownerUid.ifBlank { s.id }
-            if (!byUserId.containsKey(key)) {
+            if (key !in locallyApprovedPartnerIds && !byUserId.containsKey(key)) {
                 val matchingUser = users.find { it.id == ownerUid }
                 byUserId[key] = PendingLocationRequestItem(
                     key = key,
@@ -390,7 +414,7 @@ fun AdminDashboardScreen(
             if (selectedTabIndex != 3 && pendingLocationRequests.isNotEmpty()) {
                 AdminPendingLocationRequestsBannerSection(
                     requests = pendingLocationRequests,
-                    onApproveLocationUnlock = onApproveLocationUnlock,
+                    onApproveLocationUnlock = handleApproveUnlock,
                     onViewAllClick = { selectedTabIndex = 3 }
                 )
             }
@@ -401,7 +425,9 @@ fun AdminDashboardScreen(
                     searchQuery = searchQuery,
                     onUpdateSalonApproval = onUpdateSalonApproval,
                     onUpdateSalonCategory = onUpdateSalonCategory,
-                    onApproveLocationUnlock = onApproveLocationUnlock,
+                    onUpdateSalonStatus = onUpdateSalonStatus,
+                    onApproveLocationUnlock = handleApproveUnlock,
+                    locallyApprovedPartnerIds = locallyApprovedPartnerIds,
                     onCallPhone = { phone ->
                         val clean = phone.filter { it.isDigit() || it == '+' }
                         if (clean.isNotBlank()) {
@@ -413,7 +439,8 @@ fun AdminDashboardScreen(
                     users = users,
                     searchQuery = searchQuery,
                     onUpdateUserBlockStatus = onUpdateUserBlockStatus,
-                    onApproveLocationUnlock = onApproveLocationUnlock,
+                    onApproveLocationUnlock = handleApproveUnlock,
+                    locallyApprovedPartnerIds = locallyApprovedPartnerIds,
                     onCallPhone = { phone ->
                         val clean = phone.filter { it.isDigit() || it == '+' }
                         if (clean.isNotBlank()) {
@@ -435,7 +462,7 @@ fun AdminDashboardScreen(
                 3 -> AdminPendingLocationRequestsTab(
                     requests = pendingLocationRequests,
                     searchQuery = searchQuery,
-                    onApproveLocationUnlock = onApproveLocationUnlock,
+                    onApproveLocationUnlock = handleApproveUnlock,
                     onCallPhone = { phone ->
                         val clean = phone.filter { it.isDigit() || it == '+' }
                         if (clean.isNotBlank()) {
@@ -494,9 +521,11 @@ private fun AdminMetricPill(
 private fun AdminSalonsVerificationTab(
     salons: List<Salon>,
     searchQuery: String,
-    onUpdateSalonApproval: (salonId: String, approvalStatus: String, isSuspended: Boolean) -> Unit,
-    onUpdateSalonCategory: (salonId: String, categoryTag: String) -> Unit,
+    onUpdateSalonApproval: (salonId: String, approvalStatus: String, isSuspended: Boolean) -> Unit = { _, _, _ -> },
+    onUpdateSalonCategory: (partnerId: String, categoryTag: String) -> Unit,
+    onUpdateSalonStatus: (partnerId: String, status: String) -> Unit = { _, _ -> },
     onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit = { _, _ -> },
+    locallyApprovedPartnerIds: Set<String> = emptySet(),
     onCallPhone: (String) -> Unit
 ) {
     val categoryTags = remember { listOf("Premium", "Standard", "Rural/Local") }
@@ -552,9 +581,10 @@ private fun AdminSalonsVerificationTab(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         items(filteredSalons, key = { it.id }) { salon ->
-            val isApproved = salon.approvalStatus.equals("APPROVED", ignoreCase = true) && !salon.isSuspended
-            val isRejected = salon.approvalStatus.equals("REJECTED", ignoreCase = true)
-            val isSuspended = salon.isSuspended || salon.approvalStatus.equals("SUSPENDED", ignoreCase = true)
+            val effectiveStatus = salon.salonStatus.lowercase()
+            val isSuspended = salon.isSuspended || effectiveStatus == "suspended" || salon.approvalStatus.equals("SUSPENDED", ignoreCase = true)
+            val isRejected = effectiveStatus == "rejected" || salon.approvalStatus.equals("REJECTED", ignoreCase = true)
+            val isApproved = (effectiveStatus == "approved" || salon.approvalStatus.equals("APPROVED", ignoreCase = true)) && !isSuspended
             val statusColor = when {
                 isSuspended -> AlertRed
                 isRejected -> AlertRed
@@ -676,10 +706,14 @@ private fun AdminSalonsVerificationTab(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             categoryTags.forEach { tag ->
-                                val isSelected = salon.adminCategoryTag.equals(tag, ignoreCase = true)
+                                val activeTag = salon.salonCategory.ifBlank { salon.adminCategoryTag }
+                                val isSelected = activeTag.equals(tag, ignoreCase = true)
                                 FilterChip(
                                     selected = isSelected,
-                                    onClick = { onUpdateSalonCategory(salon.id, tag) },
+                                    onClick = {
+                                        val partnerId = salon.ownerId.ifBlank { salon.partnerId }.ifBlank { salon.id }
+                                        onUpdateSalonCategory(partnerId, tag)
+                                    },
                                     modifier = Modifier.testTag("admin_salon_tag_${salon.id}_$tag"),
                                     label = {
                                         Text(
@@ -714,10 +748,12 @@ private fun AdminSalonsVerificationTab(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        val partnerId = salon.ownerId.ifBlank { salon.partnerId }.ifBlank { salon.id }
+
                         // Approve Button
                         Button(
                             onClick = {
-                                onUpdateSalonApproval(salon.id, "APPROVED", false)
+                                onUpdateSalonStatus(partnerId, "approved")
                             },
                             enabled = !isApproved || isSuspended,
                             modifier = Modifier
@@ -748,7 +784,7 @@ private fun AdminSalonsVerificationTab(
                         // Reject Button
                         OutlinedButton(
                             onClick = {
-                                onUpdateSalonApproval(salon.id, "REJECTED", false)
+                                onUpdateSalonStatus(partnerId, "rejected")
                             },
                             enabled = !isRejected,
                             modifier = Modifier
@@ -780,9 +816,9 @@ private fun AdminSalonsVerificationTab(
                         Button(
                             onClick = {
                                 if (isSuspended) {
-                                    onUpdateSalonApproval(salon.id, "APPROVED", false)
+                                    onUpdateSalonStatus(partnerId, "approved")
                                 } else {
-                                    onUpdateSalonApproval(salon.id, "SUSPENDED", true)
+                                    onUpdateSalonStatus(partnerId, "suspended")
                                 }
                             },
                             modifier = Modifier
@@ -811,10 +847,15 @@ private fun AdminSalonsVerificationTab(
                         }
                     }
 
-                    if (salon.unlockRequestStatus.equals("pending", ignoreCase = true)) {
+                    val isPendingLocationUnlock = salon.unlockRequestStatus.equals("pending", ignoreCase = true) &&
+                        salon.id !in locallyApprovedPartnerIds &&
+                        salon.ownerId !in locallyApprovedPartnerIds &&
+                        salon.partnerId !in locallyApprovedPartnerIds
+
+                    if (isPendingLocationUnlock) {
                         Button(
                             onClick = {
-                                val ownerUid = salon.ownerId.ifBlank { salon.partnerId }
+                                val ownerUid = salon.ownerId.ifBlank { salon.partnerId }.ifBlank { salon.id }
                                 onApproveLocationUnlock(ownerUid, salon.id)
                             },
                             modifier = Modifier
@@ -873,6 +914,7 @@ private fun AdminUsersSpamTab(
     searchQuery: String,
     onUpdateUserBlockStatus: (userId: String, isBlocked: Boolean) -> Unit,
     onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit = { _, _ -> },
+    locallyApprovedPartnerIds: Set<String> = emptySet(),
     onCallPhone: (String) -> Unit
 ) {
     val filteredUsers = remember(users, searchQuery) {
@@ -1124,7 +1166,11 @@ private fun AdminUsersSpamTab(
                     }
 
                     // If this user has a pending Location Unlock Request, show 1-click green "Approve & Unlock" button
-                    if (user.unlockRequestStatus.equals("pending", ignoreCase = true)) {
+                    val isPendingUserUnlock = user.unlockRequestStatus.equals("pending", ignoreCase = true) &&
+                        user.id !in locallyApprovedPartnerIds &&
+                        (user.salonId == null || user.salonId !in locallyApprovedPartnerIds)
+
+                    if (isPendingUserUnlock) {
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1154,7 +1200,8 @@ private fun AdminUsersSpamTab(
 
                             Button(
                                 onClick = {
-                                    onApproveLocationUnlock(user.id, user.salonId)
+                                    val targetUserId = user.id.ifBlank { user.salonId.orEmpty() }
+                                    onApproveLocationUnlock(targetUserId, user.salonId)
                                 },
                                 modifier = Modifier
                                     .height(38.dp)
@@ -1521,7 +1568,8 @@ private fun AdminPendingLocationRequestsBannerSection(
 
                     Button(
                         onClick = {
-                            onApproveLocationUnlock(req.userId, req.salonId)
+                            val targetUid = req.userId.ifBlank { req.salonId.orEmpty() }.ifBlank { req.key }
+                            onApproveLocationUnlock(targetUid, req.salonId)
                         },
                         modifier = Modifier
                             .height(36.dp)
@@ -1791,7 +1839,8 @@ private fun AdminPendingLocationRequestsTab(
 
                             Button(
                                 onClick = {
-                                    onApproveLocationUnlock(req.userId, req.salonId)
+                                    val targetUid = req.userId.ifBlank { req.salonId.orEmpty() }.ifBlank { req.key }
+                                    onApproveLocationUnlock(targetUid, req.salonId)
                                 },
                                 modifier = Modifier
                                     .weight(1.4f)

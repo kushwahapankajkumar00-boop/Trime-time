@@ -53,6 +53,8 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -74,6 +76,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -145,9 +148,13 @@ fun CustomerHomeScreen(
     pastBooking: Booking? = null,
     onRebook: (Booking) -> Unit = {},
     onProfileClick: () -> Unit = {},
+    onRateSalon: (Salon, Int, String) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+
+    // Rating dialog state
+    var salonToRate by remember { mutableStateOf<Salon?>(null) }
 
     // Initialize OpenStreetMap Configuration (userAgentValue + internal tile cache) before MapView renders
     remember(context) {
@@ -555,10 +562,22 @@ fun CustomerHomeScreen(
                 BlinkitSalonCard(
                     salon = salon,
                     currentUserId = currentUserId,
+                    onRateClick = { salonToRate = salon },
                     onBookClick = { onSalonSelected(salon) }
                 )
             }
         }
+    }
+
+    // Customer Rating Dialog
+    salonToRate?.let { salon ->
+        CustomerRatingDialog(
+            salon = salon,
+            onDismiss = { salonToRate = null },
+            onSubmit = { rating, review ->
+                onRateSalon(salon, rating, review)
+            }
+        )
     }
 }
 
@@ -1267,13 +1286,14 @@ data class FilterChipItem(
 fun BlinkitSalonCard(
     salon: Salon,
     currentUserId: String = "",
+    onRateClick: () -> Unit = {},
     onBookClick: () -> Unit
 ) {
     val isOwnSalon = currentUserId.isNotBlank() &&
         (salon.ownerId == currentUserId || salon.partnerId == currentUserId)
     val minPrice = salon.services.minOfOrNull { it.price } ?: 80
     val isBusy = salon.isBusy
-    val rawPhotoData = salon.resolvedPhotoData.trim()
+    val rawPhotoData = salon.imageUrl.takeIf { it.isNotBlank() } ?: salon.resolvedPhotoData.trim()
     val salonCoverBitmap = remember(rawPhotoData) {
         SalonImageUtils.decodeBase64ToImageBitmap(rawPhotoData)
     }
@@ -1535,29 +1555,34 @@ fun BlinkitSalonCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Rating + Distance Tags
+                    // Rating + Distance + AC Tags
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        // Rating
+                        // Rating (Clickable to trigger rating dialog)
+                        val ratingText = if (salon.totalRatings > 0) {
+                            String.format(java.util.Locale.US, "★ %.1f (%d)", salon.effectiveRating, salon.totalRatings)
+                        } else if (salon.averageRating > 0.0) {
+                            String.format(java.util.Locale.US, "★ %.1f", salon.effectiveRating)
+                        } else if (salon.reviewCount > 0) {
+                            String.format(java.util.Locale.US, "★ %.1f (%d)", salon.rating, salon.reviewCount)
+                        } else {
+                            "★ New"
+                        }
+
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(Color(0xFF064E3B))
+                                .clickable { onRateClick() }
                                 .padding(horizontal = 6.dp, vertical = 3.dp)
+                                .testTag("salon_rating_badge_${salon.id}")
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Star,
-                                contentDescription = "Rating",
-                                tint = AmberPrimary,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Spacer(modifier = Modifier.width(3.dp))
                             Text(
-                                text = "${salon.rating}",
-                                fontSize = 12.sp,
+                                text = ratingText,
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = Color.White,
                                 maxLines = 1
@@ -1581,11 +1606,50 @@ fun BlinkitSalonCard(
                             Spacer(modifier = Modifier.width(3.dp))
                             Text(
                                 text = salon.distance,
-                                fontSize = 12.sp,
+                                fontSize = 11.sp,
                                 color = Color(0xFFE2E8F0),
                                 fontWeight = FontWeight.Medium,
                                 maxLines = 1
                             )
+                        }
+
+                        // AC / Non-AC Status Tag
+                        if (salon.isAcSalon) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFF0C4A6E))
+                                    .border(0.8.dp, Color(0xFF38BDF8), RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                                    .testTag("ac_badge_${salon.id}")
+                            ) {
+                                Text(
+                                    text = "❄️ AC",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF7DD3FC),
+                                    maxLines = 1
+                                )
+                            }
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFF1E293B))
+                                    .border(0.8.dp, Color(0xFF475569), RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                                    .testTag("non_ac_badge_${salon.id}")
+                            ) {
+                                Text(
+                                    text = "Non-AC",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = Color(0xFF94A3B8),
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
 
@@ -1689,10 +1753,10 @@ fun BlinkitSalonCard(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Row 2 = Balanced Full-Width Action Buttons ("Get Directions" + "View & Book" / "Join Waitlist")
+                // Row 2 = Balanced Full-Width Action Buttons ("Get Directions" + "Rate" + "View & Book" / "Join Waitlist")
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     OutlinedButton(
@@ -1708,7 +1772,7 @@ fun BlinkitSalonCard(
                         shape = RoundedCornerShape(10.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
                             .height(44.dp)
@@ -1719,14 +1783,40 @@ fun BlinkitSalonCard(
                             contentDescription = "Get Directions",
                             modifier = Modifier.size(15.dp)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Get Directions",
-                            fontSize = 12.sp,
+                            text = "Directions",
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    // Quick Rate Button
+                    OutlinedButton(
+                        onClick = onRateClick,
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.7f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberPrimary),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .height(44.dp)
+                            .testTag("salon_card_rate_btn_${salon.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Star,
+                            contentDescription = "Rate Salon",
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Rate",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
                         )
                     }
 
@@ -1823,4 +1913,135 @@ fun EmptySalonsPlaceholder(
             }
         }
     }
+}
+
+/**
+ * Interactive Customer Rating & Review Dialog (1 to 5 Stars)
+ */
+@Composable
+fun CustomerRatingDialog(
+    salon: Salon,
+    onDismiss: () -> Unit,
+    onSubmit: (rating: Int, review: String) -> Unit
+) {
+    var selectedStars by remember { mutableIntStateOf(5) }
+    var reviewComment by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF1E293B),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFE2E8F0),
+        shape = RoundedCornerShape(18.dp),
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(text = "⭐", fontSize = 20.sp)
+                Text(
+                    text = "Rate ${salon.name}",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = Color.White
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "How was your experience at this salon?",
+                    fontSize = 13.sp,
+                    color = Color(0xFF94A3B8)
+                )
+
+                // 5 Stars Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    (1..5).forEach { star ->
+                        val isSelected = star <= selectedStars
+                        IconButton(
+                            onClick = { selectedStars = star },
+                            modifier = Modifier
+                                .size(44.dp)
+                                .testTag("star_rating_$star")
+                        ) {
+                            Icon(
+                                imageVector = if (isSelected) Icons.Default.Star else Icons.Default.StarBorder,
+                                contentDescription = "$star Stars",
+                                tint = if (isSelected) AmberPrimary else Color(0xFF64748B),
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
+                }
+
+                val starLabel = when (selectedStars) {
+                    1 -> "1 Star • Poor"
+                    2 -> "2 Stars • Fair"
+                    3 -> "3 Stars • Good"
+                    4 -> "4 Stars • Very Good"
+                    5 -> "5 Stars • Excellent! 🌟"
+                    else -> ""
+                }
+                Text(
+                    text = starLabel,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AmberPrimary,
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                )
+
+                OutlinedTextField(
+                    value = reviewComment,
+                    onValueChange = { reviewComment = it },
+                    label = { Text("Write a review (optional)", color = Color(0xFF94A3B8)) },
+                    placeholder = { Text("e.g. Great haircut, clean shop!", color = Color(0xFF64748B)) },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AmberPrimary,
+                        unfocusedBorderColor = Color(0xFF475569),
+                        focusedContainerColor = Color(0xFF0F172A),
+                        unfocusedContainerColor = Color(0xFF0F172A),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(95.dp)
+                        .testTag("rating_review_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSubmit(selectedStars, reviewComment)
+                    onDismiss()
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AmberPrimary,
+                    contentColor = Color.Black
+                ),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.testTag("submit_rating_button")
+            ) {
+                Text("Submit Rating", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF94A3B8))
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
 }

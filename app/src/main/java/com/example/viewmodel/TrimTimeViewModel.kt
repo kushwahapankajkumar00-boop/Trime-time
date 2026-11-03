@@ -2,6 +2,7 @@ package com.example.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -25,8 +26,14 @@ import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthException
+import com.google.firebase.auth.UserProfileChangeRequest
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
+import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +43,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.tasks.await
 
 enum class CustomerNavTab {
     SALONS,
@@ -81,7 +90,8 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val showAdminDashboard: StateFlow<Boolean> = _showAdminDashboard.asStateFlow()
 
     val isSuperAdmin: StateFlow<Boolean> = currentUserProfile.combine(allUsers) { profile, _ ->
-        profile?.isAdmin == true
+        profile?.isAdmin == true ||
+            profile?.email?.equals("kushwahapankajkumar00@gmail.com", ignoreCase = true) == true
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     // Whether the currently logged-in user already owns a registered salon in Firestore
@@ -381,18 +391,93 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         password: String,
         onSuccess: () -> Unit = {}
     ) {
-        repository.signInWithEmailAndPassword(
-            email = email,
-            password = password,
-            onSuccess = {
-                _userMessage.value = "Welcome back to TrimTime!"
-                _currentNavTab.value = CustomerNavTab.SALONS
-                onSuccess()
-            },
-            onError = { err ->
-                _userMessage.value = err
+        val cleanEmail = email.trim().lowercase()
+        val appContext = getApplication<Application>().applicationContext
+        if (cleanEmail.isBlank() || !cleanEmail.contains("@") || !cleanEmail.contains(".")) {
+            val err = "Please enter a valid email address."
+            repository.setAuthError(err)
+            _userMessage.value = err
+            return
+        }
+        if (password.isBlank()) {
+            val err = "Please enter your password."
+            repository.setAuthError(err)
+            _userMessage.value = err
+            return
+        }
+
+        repository.setAuthLoading(true)
+        repository.setAuthError(null)
+
+        viewModelScope.launch {
+            try {
+                val authResult = FirebaseAuth.getInstance()
+                    .signInWithEmailAndPassword(cleanEmail, password)
+                    .await()
+
+                val firebaseUser = authResult.user
+                if (firebaseUser == null) {
+                    repository.setAuthLoading(false)
+                    val err = "User session is null after login. Please try again."
+                    repository.setAuthError(err)
+                    _userMessage.value = err
+                    Toast.makeText(appContext, err, Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+                val uid = firebaseUser.uid
+                val displayName = firebaseUser.displayName?.takeIf { it.isNotBlank() }
+                    ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
+                val userEmail = firebaseUser.email?.takeIf { it.isNotBlank() } ?: cleanEmail
+
+                repository.completeEmailLogin(
+                    uid = uid,
+                    displayName = displayName,
+                    email = userEmail,
+                    onSuccess = {
+                        _userMessage.value = "Welcome back to TrimTime!"
+                        _currentNavTab.value = CustomerNavTab.SALONS
+                        onSuccess()
+                    },
+                    onError = { err ->
+                        _userMessage.value = err
+                    }
+                )
+            } catch (e: FirebaseAuthException) {
+                repository.setAuthLoading(false)
+                val hint = when (e.errorCode) {
+                    "ERROR_INVALID_CREDENTIAL", "invalid-credential" ->
+                        " (Incorrect credentials or account not registered yet. If you are new, tap 'Sign Up'.)"
+                    "ERROR_USER_NOT_FOUND", "user-not-found" ->
+                        " (No account found. Please switch to 'Sign Up' to create your account.)"
+                    "ERROR_WRONG_PASSWORD", "wrong-password" ->
+                        " (Incorrect password. Please verify or reset your password.)"
+                    else -> ""
+                }
+                val exactError = "FirebaseAuthException [${e.errorCode}]: ${e.message}$hint"
+                repository.setAuthError(exactError)
+                _userMessage.value = exactError
+                Log.e("TrimTimeViewModel", "Login FirebaseAuthException: $exactError", e)
+                Toast.makeText(appContext, exactError, Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                repository.setAuthLoading(false)
+                val authEx = e.cause as? FirebaseAuthException
+                val exactError = if (authEx != null) {
+                    val hint = when (authEx.errorCode) {
+                        "ERROR_INVALID_CREDENTIAL", "invalid-credential" ->
+                            " (Incorrect credentials or account not registered yet. If you are new, tap 'Sign Up'.)"
+                        else -> ""
+                    }
+                    "FirebaseAuthException [${authEx.errorCode}]: ${authEx.message}$hint"
+                } else {
+                    e.message ?: e.localizedMessage ?: e.toString()
+                }
+                repository.setAuthError(exactError)
+                _userMessage.value = exactError
+                Log.e("TrimTimeViewModel", "Login Exception: $exactError", e)
+                Toast.makeText(appContext, exactError, Toast.LENGTH_LONG).show()
             }
-        )
+        }
     }
 
     fun signUpWithEmail(
@@ -401,19 +486,156 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         password: String,
         onSuccess: () -> Unit = {}
     ) {
-        repository.signUpWithEmailAndPassword(
-            fullName = fullName,
-            email = email,
-            password = password,
-            onSuccess = {
-                _userMessage.value = "Account created! Welcome to TrimTime."
-                _currentNavTab.value = CustomerNavTab.SALONS
-                onSuccess()
-            },
-            onError = { err ->
-                _userMessage.value = err
+        val cleanEmail = email.trim().lowercase()
+        val sanitized = SecurityValidator.sanitizeName(fullName, trimEdges = true)
+        val cleanName = if (sanitized.length >= 2) {
+            sanitized
+        } else {
+            cleanEmail.substringBefore("@")
+                .replace(".", " ")
+                .replaceFirstChar { it.uppercase() }
+                .ifBlank { "TrimTime User" }
+        }
+        val appContext = getApplication<Application>().applicationContext
+
+        if (cleanEmail.isBlank() || !cleanEmail.contains("@") || !cleanEmail.contains(".")) {
+            val err = "Please enter a valid email address."
+            repository.setAuthError(err)
+            _userMessage.value = err
+            return
+        }
+        if (password.length < 6) {
+            val err = "Password must be at least 6 characters long."
+            repository.setAuthError(err)
+            _userMessage.value = err
+            return
+        }
+
+        repository.setAuthLoading(true)
+        repository.setAuthError(null)
+
+        viewModelScope.launch {
+            try {
+                val authResult = FirebaseAuth.getInstance()
+                    .createUserWithEmailAndPassword(cleanEmail, password)
+                    .await()
+
+                val firebaseUser = authResult.user
+                if (firebaseUser == null) {
+                    repository.setAuthLoading(false)
+                    val err = "Firebase Auth returned a null user after createUserWithEmailAndPassword."
+                    repository.setAuthError(err)
+                    _userMessage.value = err
+                    Toast.makeText(appContext, err, Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+
+                val uid = firebaseUser.uid
+                try {
+                    val profileUpdates = UserProfileChangeRequest.Builder()
+                        .setDisplayName(cleanName)
+                        .build()
+                    firebaseUser.updateProfile(profileUpdates).await()
+                } catch (_: Exception) {
+                }
+
+                // Immediately create a document in the Firestore `users` collection with uid, email, name, and isAdmin = false
+                val userDocData = mapOf(
+                    "uid" to uid,
+                    "id" to uid,
+                    "email" to cleanEmail,
+                    "name" to cleanName,
+                    "isAdmin" to false,
+                    "phone" to "",
+                    "isPhoneVerified" to false,
+                    "role" to "customer",
+                    "hasRegisteredSalon" to false,
+                    "defaultCity" to appPreferences.value.defaultCity,
+                    "cancellationCount" to 0,
+                    "cancellationStrikes" to 0,
+                    "isSuspended" to false,
+                    "isBlocked" to false,
+                    "isLocationLocked" to true,
+                    "unlockRequestStatus" to "none",
+                    "createdAt" to System.currentTimeMillis()
+                )
+
+                try {
+                    FirebaseFirestore.getInstance()
+                        .collection("users")
+                        .document(uid)
+                        .set(userDocData, SetOptions.merge())
+                        .await()
+                } catch (fsErr: Exception) {
+                    Log.w("TrimTimeViewModel", "Firestore users/$uid write warning: ${fsErr.message}", fsErr)
+                }
+
+                repository.completeEmailSignUp(
+                    uid = uid,
+                    cleanName = cleanName,
+                    cleanEmail = cleanEmail,
+                    onSuccess = {
+                        _userMessage.value = "Account created! Welcome to TrimTime."
+                        _currentNavTab.value = CustomerNavTab.SALONS
+                        onSuccess()
+                    }
+                )
+            } catch (e: FirebaseAuthException) {
+                repository.setAuthLoading(false)
+                val hint = if (e.errorCode == "ERROR_EMAIL_ALREADY_IN_USE" || e.errorCode.equals("email-already-in-use", ignoreCase = true)) {
+                    " (An account already exists with this email. Please switch to the 'Login' tab.)"
+                } else ""
+                val exactError = "FirebaseAuthException [${e.errorCode}]: ${e.message}$hint"
+                repository.setAuthError(exactError)
+                _userMessage.value = exactError
+                Log.e("TrimTimeViewModel", "Sign-Up FirebaseAuthException: $exactError", e)
+                Toast.makeText(appContext, exactError, Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                repository.setAuthLoading(false)
+                val authEx = e.cause as? FirebaseAuthException
+                val exactError = if (authEx != null) {
+                    val hint = if (authEx.errorCode == "ERROR_EMAIL_ALREADY_IN_USE" || authEx.errorCode.equals("email-already-in-use", ignoreCase = true)) {
+                        " (An account already exists with this email. Please switch to the 'Login' tab.)"
+                    } else ""
+                    "FirebaseAuthException [${authEx.errorCode}]: ${authEx.message}$hint"
+                } else {
+                    e.message ?: e.localizedMessage ?: e.toString()
+                }
+                repository.setAuthError(exactError)
+                _userMessage.value = exactError
+                Log.e("TrimTimeViewModel", "Sign-Up Exception: $exactError", e)
+                Toast.makeText(appContext, exactError, Toast.LENGTH_LONG).show()
             }
-        )
+        }
+    }
+
+    fun sendPasswordResetEmail(
+        email: String,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        val cleanEmail = email.trim().lowercase()
+        val appContext = getApplication<Application>().applicationContext
+        if (cleanEmail.isBlank() || !cleanEmail.contains("@") || !cleanEmail.contains(".")) {
+            val err = "Please enter a valid email address to send reset instructions."
+            Toast.makeText(appContext, err, Toast.LENGTH_SHORT).show()
+            onError(err)
+            return
+        }
+
+        FirebaseAuth.getInstance().sendPasswordResetEmail(cleanEmail)
+            .addOnSuccessListener {
+                val msg = "Password reset email sent to $cleanEmail! Check your inbox or spam folder."
+                Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show()
+                _userMessage.value = msg
+                onSuccess()
+            }
+            .addOnFailureListener { ex ->
+                val err = "Password reset failed: ${ex.message}"
+                Toast.makeText(appContext, err, Toast.LENGTH_LONG).show()
+                _userMessage.value = err
+                onError(err)
+            }
     }
 
     private var googleSignInJob: Job? = null
@@ -540,6 +762,8 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         latitude: Double,
         longitude: Double,
         isPhoneVerified: Boolean = true,
+        isAcSalon: Boolean = false,
+        imageUrl: String = "",
         onSuccess: () -> Unit = {}
     ) {
         repository.registerPartnerSalon(
@@ -557,6 +781,8 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             initialServices = initialServices,
             latitude = latitude,
             longitude = longitude,
+            isAcSalon = isAcSalon,
+            imageUrl = imageUrl,
             onSuccess = { salonId ->
                 _partnerSelectedSalonId.value = salonId
                 _userMessage.value = "🎉 '$salonName' registered! Welcome to Partner Mode."
@@ -1050,6 +1276,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         latitude: Double,
         longitude: Double,
         availableChairs: Int? = null,
+        isAcSalon: Boolean? = null,
         onSuccess: () -> Unit = {}
     ) {
         repository.updateSalonFullProfile(
@@ -1062,6 +1289,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             latitude = latitude,
             longitude = longitude,
             availableChairs = availableChairs,
+            isAcSalon = isAcSalon,
             onSuccess = {
                 _userMessage.value = "✓ Shop details & location saved!"
                 onSuccess()
@@ -1082,6 +1310,44 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             photoDataUrl = photoDataUrl,
             onSuccess = {
                 _userMessage.value = "✓ Shop cover photo updated!"
+                onSuccess()
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun uploadSalonImage(
+        uri: Uri,
+        salonId: String? = null,
+        onSuccess: (String) -> Unit = {}
+    ) {
+        repository.uploadSalonImage(
+            uri = uri,
+            salonId = salonId,
+            onSuccess = { downloadUrl ->
+                _userMessage.value = "✓ Shop photo uploaded successfully!"
+                onSuccess(downloadUrl)
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
+    }
+
+    fun submitSalonRating(
+        salonId: String,
+        rating: Int,
+        reviewText: String = "",
+        onSuccess: () -> Unit = {}
+    ) {
+        repository.submitSalonRating(
+            salonId = salonId,
+            rating = rating,
+            reviewText = reviewText,
+            onSuccess = {
+                _userMessage.value = "🎉 Rating submitted! Thank you."
                 onSuccess()
             },
             onError = { err ->
@@ -1158,44 +1424,163 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         _showAdminDashboard.value = false
     }
 
+    fun updateSalonCategory(
+        partnerId: String,
+        category: String,
+        salonId: String? = null
+    ) {
+        val app = getApplication<Application>()
+        val cleanTag = category.trim().ifBlank { "Standard" }
+        val cleanPartnerId = partnerId.trim()
+        val cleanSalonId = salonId?.trim()?.takeIf { it.isNotBlank() }
+            ?: repository.salons.value.find { it.ownerId == cleanPartnerId || it.partnerId == cleanPartnerId || it.id == cleanPartnerId }?.id
+        val resolvedPartnerUid = if (cleanPartnerId.isNotBlank()) cleanPartnerId
+            else repository.salons.value.find { it.id == cleanSalonId }?.let { it.ownerId.ifBlank { it.partnerId } }.orEmpty()
+
+        // 1. Immediately apply update locally so UI updates with zero lag
+        repository.applySalonAdminUpdatesLocally(
+            partnerId = resolvedPartnerUid,
+            salonId = cleanSalonId,
+            category = cleanTag
+        )
+
+        // 2. Direct Firestore update on users and salons collections
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val updates = mapOf<String, Any>(
+                    "adminCategoryTag" to cleanTag,
+                    "salonCategory" to cleanTag
+                )
+                val fs = try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
+                if (fs != null) {
+                    if (resolvedPartnerUid.isNotBlank()) {
+                        fs.collection("users").document(resolvedPartnerUid)
+                            .set(mapOf("salonCategory" to cleanTag), SetOptions.merge())
+                            .await()
+                    }
+                    if (!cleanSalonId.isNullOrBlank()) {
+                        fs.collection("salons").document(cleanSalonId)
+                            .set(updates, SetOptions.merge())
+                            .await()
+                    }
+                }
+
+                // 3. Trigger repository sync for secondary DB and real-time listeners
+                repository.updateSalonCategory(
+                    salonId = cleanSalonId ?: resolvedPartnerUid,
+                    categoryTag = cleanTag,
+                    onSuccess = {},
+                    onError = {}
+                )
+
+                withContext(Dispatchers.Main) {
+                    val successMsg = "Salon updated to $cleanTag"
+                    _userMessage.value = successMsg
+                    Toast.makeText(app, successMsg, Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e("TrimTimeViewModel", "Error updating salon category: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    val errorMsg = e.localizedMessage ?: e.message ?: "Failed to update category"
+                    _userMessage.value = "Error: $errorMsg"
+                    Toast.makeText(app, "Error: $errorMsg", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    fun updateSalonStatus(
+        partnerId: String,
+        status: String,
+        salonId: String? = null
+    ) {
+        val app = getApplication<Application>()
+        val cleanStatus = status.trim().lowercase() // "approved", "rejected", or "suspended"
+        val cleanPartnerId = partnerId.trim()
+        val cleanSalonId = salonId?.trim()?.takeIf { it.isNotBlank() }
+            ?: repository.salons.value.find { it.ownerId == cleanPartnerId || it.partnerId == cleanPartnerId || it.id == cleanPartnerId }?.id
+        val resolvedPartnerUid = if (cleanPartnerId.isNotBlank()) cleanPartnerId
+            else repository.salons.value.find { it.id == cleanSalonId }?.let { it.ownerId.ifBlank { it.partnerId } }.orEmpty()
+
+        val isSuspended = cleanStatus == "suspended"
+        val approvalStatus = when (cleanStatus) {
+            "approved" -> "APPROVED"
+            "rejected" -> "REJECTED"
+            "suspended" -> "SUSPENDED"
+            else -> cleanStatus.uppercase()
+        }
+
+        // 1. Immediately apply update locally so UI updates with zero lag
+        repository.applySalonAdminUpdatesLocally(
+            partnerId = resolvedPartnerUid,
+            salonId = cleanSalonId,
+            status = cleanStatus
+        )
+
+        // 2. Direct Firestore update on users and salons collections
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val salonUpdates = mutableMapOf<String, Any>(
+                    "salonStatus" to cleanStatus,
+                    "approvalStatus" to approvalStatus,
+                    "isSuspended" to isSuspended
+                )
+                if (isSuspended || approvalStatus == "REJECTED") {
+                    salonUpdates["isOpen"] = false
+                    salonUpdates["currentStatus"] = "CLOSED"
+                }
+
+                val fs = try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
+                if (fs != null) {
+                    if (resolvedPartnerUid.isNotBlank()) {
+                        fs.collection("users").document(resolvedPartnerUid)
+                            .set(mapOf("salonStatus" to cleanStatus, "isSuspended" to isSuspended), SetOptions.merge())
+                            .await()
+                    }
+                    if (!cleanSalonId.isNullOrBlank()) {
+                        fs.collection("salons").document(cleanSalonId)
+                            .set(salonUpdates, SetOptions.merge())
+                            .await()
+                    }
+                }
+
+                // 3. Trigger repository sync for secondary DB and real-time listeners
+                repository.updateSalonApproval(
+                    salonId = cleanSalonId ?: resolvedPartnerUid,
+                    approvalStatus = approvalStatus,
+                    isSuspended = isSuspended,
+                    onSuccess = {},
+                    onError = {}
+                )
+
+                withContext(Dispatchers.Main) {
+                    val toastMsg = when (cleanStatus) {
+                        "suspended" -> "Account Suspended"
+                        "approved" -> "Salon Approved"
+                        "rejected" -> "Salon Rejected"
+                        else -> "Salon status updated to $cleanStatus"
+                    }
+                    _userMessage.value = toastMsg
+                    Toast.makeText(app, toastMsg, Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e("TrimTimeViewModel", "Error updating salon status: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    val errorMsg = e.localizedMessage ?: e.message ?: "Failed to update salon status"
+                    _userMessage.value = "Error: $errorMsg"
+                    Toast.makeText(app, "Error: $errorMsg", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
     fun updateSalonApproval(
         salonId: String,
         approvalStatus: String,
         isSuspended: Boolean = false
     ) {
-        repository.updateSalonApproval(
-            salonId = salonId,
-            approvalStatus = approvalStatus,
-            isSuspended = isSuspended,
-            onSuccess = {
-                val actionLabel = when {
-                    isSuspended -> "SUSPENDED"
-                    approvalStatus.equals("APPROVED", ignoreCase = true) -> "APPROVED"
-                    approvalStatus.equals("REJECTED", ignoreCase = true) -> "REJECTED"
-                    else -> approvalStatus
-                }
-                _userMessage.value = "✓ Salon status updated to $actionLabel"
-            },
-            onError = { err ->
-                _userMessage.value = err
-            }
-        )
-    }
-
-    fun updateSalonCategory(
-        salonId: String,
-        categoryTag: String
-    ) {
-        repository.updateSalonCategory(
-            salonId = salonId,
-            categoryTag = categoryTag,
-            onSuccess = {
-                _userMessage.value = "✓ Salon tagged as '$categoryTag'"
-            },
-            onError = { err ->
-                _userMessage.value = err
-            }
-        )
+        val status = if (isSuspended) "suspended" else approvalStatus.lowercase()
+        updateSalonStatus(partnerId = salonId, status = status, salonId = salonId)
     }
 
     fun updateUserBlockStatus(
@@ -1255,16 +1640,56 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         userId: String,
         salonId: String? = null
     ) {
-        repository.approveLocationUnlock(
-            userId = userId,
-            salonId = salonId,
-            onSuccess = {
-                _userMessage.value = "✓ Location unlocked & approved!"
-            },
-            onError = { err ->
-                _userMessage.value = err
+        val app = getApplication<Application>()
+        val cleanUserId = userId.trim()
+        val cleanSalonId = salonId?.trim()?.takeIf { it.isNotBlank() }
+
+        // Immediately update repository in-memory state so UI updates instantly
+        repository.applyLocationUnlockLocally(cleanUserId, cleanSalonId)
+
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val updates = mapOf<String, Any>(
+                    "isLocationLocked" to false,
+                    "unlockRequestStatus" to "approved"
+                )
+
+                // 1. Direct Firestore update on users and salons
+                val fs = try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
+                if (fs != null) {
+                    if (cleanUserId.isNotBlank()) {
+                        fs.collection("users").document(cleanUserId)
+                            .set(updates, SetOptions.merge())
+                            .await()
+                    }
+                    if (!cleanSalonId.isNullOrBlank()) {
+                        fs.collection("salons").document(cleanSalonId)
+                            .set(updates, SetOptions.merge())
+                            .await()
+                    }
+                }
+
+                // 2. Also trigger repository update for named/secondary DB sync
+                repository.approveLocationUnlock(
+                    userId = cleanUserId,
+                    salonId = cleanSalonId,
+                    onSuccess = {},
+                    onError = {}
+                )
+
+                withContext(Dispatchers.Main) {
+                    _userMessage.value = "Location Unlocked!"
+                    Toast.makeText(app, "Location Unlocked!", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.e("TrimTimeViewModel", "Error approving location unlock: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    val rawMsg = e.localizedMessage ?: e.message ?: "Failed to unlock location."
+                    _userMessage.value = "Error: $rawMsg"
+                    Toast.makeText(app, "Error: $rawMsg", Toast.LENGTH_LONG).show()
+                }
             }
-        )
+        }
     }
 
     fun clearUserMessage() {

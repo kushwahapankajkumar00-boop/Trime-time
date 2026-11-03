@@ -216,8 +216,11 @@ fun TrimTimeApp(
                                 onUpdateSalonApproval = { salonId, status, suspended ->
                                     viewModel.updateSalonApproval(salonId, status, suspended)
                                 },
-                                onUpdateSalonCategory = { salonId, tag ->
-                                    viewModel.updateSalonCategory(salonId, tag)
+                                onUpdateSalonCategory = { partnerId, tag ->
+                                    viewModel.updateSalonCategory(partnerId, tag)
+                                },
+                                onUpdateSalonStatus = { partnerId, status ->
+                                    viewModel.updateSalonStatus(partnerId, status)
                                 },
                                 onUpdateUserBlockStatus = { userId, blocked ->
                                     viewModel.updateUserBlockStatus(userId, blocked)
@@ -244,7 +247,7 @@ fun TrimTimeApp(
                                         userProfile = currentProfile,
                                         isLoading = isAuthLoading,
                                         onCancel = { viewModel.dismissPartnerOnboarding() },
-                                        onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
+                                        onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude, isAcSalon, imageUrl ->
                                             viewModel.registerPartnerSalon(
                                                 salonName = salonName,
                                                 ownerName = ownerName,
@@ -260,7 +263,9 @@ fun TrimTimeApp(
                                                 initialServices = initialServices,
                                                 latitude = latitude,
                                                 longitude = longitude,
-                                                isPhoneVerified = true
+                                                isPhoneVerified = true,
+                                                isAcSalon = isAcSalon,
+                                                imageUrl = imageUrl
                                             )
                                         },
                                         modifier = Modifier.padding(onboardingPadding)
@@ -322,6 +327,9 @@ fun TrimTimeApp(
                                                 },
                                                 onSwitchToPartnerMode = {
                                                     viewModel.switchToPartnerRole()
+                                                },
+                                                onRateSalon = { rating, review ->
+                                                    viewModel.submitSalonRating(activeSalon.id, rating, review)
                                                 }
                                             )
                                         } else {
@@ -350,6 +358,9 @@ fun TrimTimeApp(
                                                         onRebook = { booking ->
                                                             val targetSalon = allSalons.find { it.id == booking.salonId || it.name.equals(booking.salonName, ignoreCase = true) }
                                                             viewModel.selectSalon(targetSalon)
+                                                        },
+                                                        onRateSalon = { salon, rating, review ->
+                                                            viewModel.submitSalonRating(salon.id, rating, review)
                                                         },
                                                         onProfileClick = {
                                                             viewModel.setNavTab(CustomerNavTab.PROFILE)
@@ -434,7 +445,7 @@ fun TrimTimeApp(
                                         userProfile = currentUserProfile,
                                         isLoading = isAuthLoading,
                                         onCancel = { viewModel.switchToCustomerRole() },
-                                        onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude ->
+                                        onSubmitRegistration = { salonName, ownerName, businessPhone, shopAddress, cityArea, pincode, landmark, shopCategory, availableChairs, openingTime, closingTime, initialServices, latitude, longitude, isAcSalon, imageUrl ->
                                             viewModel.registerPartnerSalon(
                                                 salonName = salonName,
                                                 ownerName = ownerName,
@@ -450,7 +461,9 @@ fun TrimTimeApp(
                                                 initialServices = initialServices,
                                                 latitude = latitude,
                                                 longitude = longitude,
-                                                isPhoneVerified = true
+                                                isPhoneVerified = true,
+                                                isAcSalon = isAcSalon,
+                                                imageUrl = imageUrl
                                             )
                                         },
                                         modifier = Modifier.padding(onboardingPadding)
@@ -493,8 +506,8 @@ fun TrimTimeApp(
                                         onSaveShopLocation = { id, address, landmark, lat, lng ->
                                             viewModel.saveSalonLocation(id, address, landmark, lat, lng)
                                         },
-                                        onSaveFullProfile = { id, name, phone, tagline, address, landmark, lat, lng, availableChairs ->
-                                            viewModel.saveSalonFullProfile(id, name, phone, tagline, address, landmark, lat, lng, availableChairs)
+                                        onSaveFullProfile = { id, name, phone, tagline, address, landmark, lat, lng, availableChairs, isAc ->
+                                            viewModel.saveSalonFullProfile(id, name, phone, tagline, address, landmark, lat, lng, availableChairs, isAc)
                                         },
                                         onSaveShopPhoto = { id, photoDataUrl ->
                                             viewModel.saveSalonPhoto(id, photoDataUrl)

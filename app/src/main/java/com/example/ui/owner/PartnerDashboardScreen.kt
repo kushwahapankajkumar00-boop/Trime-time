@@ -3,11 +3,16 @@ package com.example.ui.owner
 import android.Manifest
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import coil.compose.AsyncImage
+import com.google.firebase.storage.FirebaseStorage
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -151,7 +156,7 @@ fun PartnerDashboardScreen(
     onEditService: (String, SalonService) -> Unit = { _, _ -> },
     onDeleteService: (String, String, String) -> Unit = { _, _, _ -> },
     onSaveShopLocation: (String, String, String, Double, Double) -> Unit = { _, _, _, _, _ -> },
-    onSaveFullProfile: (String, String, String, String, String, String, Double, Double, Int) -> Unit = { salonId, _, _, _, addr, lm, lat, lng, _ ->
+    onSaveFullProfile: (String, String, String, String, String, String, Double, Double, Int, Boolean) -> Unit = { salonId, _, _, _, addr, lm, lat, lng, _, _ ->
         onSaveShopLocation(salonId, addr, lm, lat, lng)
     },
     onSaveShopPhoto: (String, String) -> Unit = { _, _ -> },
@@ -2337,7 +2342,7 @@ fun PartnerShopProfileTabContent(
     salon: Salon?,
     partnerProfile: UserProfile?,
     onSaveLocation: (String, String, String, Double, Double) -> Unit = { _, _, _, _, _ -> },
-    onSaveFullProfile: (String, String, String, String, String, String, Double, Double, Int) -> Unit = { salonId, _, _, _, addr, lm, lat, lng, _ ->
+    onSaveFullProfile: (String, String, String, String, String, String, Double, Double, Int, Boolean) -> Unit = { salonId, _, _, _, addr, lm, lat, lng, _, _ ->
         onSaveLocation(salonId, addr, lm, lat, lng)
     },
     onSaveShopPhoto: (String, String) -> Unit = { _, _ -> },
@@ -2367,6 +2372,9 @@ fun PartnerShopProfileTabContent(
     var shopTagline by remember(salon?.id, salon?.tagline) {
         mutableStateOf(salon?.tagline ?: "Instant grooming slots • Zero queue wait time")
     }
+    var isAcSalon by remember(salon?.id, salon?.isAcSalon) {
+        mutableStateOf(salon?.isAcSalon ?: false)
+    }
     var fullAddress by remember(salon?.id, salon?.shopAddress, salon?.location) {
         mutableStateOf(salon?.shopAddress?.takeIf { it.isNotBlank() } ?: salon?.location ?: "")
     }
@@ -2385,34 +2393,58 @@ fun PartnerShopProfileTabContent(
     var locationSaveSuccess by remember { mutableStateOf(false) }
     var isFetchingGps by remember { mutableStateOf(false) }
 
-    // Shop Cover Photo State (synced with Firestore `salon.resolvedPhotoData`)
-    var localPhotoDataUrl by remember(salon?.id, salon?.resolvedPhotoData) {
-        mutableStateOf(salon?.resolvedPhotoData ?: "")
+    // Shop Cover Photo State (synced with Firestore `salon.imageUrl` / `salon.resolvedPhotoData`)
+    var localPhotoDataUrl by remember(salon?.id, salon?.imageUrl, salon?.resolvedPhotoData) {
+        mutableStateOf(salon?.imageUrl?.takeIf { it.isNotBlank() } ?: salon?.resolvedPhotoData ?: "")
     }
     var uploadStatusMessage by remember { mutableStateOf<String?>(null) }
+    var isUploadingPhoto by remember { mutableStateOf(false) }
 
     val decodedShopBitmap = remember(localPhotoDataUrl) {
-        SalonImageUtils.decodeBase64ToImageBitmap(localPhotoDataUrl)
+        if (!localPhotoDataUrl.startsWith("http")) {
+            SalonImageUtils.decodeBase64ToImageBitmap(localPhotoDataUrl)
+        } else null
     }
 
-    // Real Gallery Image Picker (`ActivityResultContracts.GetContent()`) -> Base64 JPEG in Firestore
+    // Real Gallery Image Picker (`ActivityResultContracts.PickVisualMedia()`) -> Firebase Storage / Base64 JPEG in Firestore
     val galleryImageLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
+        contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         if (uri != null && salon != null) {
-            val base64Jpeg = SalonImageUtils.encodeUriToBase64Jpeg(
-                context = context,
-                uri = uri,
-                maxWidth = 600,
-                quality = 60
-            )
-            if (!base64Jpeg.isNullOrBlank()) {
-                localPhotoDataUrl = base64Jpeg
-                onSaveShopPhoto(salon.id, base64Jpeg)
-                uploadStatusMessage = "Shop photo uploaded & live on Customer Salon Card!"
-            } else {
-                uploadStatusMessage = "Could not process selected photo. Try another image."
-            }
+            isUploadingPhoto = true
+            uploadStatusMessage = "Uploading photo to cloud storage..."
+            val storageRef = FirebaseStorage.getInstance().reference
+                .child("salon_images/salon_${salon.id}_${System.currentTimeMillis()}.jpg")
+            
+            storageRef.putFile(uri)
+                .addOnSuccessListener {
+                    storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
+                        val downloadUrl = downloadUri.toString()
+                        localPhotoDataUrl = downloadUrl
+                        onSaveShopPhoto(salon.id, downloadUrl)
+                        isUploadingPhoto = false
+                        uploadStatusMessage = "Shop photo uploaded to Cloud Storage & live!"
+                    }.addOnFailureListener {
+                        val base64Jpeg = SalonImageUtils.encodeUriToBase64Jpeg(context, uri, maxWidth = 600, quality = 60)
+                        if (!base64Jpeg.isNullOrBlank()) {
+                            localPhotoDataUrl = base64Jpeg
+                            onSaveShopPhoto(salon.id, base64Jpeg)
+                            uploadStatusMessage = "Shop photo attached & saved!"
+                        }
+                        isUploadingPhoto = false
+                    }
+                }
+                .addOnFailureListener {
+                    val base64Jpeg = SalonImageUtils.encodeUriToBase64Jpeg(context, uri, maxWidth = 600, quality = 60)
+                    if (!base64Jpeg.isNullOrBlank()) {
+                        localPhotoDataUrl = base64Jpeg
+                        onSaveShopPhoto(salon.id, base64Jpeg)
+                        uploadStatusMessage = "Photo saved locally (Cloud Storage offline)!"
+                    } else {
+                        uploadStatusMessage = "Could not process photo: ${it.message}"
+                    }
+                    isUploadingPhoto = false
+                }
         }
     }
 
@@ -2484,18 +2516,47 @@ fun PartnerShopProfileTabContent(
                                 shape = RoundedCornerShape(14.dp)
                             )
                             .clickable {
-                                galleryImageLauncher.launch("image/*")
+                                galleryImageLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
                             }
                             .testTag("add_shop_image_box"),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (decodedShopBitmap != null) {
-                            Image(
-                                bitmap = decodedShopBitmap,
-                                contentDescription = "Uploaded Shop Cover Photo",
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
+                        if (isUploadingPhoto) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.padding(16.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    color = AmberPrimary,
+                                    modifier = Modifier.size(32.dp),
+                                    strokeWidth = 3.dp
+                                )
+                                Text(
+                                    text = "Uploading to Cloud Storage...",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else if (localPhotoDataUrl.isNotBlank()) {
+                            if (decodedShopBitmap != null) {
+                                Image(
+                                    bitmap = decodedShopBitmap,
+                                    contentDescription = "Uploaded Shop Cover Photo",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                AsyncImage(
+                                    model = localPhotoDataUrl,
+                                    contentDescription = "Uploaded Shop Cover Photo",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
                             // Strong dark vertical gradient scrim (0.65f to 0.85f) for crisp white text contrast
                             Box(
                                 modifier = Modifier
@@ -2948,6 +3009,65 @@ fun PartnerShopProfileTabContent(
                         shape = RoundedCornerShape(10.dp)
                     )
 
+                    // AC / Non-AC Salon Status
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(DarkSurface)
+                            .border(1.dp, if (isAcSalon) Color(0xFF06B6D4) else Color(0xFF334155), RoundedCornerShape(12.dp))
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(if (isAcSalon) Color(0xFF06B6D4).copy(alpha = 0.2f) else Color(0xFF1E293B)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (isAcSalon) "❄️" else "🌬️",
+                                    fontSize = 18.sp
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = if (isAcSalon) "AC Salon Enabled" else "Non-AC Salon",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = if (isAcSalon) "Customer card displays cyan ❄️ AC badge" else "Customers see standard non-AC tag",
+                                    fontSize = 11.sp,
+                                    color = if (isAcSalon) Color(0xFF67E8F9) else Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+
+                        Switch(
+                            checked = isAcSalon,
+                            onCheckedChange = {
+                                isAcSalon = it
+                                locationSaveSuccess = false
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Color(0xFF06B6D4),
+                                uncheckedThumbColor = Color(0xFF94A3B8),
+                                uncheckedTrackColor = Color(0xFF1E293B)
+                            ),
+                            modifier = Modifier.testTag("profile_ac_switch")
+                        )
+                    }
+
                     HorizontalDivider(color = Color(0xFF1E293B))
 
                     // PARTNER LOCATION LOCK & UNLOCK REQUEST FLOW:
@@ -3338,7 +3458,8 @@ fun PartnerShopProfileTabContent(
                                     landmark.trim(),
                                     currentLatitude,
                                     currentLongitude,
-                                    availableChairs
+                                    availableChairs,
+                                    isAcSalon
                                 )
                                 locationSaveSuccess = true
                             }

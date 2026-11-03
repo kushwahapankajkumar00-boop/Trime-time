@@ -3,6 +3,7 @@ package com.example.ui.auth
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -10,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -43,9 +45,11 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -63,18 +67,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
-import android.content.pm.PackageManager
-import android.os.Build
+import android.util.Log
 import android.widget.Toast
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.GetCredentialRequest
@@ -82,9 +81,9 @@ import com.example.R
 import com.google.android.gms.common.api.ApiException
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
+import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthException
-import java.security.MessageDigest
 import kotlinx.coroutines.launch
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -149,51 +148,6 @@ fun extractRawExceptionMessage(e: Throwable): String {
 }
 
 /**
- * Temporarily restored helper function to retrieve the current APK's signing certificate SHA-1
- * fingerprint formatted as `AA:BB:CC:...` so it can be copied into the Firebase Console.
- */
-@Suppress("DEPRECATION", "PackageManagerGetSignatures")
-fun getAppSha1Fingerprint(context: Context): String {
-    return try {
-        val packageManager = context.packageManager
-        val packageName = context.packageName
-        val signatureBytes: ByteArray? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val packageInfo = packageManager.getPackageInfo(
-                packageName,
-                PackageManager.GET_SIGNING_CERTIFICATES
-            )
-            val signingInfo = packageInfo.signingInfo
-            val signatures = if (signingInfo != null) {
-                if (signingInfo.hasMultipleSigners()) {
-                    signingInfo.apkContentsSigners
-                } else {
-                    signingInfo.signingCertificateHistory
-                }
-            } else {
-                null
-            }
-            signatures?.firstOrNull()?.toByteArray()
-        } else {
-            val packageInfo = packageManager.getPackageInfo(
-                packageName,
-                PackageManager.GET_SIGNATURES
-            )
-            packageInfo.signatures?.firstOrNull()?.toByteArray()
-        }
-
-        if (signatureBytes == null) {
-            "Unavailable (No signature found)"
-        } else {
-            val md = MessageDigest.getInstance("SHA-1")
-            val digest = md.digest(signatureBytes)
-            digest.joinToString(":") { byte -> "%02X".format(byte) }
-        }
-    } catch (e: Exception) {
-        "Error reading SHA-1: ${e.message}"
-    }
-}
-
-/**
  * Full-Screen Authentication UI (`AuthFullScreen`):
  * 1. Login / Sign Up Tabs:
  *    - Login Tab: Email + Password
@@ -216,10 +170,23 @@ fun AuthFullScreen(
     var password by rememberSaveable { mutableStateOf("") }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
+    var showAccountNotFoundPrompt by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
     val activeError = localError ?: errorMessage
+
+    // Automatically prompt to Sign Up when Firebase returns invalid credentials in Login mode
+    LaunchedEffect(activeError) {
+        if (!isSignUpMode && activeError != null) {
+            val isInvalid = activeError.contains("INVALID_CREDENTIAL", ignoreCase = true) ||
+                activeError.contains("auth credential is incorrect", ignoreCase = true) ||
+                activeError.contains("USER_NOT_FOUND", ignoreCase = true)
+            if (isInvalid && email.isNotBlank()) {
+                showAccountNotFoundPrompt = true
+            }
+        }
+    }
 
     Box(
         modifier = modifier
@@ -512,36 +479,230 @@ fun AuthFullScreen(
                         shape = RoundedCornerShape(12.dp)
                     )
 
-                    // Error Message Banner
+                    // Forgot Password link (Login mode only)
+                    if (!isSignUpMode) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            Text(
+                                text = "Forgot Password?",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = AmberPrimary,
+                                modifier = Modifier
+                                    .clickable {
+                                        val cleanEmail = email.trim().lowercase()
+                                        if (cleanEmail.isBlank() || !cleanEmail.contains("@")) {
+                                            localError = "Please enter your email above to receive a password reset link."
+                                        } else {
+                                            localError = null
+                                            FirebaseAuth.getInstance().sendPasswordResetEmail(cleanEmail)
+                                                .addOnSuccessListener {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Password reset link sent to $cleanEmail! Check your inbox.",
+                                                        Toast.LENGTH_LONG
+                                                    ).show()
+                                                }
+                                                .addOnFailureListener { ex ->
+                                                    localError = "Failed to send reset email: ${ex.message}"
+                                                    Toast.makeText(context, "Error: ${ex.message}", Toast.LENGTH_LONG).show()
+                                                }
+                                        }
+                                    }
+                                    .testTag("auth_forgot_password_btn")
+                            )
+                        }
+                    }
+
+                    // Error Message Banner with 1-Click Recovery Actions
                     AnimatedVisibility(
                         visible = !activeError.isNullOrBlank(),
                         enter = fadeIn(),
                         exit = fadeOut()
                     ) {
                         activeError?.let { errorText ->
-                            Row(
+                            val isInvalidCredential = errorText.contains("INVALID_CREDENTIAL", ignoreCase = true) ||
+                                errorText.contains("auth credential is incorrect", ignoreCase = true) ||
+                                errorText.contains("USER_NOT_FOUND", ignoreCase = true)
+                            val isEmailInUse = errorText.contains("EMAIL_ALREADY_IN_USE", ignoreCase = true)
+
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(12.dp))
                                     .background(Color(0xFF2D1214))
                                     .border(1.dp, RedAlert.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
-                                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                                    .padding(12.dp)
                                     .testTag("auth_error_banner"),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.ErrorOutline,
-                                    contentDescription = "Authentication Error",
-                                    tint = RedAlert,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Text(
-                                    text = errorText,
-                                    color = RedAlert,
-                                    fontSize = 12.sp,
-                                    lineHeight = 16.sp
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.Top,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ErrorOutline,
+                                        contentDescription = "Authentication Error",
+                                        tint = RedAlert,
+                                        modifier = Modifier
+                                            .size(18.dp)
+                                            .padding(top = 2.dp)
+                                    )
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(
+                                            text = errorText,
+                                            color = RedAlert,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            lineHeight = 16.sp
+                                        )
+
+                                        if (isInvalidCredential && !isSignUpMode) {
+                                            Text(
+                                                text = "💡 Don't have a TrimTime account yet? Tap below to create your account in seconds.",
+                                                color = Color(0xFFFDE68A),
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        } else if (isEmailInUse && isSignUpMode) {
+                                            Text(
+                                                text = "💡 This email is already registered. Please switch to the Login tab.",
+                                                color = Color(0xFFFDE68A),
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (isInvalidCredential && !isSignUpMode) {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Button(
+                                            onClick = {
+                                                val cleanEmail = email.trim().lowercase()
+                                                val resolvedName = if (fullName.isNotBlank()) {
+                                                    fullName.trim()
+                                                } else {
+                                                    cleanEmail.substringBefore("@")
+                                                        .replace(".", " ")
+                                                        .replaceFirstChar { it.uppercase() }
+                                                }.ifBlank { "TrimTime User" }
+
+                                                if (password.length >= 6) {
+                                                    localError = null
+                                                    onClearError()
+                                                    onSignUpWithEmail(resolvedName, cleanEmail, password)
+                                                } else {
+                                                    isSignUpMode = true
+                                                    localError = "Please enter a password with at least 6 characters."
+                                                    if (fullName.isBlank()) fullName = resolvedName
+                                                }
+                                            },
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("error_instant_signup_btn"),
+                                            shape = RoundedCornerShape(8.dp),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = AmberPrimary,
+                                                contentColor = Color.Black
+                                            ),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+                                        ) {
+                                            Text(
+                                                text = "✨ Create Account with this Password (Sign Up)",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.ExtraBold
+                                            )
+                                        }
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    isSignUpMode = true
+                                                    localError = null
+                                                    onClearError()
+                                                    if (fullName.isBlank() && email.isNotBlank()) {
+                                                        fullName = email.substringBefore("@")
+                                                            .replace(".", " ")
+                                                            .replaceFirstChar { it.uppercase() }
+                                                    }
+                                                },
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("error_switch_to_signup_btn"),
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = BorderStroke(1.dp, Color(0xFF64748B)),
+                                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                                            ) {
+                                                Text(
+                                                    text = "Edit Sign Up Form",
+                                                    color = Color(0xFFE2E8F0),
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+
+                                            OutlinedButton(
+                                                onClick = {
+                                                    val cleanEmail = email.trim().lowercase()
+                                                    if (cleanEmail.isNotBlank()) {
+                                                        FirebaseAuth.getInstance().sendPasswordResetEmail(cleanEmail)
+                                                            .addOnSuccessListener {
+                                                                Toast.makeText(context, "Password reset link sent to $cleanEmail!", Toast.LENGTH_LONG).show()
+                                                            }
+                                                            .addOnFailureListener { ex ->
+                                                                Toast.makeText(context, "Reset failed: ${ex.message}", Toast.LENGTH_LONG).show()
+                                                            }
+                                                    } else {
+                                                        localError = "Please enter your email address to reset password."
+                                                    }
+                                                },
+                                                modifier = Modifier.testTag("error_reset_password_btn"),
+                                                shape = RoundedCornerShape(8.dp),
+                                                border = BorderStroke(1.dp, Color(0xFF64748B)),
+                                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                                            ) {
+                                                Text(
+                                                    text = "Reset Password",
+                                                    color = Color(0xFFE2E8F0),
+                                                    fontSize = 11.sp
+                                                )
+                                            }
+                                        }
+                                    }
+                                } else if (isEmailInUse && isSignUpMode) {
+                                    Button(
+                                        onClick = {
+                                            isSignUpMode = false
+                                            localError = null
+                                            onClearError()
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("error_switch_to_login_btn"),
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = AmberPrimary,
+                                            contentColor = Color.Black
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                                    ) {
+                                        Text(
+                                            text = "👉 Switch to Login",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -550,7 +711,8 @@ fun AuthFullScreen(
                     Button(
                         onClick = {
                             val trimmedName = fullName.trim()
-                            val trimmedEmail = email.trim()
+                            val trimmedEmail = email.trim().lowercase()
+                            val enteredPassword = password
 
                             if (isSignUpMode && trimmedName.length < 2) {
                                 localError = "Please enter your full name (at least 2 characters)."
@@ -560,11 +722,11 @@ fun AuthFullScreen(
                                 localError = "Please enter a valid email address."
                                 return@Button
                             }
-                            if (isSignUpMode && password.length < 6) {
+                            if (isSignUpMode && enteredPassword.length < 6) {
                                 localError = "Password must be at least 6 characters long."
                                 return@Button
                             }
-                            if (!isSignUpMode && password.isBlank()) {
+                            if (!isSignUpMode && enteredPassword.isBlank()) {
                                 localError = "Please enter your password."
                                 return@Button
                             }
@@ -573,12 +735,18 @@ fun AuthFullScreen(
                             onClearError()
                             try {
                                 if (isSignUpMode) {
-                                    onSignUpWithEmail(trimmedName, trimmedEmail, password)
+                                    onSignUpWithEmail(trimmedName, trimmedEmail, enteredPassword)
                                 } else {
-                                    onLoginWithEmail(trimmedEmail, password)
+                                    onLoginWithEmail(trimmedEmail, enteredPassword)
                                 }
+                            } catch (e: FirebaseAuthException) {
+                                val exactError = "FirebaseAuthException [${e.errorCode}]: ${e.message}"
+                                localError = exactError
+                                Toast.makeText(context, exactError, Toast.LENGTH_LONG).show()
                             } catch (e: Exception) {
-                                localError = e.message ?: e.toString()
+                                val exactError = extractRawExceptionMessage(e)
+                                localError = exactError
+                                Toast.makeText(context, exactError, Toast.LENGTH_LONG).show()
                             }
                         },
                         enabled = !isLoading,
@@ -613,6 +781,34 @@ fun AuthFullScreen(
                                 fontSize = 16.sp
                             )
                         }
+                    }
+
+                    // Quick Toggle between Login and Sign Up
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 2.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isSignUpMode) "Already have an account? " else "Don't have an account yet? ",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 13.sp
+                        )
+                        Text(
+                            text = if (isSignUpMode) "Log In" else "Sign Up here",
+                            color = AmberPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            modifier = Modifier
+                                .clickable {
+                                    isSignUpMode = !isSignUpMode
+                                    localError = null
+                                    onClearError()
+                                }
+                                .testTag("toggle_auth_mode_link")
+                        )
                     }
 
                     // Divider: "OR"
@@ -697,71 +893,140 @@ fun AuthFullScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
-            // Temporary SHA-1 Fingerprint Diagnostic Card at the bottom of AuthFullScreen
-            val sha1Fingerprint = remember(context) { getAppSha1Fingerprint(context) }
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("sha1_fingerprint_card")
-                    .clickable {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                        clipboard?.setPrimaryClip(ClipData.newPlainText("APK SHA-1", sha1Fingerprint))
-                        Toast.makeText(context, "SHA-1 copied: $sha1Fingerprint", Toast.LENGTH_LONG).show()
-                    },
-                shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
-                border = CardDefaults.outlinedCardBorder().copy(
-                    brush = SolidColor(AmberPrimary.copy(alpha = 0.55f))
-                )
+            // Professional Security & Trust Indicator
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(horizontal = 16.dp)
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "APK SHA-1 FINGERPRINT (TAP TO COPY)",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = AmberPrimary
-                        )
-                        Icon(
-                            imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "Copy SHA-1",
-                            tint = AmberPrimary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                    SelectionContainer {
-                        Text(
-                            text = sha1Fingerprint,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                            color = Color.White,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("sha1_fingerprint_text")
-                        )
-                    }
+                Icon(
+                    imageVector = Icons.Default.Lock,
+                    contentDescription = "Encrypted",
+                    tint = Color(0xFF64748B),
+                    modifier = Modifier.size(13.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "End-to-End Encrypted & Secure Authentication",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color(0xFF64748B),
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "By continuing, you agree to TrimTime's Terms of Service & Privacy Policy",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Normal,
+                color = Color(0xFF475569),
+                textAlign = TextAlign.Center,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(horizontal = 20.dp)
+            )
+        }
+
+        if (showAccountNotFoundPrompt && !isSignUpMode) {
+            val cleanEmail = email.trim().lowercase()
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showAccountNotFoundPrompt = false },
+                containerColor = Color(0xFF1E293B),
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Person,
+                        contentDescription = null,
+                        tint = AmberPrimary,
+                        modifier = Modifier.size(32.dp)
+                    )
+                },
+                title = {
                     Text(
-                        text = "Package: ${context.packageName}",
-                        fontSize = 11.sp,
-                        color = Color(0xFF94A3B8),
+                        text = "Account Not Found or Wrong Password",
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White,
+                        fontSize = 17.sp,
                         textAlign = TextAlign.Center
                     )
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Firebase could not sign in for:\n$cleanEmail",
+                            color = Color(0xFFF1F5F9),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "• If you are new or haven't signed up yet, tap 'Sign Up & Create Account' below to register immediately with this password!\n\n• If you already have an account, tap 'Reset Password' to receive a password reset link.",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showAccountNotFoundPrompt = false
+                            localError = null
+                            onClearError()
+                            val resolvedName = if (fullName.isNotBlank()) {
+                                fullName.trim()
+                            } else {
+                                cleanEmail.substringBefore("@")
+                                    .replace(".", " ")
+                                    .replaceFirstChar { it.uppercase() }
+                            }.ifBlank { "TrimTime User" }
+
+                            if (password.length < 6) {
+                                isSignUpMode = true
+                                localError = "Please enter a password with at least 6 characters."
+                                if (fullName.isBlank()) fullName = resolvedName
+                            } else {
+                                onSignUpWithEmail(resolvedName, cleanEmail, password)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AmberPrimary,
+                            contentColor = Color.Black
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.testTag("dialog_instant_signup_btn")
+                    ) {
+                        Text("✨ Sign Up & Create Account", fontWeight = FontWeight.ExtraBold)
+                    }
+                },
+                dismissButton = {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(
+                            onClick = {
+                                if (cleanEmail.isNotBlank()) {
+                                    FirebaseAuth.getInstance().sendPasswordResetEmail(cleanEmail)
+                                        .addOnSuccessListener {
+                                            Toast.makeText(context, "Password reset email sent to $cleanEmail!", Toast.LENGTH_LONG).show()
+                                            showAccountNotFoundPrompt = false
+                                        }
+                                        .addOnFailureListener { ex ->
+                                            Toast.makeText(context, "Error: ${ex.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                }
+                            }
+                        ) {
+                            Text("Reset Password", color = AmberSecondary, fontSize = 12.sp)
+                        }
+                        TextButton(onClick = { showAccountNotFoundPrompt = false }) {
+                            Text("Dismiss", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                        }
+                    }
                 }
-            }
+            )
         }
     }
 }

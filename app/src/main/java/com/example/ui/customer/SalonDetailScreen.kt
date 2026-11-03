@@ -50,7 +50,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -89,9 +92,12 @@ fun SalonDetailScreen(
     onServiceSelected: (SalonService) -> Unit,
     onBookingBlocked: (String) -> Unit = {},
     onSwitchToPartnerMode: () -> Unit = {},
+    onRateSalon: (Int, String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     BackHandler { onBack() }
+
+    var showRatingDialog by remember { mutableStateOf(false) }
 
     val isOwnSalon = currentUserId.isNotBlank() &&
         (salon.ownerId == currentUserId || salon.partnerId == currentUserId)
@@ -158,7 +164,10 @@ fun SalonDetailScreen(
         ) {
             // Salon Header Card
             item {
-                SalonHeaderBanner(salon = salon)
+                SalonHeaderBanner(
+                    salon = salon,
+                    onRateClick = { showRatingDialog = true }
+                )
             }
 
             // Pay-at-salon banner
@@ -350,12 +359,25 @@ fun SalonDetailScreen(
             }
         }
     }
+
+    if (showRatingDialog) {
+        CustomerRatingDialog(
+            salon = salon,
+            onDismiss = { showRatingDialog = false },
+            onSubmit = { rating, review ->
+                onRateSalon(rating, review)
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SalonHeaderBanner(salon: Salon) {
-    val rawPhotoData = salon.resolvedPhotoData.trim()
+fun SalonHeaderBanner(
+    salon: Salon,
+    onRateClick: () -> Unit = {}
+) {
+    val rawPhotoData = salon.imageUrl.takeIf { it.isNotBlank() } ?: salon.resolvedPhotoData.trim()
     val salonCoverBitmap = remember(rawPhotoData) {
         SalonImageUtils.decodeBase64ToImageBitmap(rawPhotoData)
     }
@@ -433,27 +455,68 @@ fun SalonHeaderBanner(salon: Salon) {
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            val ratingText = if (salon.totalRatings > 0) {
+                                String.format(java.util.Locale.US, "★ %.1f (%d ratings)", salon.effectiveRating, salon.totalRatings)
+                            } else if (salon.averageRating > 0.0) {
+                                String.format(java.util.Locale.US, "★ %.1f", salon.effectiveRating)
+                            } else if (salon.reviewCount > 0) {
+                                String.format(java.util.Locale.US, "★ %.1f (%d reviews)", salon.rating, salon.reviewCount)
+                            } else {
+                                "★ New"
+                            }
+
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
                                     .background(Color(0xFF064E3B))
+                                    .clickable { onRateClick() }
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.Star,
-                                        contentDescription = null,
-                                        tint = AmberPrimary,
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(3.dp))
                                     Text(
-                                        text = "${salon.rating} (${salon.reviewCount} reviews)",
+                                        text = ratingText,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = Color.White,
                                         maxLines = 1,
                                         softWrap = false
+                                    )
+                                }
+                            }
+
+                            // AC / Non-AC Status Badge
+                            if (salon.isAcSalon) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(Color(0xFF0C4A6E))
+                                        .border(0.8.dp, Color(0xFF38BDF8), RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        .testTag("detail_ac_badge")
+                                ) {
+                                    Text(
+                                        text = "❄️ AC Salon",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF7DD3FC),
+                                        maxLines = 1
+                                    )
+                                }
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(Color(0xFF1E293B))
+                                        .border(0.8.dp, Color(0xFF475569), RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        .testTag("detail_non_ac_badge")
+                                ) {
+                                    Text(
+                                        text = "Non-AC",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = Color(0xFF94A3B8),
+                                        maxLines = 1
                                     )
                                 }
                             }
@@ -573,7 +636,7 @@ fun SalonHeaderBanner(salon: Salon) {
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     OutlinedButton(
@@ -584,7 +647,7 @@ fun SalonHeaderBanner(salon: Salon) {
                         shape = RoundedCornerShape(10.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenSuccess),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
                             .heightIn(min = 42.dp)
@@ -593,11 +656,11 @@ fun SalonHeaderBanner(salon: Salon) {
                         Icon(
                             imageVector = Icons.Default.Call,
                             contentDescription = "Call Salon Directly",
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(14.dp)
                         )
-                        Spacer(modifier = Modifier.width(5.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Call Salon Directly",
+                            text = "Call",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
@@ -619,25 +682,51 @@ fun SalonHeaderBanner(salon: Salon) {
                         shape = RoundedCornerShape(10.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF38BDF8)),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF38BDF8)),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(1.2f)
                             .heightIn(min = 42.dp)
                             .testTag("salon_detail_get_directions_button")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Directions,
                             contentDescription = "Get Directions",
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(14.dp)
                         )
-                        Spacer(modifier = Modifier.width(5.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Get Directions",
+                            text = "Directions",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = onRateClick,
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.8f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = AmberPrimary),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .weight(0.9f)
+                            .heightIn(min = 42.dp)
+                            .testTag("salon_detail_rate_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Star,
+                            contentDescription = "Rate Salon",
+                            tint = AmberPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Rate",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1
                         )
                     }
                 }

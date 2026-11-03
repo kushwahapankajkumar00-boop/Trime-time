@@ -51,6 +51,12 @@ data class UserProfile(
     val role: String = "customer", // "customer", "partner", or "admin"
     val isAdmin: Boolean = false,
     val salonId: String? = null,
+    val salonCategory: String = "Standard", // "Premium", "Standard", or "Rural/Local"
+    val salonStatus: String = "approved", // "approved", "rejected", "suspended"
+    val averageRating: Double = 0.0,
+    val totalRatings: Int = 0,
+    val isAcSalon: Boolean = false,
+    val imageUrl: String = "",
     val hasRegisteredSalon: Boolean = false,
     val defaultCity: String = "Current Location",
     val cancellationCount: Int = 0,
@@ -78,6 +84,12 @@ data class UserProfile(
             put("isAdmin", true)
         }
         put("salonId", salonId)
+        put("salonCategory", salonCategory)
+        put("salonStatus", salonStatus)
+        put("averageRating", averageRating)
+        put("totalRatings", totalRatings)
+        put("isAcSalon", isAcSalon)
+        put("imageUrl", imageUrl)
         put("hasRegisteredSalon", hasRegisteredSalon)
         put("defaultCity", defaultCity)
         put("cancellationCount", effectiveCancellationStrikes)
@@ -117,6 +129,9 @@ data class Salon(
     val distance: String = "0.5 km",
     val rating: Double = 4.8,
     val reviewCount: Int = 0,
+    val averageRating: Double = 0.0,
+    val totalRatings: Int = 0,
+    val isAcSalon: Boolean = false,
     val partnerId: String = "",
     val ownerId: String = "",
     val ownerName: String = "",
@@ -135,8 +150,14 @@ data class Salon(
     val pincode: String = "",
     val shopCategory: String = "Men's Salon",
     val adminCategoryTag: String = "Standard", // "Premium", "Standard", or "Rural/Local"
+    val salonCategory: String = adminCategoryTag,
     val approvalStatus: String = "APPROVED", // "PENDING", "APPROVED", "REJECTED", "SUSPENDED"
     val isSuspended: Boolean = false,
+    val salonStatus: String = when {
+        isSuspended -> "suspended"
+        approvalStatus.equals("REJECTED", ignoreCase = true) -> "rejected"
+        else -> "approved"
+    },
     val openingTime: String = "9:00 AM",
     val closingTime: String = "9:00 PM",
     val latitude: Double? = null,
@@ -167,6 +188,9 @@ data class Salon(
         "distance" to distance,
         "rating" to rating,
         "reviewCount" to reviewCount,
+        "averageRating" to averageRating,
+        "totalRatings" to totalRatings,
+        "isAcSalon" to isAcSalon,
         "partnerId" to partnerId.ifBlank { ownerId },
         "ownerId" to ownerId.ifBlank { partnerId },
         "ownerName" to ownerName,
@@ -185,7 +209,9 @@ data class Salon(
         "pincode" to pincode,
         "shopCategory" to shopCategory,
         "adminCategoryTag" to adminCategoryTag,
+        "salonCategory" to salonCategory.ifBlank { adminCategoryTag },
         "approvalStatus" to approvalStatus,
+        "salonStatus" to salonStatus,
         "isSuspended" to isSuspended,
         "openingTime" to openingTime,
         "closingTime" to closingTime,
@@ -201,6 +227,9 @@ data class Salon(
             "lng" to longitude
         ) else null
     )
+
+    val effectiveRating: Double
+        get() = if (averageRating > 0.0) averageRating else rating
 }
 
 enum class BookingStatus(val displayName: String) {

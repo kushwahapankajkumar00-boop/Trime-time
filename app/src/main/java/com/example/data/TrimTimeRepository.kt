@@ -45,6 +45,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.tasks.await
+import android.net.Uri
+import com.google.firebase.storage.FirebaseStorage
 import com.example.util.SecurityValidator
 import java.io.File
 import kotlin.random.Random
@@ -329,6 +333,16 @@ class TrimTimeRepository private constructor(context: Context) {
         _authError.value = null
     }
 
+    fun setAuthLoading(loading: Boolean) {
+        _isLoading.value = loading
+    }
+
+    fun setAuthError(error: String?) {
+        _authError.value = error
+    }
+
+    fun getActiveFirestore(): FirebaseFirestore? = firestore ?: defaultFirestore
+
     private fun initFirebase(context: Context) {
         try {
             val apps = FirebaseApp.getApps(context)
@@ -350,19 +364,36 @@ class TrimTimeRepository private constructor(context: Context) {
                 _isCloudSynced.value = true
                 Log.d(tag, "Firebase Auth and Firestore (project=$projectId) initialized successfully.")
 
-                // Check real Firebase Auth state or persisted Firestore account session on startup
+                // Verify real Firebase Auth state against the server on startup
                 val firebaseUser = auth?.currentUser
-                val savedUid = sessionPrefs.getString("saved_uid", null)
                 if (firebaseUser != null && firebaseUser.uid !in invalidSharedUserIds) {
-                    Log.d(tag, "Active Firebase session detected for uid: ${firebaseUser.uid}")
+                    Log.d(tag, "Active Firebase session detected for uid: ${firebaseUser.uid}, verifying with server...")
                     _authState.value = AppAuthState.Loading
-                    fetchUserProfile(firebaseUser.uid)
-                } else if (!savedUid.isNullOrBlank() && savedUid !in invalidSharedUserIds) {
-                    Log.d(tag, "Restoring persisted Firestore user session for uid: $savedUid")
-                    _authState.value = AppAuthState.Loading
-                    fetchUserProfile(savedUid)
+                    firebaseUser.reload()
+                        .addOnSuccessListener {
+                            val refreshedUser = auth?.currentUser
+                            if (refreshedUser != null) {
+                                fetchUserProfile(refreshedUser.uid)
+                            } else {
+                                sessionPrefs.edit().clear().apply()
+                                _currentUserProfile.value = null
+                                _customerBookings.value = emptyList()
+                                _authState.value = AppAuthState.Unauthenticated
+                            }
+                        }
+                        .addOnFailureListener { reloadErr ->
+                            Log.w(tag, "Firebase user reload failed (${reloadErr.message}); clearing stale local session.")
+                            try {
+                                auth?.signOut()
+                            } catch (_: Exception) {
+                            }
+                            sessionPrefs.edit().clear().apply()
+                            _currentUserProfile.value = null
+                            _customerBookings.value = emptyList()
+                            _authState.value = AppAuthState.Unauthenticated
+                        }
                 } else {
-                    Log.d(tag, "No active session found. Setting Unauthenticated.")
+                    Log.d(tag, "No active Firebase Auth session found. Setting Unauthenticated.")
                     sessionPrefs.edit().clear().apply()
                     _currentUserProfile.value = null
                     _customerBookings.value = emptyList()
@@ -560,9 +591,22 @@ class TrimTimeRepository private constructor(context: Context) {
                                     registrationFormSubmittedFlag = isFormSubmittedFlag
                                 )
                                 val isSalonPhoneVerified = doc.getBoolean("isPhoneVerified") ?: true
-                                val adminCategoryTag = doc.getString("adminCategoryTag")?.takeIf { it.isNotBlank() } ?: "Standard"
-                                val approvalStatus = doc.getString("approvalStatus")?.takeIf { it.isNotBlank() } ?: "APPROVED"
-                                val isSalonSuspended = doc.getBoolean("isSuspended") ?: false
+                                val rawCategory = doc.getString("salonCategory")?.takeIf { it.isNotBlank() }
+                                    ?: doc.getString("adminCategoryTag")?.takeIf { it.isNotBlank() } ?: "Standard"
+                                val adminCategoryTag = rawCategory
+                                val rawSalonStatus = doc.getString("salonStatus")?.trim()?.lowercase()
+                                val isSalonSuspended = rawSalonStatus == "suspended" || (doc.getBoolean("isSuspended") ?: false)
+                                val approvalStatus = when (rawSalonStatus) {
+                                    "approved" -> "APPROVED"
+                                    "rejected" -> "REJECTED"
+                                    "suspended" -> "SUSPENDED"
+                                    else -> doc.getString("approvalStatus")?.takeIf { it.isNotBlank() } ?: (if (isSalonSuspended) "SUSPENDED" else "APPROVED")
+                                }
+                                val finalSalonStatus = rawSalonStatus ?: when {
+                                    isSalonSuspended -> "suspended"
+                                    approvalStatus.equals("REJECTED", ignoreCase = true) -> "rejected"
+                                    else -> "approved"
+                                }
                                 val salonUnlockStatus = doc.getString("unlockRequestStatus")?.trim()?.lowercase()
                                     ?.takeIf { it in setOf("none", "pending", "approved") } ?: "none"
                                 val isSalonLocationLocked = readBooleanField(
@@ -570,6 +614,14 @@ class TrimTimeRepository private constructor(context: Context) {
                                     "isLocationLocked",
                                     defaultValue = salonUnlockStatus != "approved"
                                 )
+
+                                val parsedAvgRating = (doc.get("averageRating") as? Number)?.toDouble()
+                                    ?: doc.getString("averageRating")?.toDoubleOrNull()
+                                    ?: rating
+                                val parsedTotalRatings = (doc.get("totalRatings") as? Number)?.toInt()
+                                    ?: doc.getString("totalRatings")?.toIntOrNull()
+                                    ?: reviewCount
+                                val isAcSalon = readBooleanField(doc, "isAcSalon", false)
 
                                 // Purge any legacy auto-created or dummy salon document in Firestore
                                 if (!isSeedSalon && !isGenuinelyRegistered) {
@@ -583,8 +635,11 @@ class TrimTimeRepository private constructor(context: Context) {
                                     name = salonName,
                                     location = location,
                                     distance = distance,
-                                    rating = rating,
-                                    reviewCount = reviewCount,
+                                    rating = if (parsedAvgRating > 0.0) parsedAvgRating else rating,
+                                    reviewCount = if (parsedTotalRatings > 0) parsedTotalRatings else reviewCount,
+                                    averageRating = parsedAvgRating,
+                                    totalRatings = parsedTotalRatings,
+                                    isAcSalon = isAcSalon,
                                     partnerId = partnerId,
                                     ownerId = ownerId,
                                     ownerName = ownerName,
@@ -603,7 +658,9 @@ class TrimTimeRepository private constructor(context: Context) {
                                     pincode = pincode,
                                     shopCategory = shopCategory,
                                     adminCategoryTag = adminCategoryTag,
+                                    salonCategory = rawCategory,
                                     approvalStatus = approvalStatus,
+                                    salonStatus = finalSalonStatus,
                                     isSuspended = isSalonSuspended,
                                     openingTime = openingTime,
                                     closingTime = closingTime,
@@ -882,6 +939,12 @@ class TrimTimeRepository private constructor(context: Context) {
                 "isLocationLocked",
                 defaultValue = unlockStatusVal != "approved"
             )
+            val avgRating = (doc.get("averageRating") as? Number)?.toDouble()
+                ?: doc.getString("averageRating")?.toDoubleOrNull() ?: 0.0
+            val totRatings = (doc.get("totalRatings") as? Number)?.toInt()
+                ?: doc.getString("totalRatings")?.toIntOrNull() ?: 0
+            val isAcSalon = readBooleanField(doc, "isAcSalon", false)
+            val imageUrl = doc.getString("imageUrl") ?: ""
 
             UserProfile(
                 id = uid,
@@ -895,6 +958,8 @@ class TrimTimeRepository private constructor(context: Context) {
                 isPhoneVerified = readBooleanField(doc, "isPhoneVerified", phoneVal.isNotBlank()),
                 role = doc.getString("role") ?: "customer",
                 salonId = doc.getString("salonId"),
+                salonCategory = doc.getString("salonCategory")?.takeIf { it.isNotBlank() } ?: "Standard",
+                salonStatus = doc.getString("salonStatus")?.takeIf { it.isNotBlank() } ?: "approved",
                 hasRegisteredSalon = readBooleanField(doc, "hasRegisteredSalon", false),
                 defaultCity = doc.getString("defaultCity") ?: "Current Location",
                 cancellationCount = strikes,
@@ -904,6 +969,10 @@ class TrimTimeRepository private constructor(context: Context) {
                 isAdmin = isAdminFlag,
                 isLocationLocked = isLocationLockedFlag,
                 unlockRequestStatus = unlockStatusVal,
+                averageRating = avgRating,
+                totalRatings = totRatings,
+                isAcSalon = isAcSalon,
+                imageUrl = imageUrl,
                 createdAt = doc.getLong("createdAt") ?: 0L
             )
         } catch (e: Exception) {
@@ -1123,11 +1192,94 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     /**
+     * Completes session & state setup after a successful Email/Password Sign-Up and Firestore `users/{uid}` creation.
+     */
+    fun completeEmailSignUp(
+        uid: String,
+        cleanName: String,
+        cleanEmail: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        val newProfile = UserProfile(
+            id = uid,
+            name = cleanName,
+            email = cleanEmail,
+            phone = "",
+            isPhoneVerified = false,
+            role = "customer",
+            salonId = null,
+            hasRegisteredSalon = false,
+            defaultCity = _appPreferences.value.defaultCity,
+            cancellationCount = 0,
+            cancellationStrikes = 0,
+            isSuspended = false,
+            isBlocked = false,
+            isAdmin = false,
+            isLocationLocked = true,
+            unlockRequestStatus = "none",
+            createdAt = System.currentTimeMillis()
+        )
+
+        val userDocMap = newProfile.toMap() + mapOf(
+            "uid" to uid,
+            "id" to uid,
+            "email" to cleanEmail,
+            "name" to cleanName,
+            "isAdmin" to false
+        )
+
+        firestore?.collection("users")?.document(uid)
+            ?.set(userDocMap, com.google.firebase.firestore.SetOptions.merge())
+            ?.addOnFailureListener { fsErr ->
+                Log.e(tag, "Firestore users/$uid write warning: ${fsErr.message}", fsErr)
+            }
+        val defDb = defaultFirestore
+        if (defDb != null && defDb != firestore) {
+            defDb.collection("users").document(uid)
+                .set(userDocMap, com.google.firebase.firestore.SetOptions.merge())
+        }
+
+        sessionPrefs.edit()
+            .putString("saved_uid", uid)
+            .putString("saved_name", cleanName)
+            .putString("saved_email", cleanEmail)
+            .putString("saved_role", "customer")
+            .apply()
+
+        _currentUserProfile.value = newProfile
+        attachCustomerBookingsListener(uid)
+        _showPartnerOnboarding.value = false
+        _currentRole.value = UserRole.CUSTOMER
+        _isLoading.value = false
+        _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
+        onSuccess()
+    }
+
+    /**
+     * Completes session & state setup after a successful Email/Password Login.
+     */
+    fun completeEmailLogin(
+        uid: String,
+        displayName: String,
+        email: String,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        saveGoogleUserAndAuthenticate(
+            uid = uid,
+            displayName = displayName,
+            email = email,
+            onSuccess = onSuccess,
+            onError = onError
+        )
+    }
+
+    /**
      * Manual Sign Up with Full Name, Email, and Password using standard
      * `FirebaseAuth.getInstance().createUserWithEmailAndPassword(email, password)`.
-     * Saves the user's `name`, `email`, and `uid` to Firestore (`users/{uid}`) upon signup
+     * Saves the user's `uid`, `email`, `name`, and `isAdmin = false` to Firestore (`users/{uid}`)
      * and immediately navigates to the main Home/Profile screen.
-     * Never swallows exceptions: displays the exact `e.message` in the red error banner on failure.
+     * Catches `FirebaseAuthException` and displays the exact `e.errorCode` and `e.message`.
      */
     fun signUpWithEmailAndPassword(
         fullName: String,
@@ -1136,15 +1288,17 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
-        val cleanName = SecurityValidator.sanitizeName(fullName, trimEdges = true)
-        if (cleanName.length < 2) {
-            val err = "Please enter your full name (at least 2 characters)."
-            _authError.value = err
-            onError(err)
-            return
+        val cleanEmail = email.trim().lowercase()
+        val sanitized = SecurityValidator.sanitizeName(fullName, trimEdges = true)
+        val cleanName = if (sanitized.length >= 2) {
+            sanitized
+        } else {
+            cleanEmail.substringBefore("@")
+                .replace(".", " ")
+                .replaceFirstChar { it.uppercase() }
+                .ifBlank { "TrimTime User" }
         }
 
-        val cleanEmail = email.trim()
         if (cleanEmail.isBlank() || !cleanEmail.contains("@") || !cleanEmail.contains(".")) {
             val err = "Please enter a valid email address."
             _authError.value = err
@@ -1162,108 +1316,86 @@ class TrimTimeRepository private constructor(context: Context) {
         _isLoading.value = true
         _authError.value = null
 
-        try {
+        CoroutineScope(Dispatchers.Main).launch {
             try {
-                FirebaseAuth.getInstance().signOut()
-            } catch (_: Exception) {
-            }
-            sessionPrefs.edit().clear().apply()
+                val authResult = FirebaseAuth.getInstance()
+                    .createUserWithEmailAndPassword(cleanEmail, password)
+                    .await()
 
-            FirebaseAuth.getInstance().createUserWithEmailAndPassword(cleanEmail, password)
-                .addOnSuccessListener { authResult ->
-                    val firebaseUser = authResult.user
-                    if (firebaseUser == null) {
-                        _isLoading.value = false
-                        val err = "Firebase Auth returned a null user after createUserWithEmailAndPassword."
-                        _authError.value = err
-                        onError(err)
-                        return@addOnSuccessListener
-                    }
-
-                    val uid = firebaseUser.uid
-                    val profileUpdates = UserProfileChangeRequest.Builder()
-                        .setDisplayName(cleanName)
-                        .build()
-                    firebaseUser.updateProfile(profileUpdates)
-
-                    val resolvedAdmin = resolveAdminFlagForUser(
-                        uid = uid,
-                        email = cleanEmail,
-                        phone = "",
-                        directFlag = false
-                    )
-                    val newProfile = UserProfile(
-                        id = uid,
-                        name = cleanName,
-                        email = cleanEmail,
-                        phone = "",
-                        isPhoneVerified = false,
-                        role = "customer",
-                        salonId = null,
-                        hasRegisteredSalon = false,
-                        defaultCity = _appPreferences.value.defaultCity,
-                        cancellationCount = 0,
-                        cancellationStrikes = 0,
-                        isSuspended = false,
-                        isBlocked = false,
-                        isAdmin = resolvedAdmin,
-                        createdAt = System.currentTimeMillis()
-                    )
-
-                    // Immediately save the user data (name, email, uid) to Firestore `users` collection
-                    val userDocMap = newProfile.toMap().minus("isAdmin") + mapOf(
-                        "uid" to uid,
-                        "id" to uid,
-                        "name" to cleanName,
-                        "email" to cleanEmail
-                    )
-                    firestore?.collection("users")?.document(uid)
-                        ?.set(userDocMap, com.google.firebase.firestore.SetOptions.merge())
-                        ?.addOnFailureListener { fsErr ->
-                            Log.e(tag, "Firestore users/$uid write warning: ${fsErr.message}", fsErr)
-                        }
-
-                    sessionPrefs.edit()
-                        .putString("saved_uid", uid)
-                        .putString("saved_name", cleanName)
-                        .putString("saved_email", cleanEmail)
-                        .putString("saved_role", "customer")
-                        .apply()
-
-                    _currentUserProfile.value = newProfile
-                    attachCustomerBookingsListener(uid)
-                    _showPartnerOnboarding.value = false
-                    _currentRole.value = UserRole.CUSTOMER
+                val firebaseUser = authResult.user
+                if (firebaseUser == null) {
                     _isLoading.value = false
-                    _authState.value = AppAuthState.Authenticated(UserRole.CUSTOMER)
-                    onSuccess()
+                    val err = "Firebase Auth returned a null user after createUserWithEmailAndPassword."
+                    _authError.value = err
+                    Toast.makeText(appContext, err, Toast.LENGTH_LONG).show()
+                    onError(err)
+                    return@launch
                 }
-                .addOnFailureListener { e ->
-                    _isLoading.value = false
-                    val exactMessage = e.message ?: e.localizedMessage ?: e.toString()
-                    _authError.value = exactMessage
-                    Log.e(tag, "createUserWithEmailAndPassword failed: $exactMessage", e)
-                    Handler(Looper.getMainLooper()).post {
-                        Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
-                    }
-                    onError(exactMessage)
-                }
-        } catch (e: Exception) {
-            _isLoading.value = false
-            val exactMessage = e.message ?: e.localizedMessage ?: e.toString()
-            _authError.value = exactMessage
-            Log.e(tag, "createUserWithEmailAndPassword exception: $exactMessage", e)
-            Handler(Looper.getMainLooper()).post {
+
+                val uid = firebaseUser.uid
+                val profileUpdates = UserProfileChangeRequest.Builder()
+                    .setDisplayName(cleanName)
+                    .build()
+                firebaseUser.updateProfile(profileUpdates)
+
+                val userDocData = mapOf(
+                    "uid" to uid,
+                    "id" to uid,
+                    "email" to cleanEmail,
+                    "name" to cleanName,
+                    "isAdmin" to false,
+                    "phone" to "",
+                    "isPhoneVerified" to false,
+                    "role" to "customer",
+                    "hasRegisteredSalon" to false,
+                    "defaultCity" to _appPreferences.value.defaultCity,
+                    "cancellationCount" to 0,
+                    "cancellationStrikes" to 0,
+                    "isSuspended" to false,
+                    "isBlocked" to false,
+                    "isLocationLocked" to true,
+                    "unlockRequestStatus" to "none",
+                    "createdAt" to System.currentTimeMillis()
+                )
+
+                FirebaseFirestore.getInstance()
+                    .collection("users")
+                    .document(uid)
+                    .set(userDocData, com.google.firebase.firestore.SetOptions.merge())
+
+                completeEmailSignUp(
+                    uid = uid,
+                    cleanName = cleanName,
+                    cleanEmail = cleanEmail,
+                    onSuccess = onSuccess
+                )
+            } catch (e: FirebaseAuthException) {
+                _isLoading.value = false
+                val exactMessage = "FirebaseAuthException [${e.errorCode}]: ${e.message}"
+                _authError.value = exactMessage
+                Log.e(tag, "createUserWithEmailAndPassword FirebaseAuthException: $exactMessage", e)
                 Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
+                onError(exactMessage)
+            } catch (e: Exception) {
+                _isLoading.value = false
+                val authEx = e.cause as? FirebaseAuthException
+                val exactMessage = if (authEx != null) {
+                    "FirebaseAuthException [${authEx.errorCode}]: ${authEx.message}"
+                } else {
+                    e.message ?: e.localizedMessage ?: e.toString()
+                }
+                _authError.value = exactMessage
+                Log.e(tag, "createUserWithEmailAndPassword exception: $exactMessage", e)
+                Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
+                onError(exactMessage)
             }
-            onError(exactMessage)
         }
     }
 
     /**
      * Manual Login with Email and Password using standard
      * `FirebaseAuth.getInstance().signInWithEmailAndPassword(email, password)`.
-     * Never swallows exceptions: displays the exact `e.message` in the red error banner on failure.
+     * Catches `FirebaseAuthException` and displays the exact `e.errorCode` and `e.message`.
      */
     fun signInWithEmailAndPassword(
         email: String,
@@ -1271,7 +1403,7 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
-        val cleanEmail = email.trim()
+        val cleanEmail = email.trim().lowercase()
         if (cleanEmail.isBlank() || !cleanEmail.contains("@") || !cleanEmail.contains(".")) {
             val err = "Please enter a valid email address."
             _authError.value = err
@@ -1289,56 +1421,54 @@ class TrimTimeRepository private constructor(context: Context) {
         _isLoading.value = true
         _authError.value = null
 
-        try {
+        CoroutineScope(Dispatchers.Main).launch {
             try {
-                FirebaseAuth.getInstance().signOut()
-            } catch (_: Exception) {
-            }
-            sessionPrefs.edit().clear().apply()
+                val authResult = FirebaseAuth.getInstance()
+                    .signInWithEmailAndPassword(cleanEmail, password)
+                    .await()
 
-            FirebaseAuth.getInstance().signInWithEmailAndPassword(cleanEmail, password)
-                .addOnSuccessListener { authResult ->
-                    val firebaseUser = authResult.user
-                    if (firebaseUser == null) {
-                        _isLoading.value = false
-                        val err = "User session is null after login. Please try again."
-                        _authError.value = err
-                        onError(err)
-                        return@addOnSuccessListener
-                    }
-
-                    val uid = firebaseUser.uid
-                    val displayName = firebaseUser.displayName?.takeIf { it.isNotBlank() }
-                        ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
-                    val userEmail = firebaseUser.email?.takeIf { it.isNotBlank() } ?: cleanEmail
-
-                    saveGoogleUserAndAuthenticate(
-                        uid = uid,
-                        displayName = displayName,
-                        email = userEmail,
-                        onSuccess = onSuccess,
-                        onError = onError
-                    )
-                }
-                .addOnFailureListener { e ->
+                val firebaseUser = authResult.user
+                if (firebaseUser == null) {
                     _isLoading.value = false
-                    val exactMessage = e.message ?: e.localizedMessage ?: e.toString()
-                    _authError.value = exactMessage
-                    Log.e(tag, "signInWithEmailAndPassword failed: $exactMessage", e)
-                    Handler(Looper.getMainLooper()).post {
-                        Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
-                    }
-                    onError(exactMessage)
+                    val err = "User session is null after login. Please try again."
+                    _authError.value = err
+                    Toast.makeText(appContext, err, Toast.LENGTH_LONG).show()
+                    onError(err)
+                    return@launch
                 }
-        } catch (e: Exception) {
-            _isLoading.value = false
-            val exactMessage = e.message ?: e.localizedMessage ?: e.toString()
-            _authError.value = exactMessage
-            Log.e(tag, "signInWithEmailAndPassword exception: $exactMessage", e)
-            Handler(Looper.getMainLooper()).post {
+
+                val uid = firebaseUser.uid
+                val displayName = firebaseUser.displayName?.takeIf { it.isNotBlank() }
+                    ?: cleanEmail.substringBefore("@").replaceFirstChar { it.uppercase() }
+                val userEmail = firebaseUser.email?.takeIf { it.isNotBlank() } ?: cleanEmail
+
+                completeEmailLogin(
+                    uid = uid,
+                    displayName = displayName,
+                    email = userEmail,
+                    onSuccess = onSuccess,
+                    onError = onError
+                )
+            } catch (e: FirebaseAuthException) {
+                _isLoading.value = false
+                val exactMessage = "FirebaseAuthException [${e.errorCode}]: ${e.message}"
+                _authError.value = exactMessage
+                Log.e(tag, "signInWithEmailAndPassword FirebaseAuthException: $exactMessage", e)
                 Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
+                onError(exactMessage)
+            } catch (e: Exception) {
+                _isLoading.value = false
+                val authEx = e.cause as? FirebaseAuthException
+                val exactMessage = if (authEx != null) {
+                    "FirebaseAuthException [${authEx.errorCode}]: ${authEx.message}"
+                } else {
+                    e.message ?: e.localizedMessage ?: e.toString()
+                }
+                _authError.value = exactMessage
+                Log.e(tag, "signInWithEmailAndPassword exception: $exactMessage", e)
+                Toast.makeText(appContext, exactMessage, Toast.LENGTH_LONG).show()
+                onError(exactMessage)
             }
-            onError(exactMessage)
         }
     }
 
@@ -2252,6 +2382,8 @@ class TrimTimeRepository private constructor(context: Context) {
         initialServices: List<SalonService>,
         latitude: Double,
         longitude: Double,
+        isAcSalon: Boolean = false,
+        imageUrl: String = "",
         onSuccess: (String) -> Unit,
         onError: (String) -> Unit
     ) {
@@ -2342,14 +2474,17 @@ class TrimTimeRepository private constructor(context: Context) {
             name = cleanSalonName,
             location = fullDisplayLocation,
             distance = formattedDist,
-            rating = 4.9,
-            reviewCount = 1,
+            rating = 5.0,
+            reviewCount = 0,
+            averageRating = 0.0,
+            totalRatings = 0,
+            isAcSalon = isAcSalon,
             partnerId = uid,
             ownerId = uid,
             ownerName = cleanOwnerName,
             phone = formattedPhone,
-            imageUrl = "",
-            photoBase64 = "",
+            imageUrl = imageUrl,
+            photoBase64 = imageUrl,
             services = finalServices,
             isOpen = true,
             currentStatus = "FREE",
@@ -2386,6 +2521,8 @@ class TrimTimeRepository private constructor(context: Context) {
             role = "partner",
             salonId = targetSalonId,
             hasRegisteredSalon = true,
+            isAcSalon = isAcSalon,
+            imageUrl = imageUrl,
             defaultCity = cleanCity.ifBlank { currentProfile.defaultCity }
         )
         _currentUserProfile.value = updatedProfile
@@ -2529,6 +2666,12 @@ class TrimTimeRepository private constructor(context: Context) {
                         "isLocationLocked",
                         defaultValue = existingUnlockStatusVal != "approved"
                     )
+                    val existingAvgRating = (doc.get("averageRating") as? Number)?.toDouble()
+                        ?: doc.getString("averageRating")?.toDoubleOrNull() ?: 0.0
+                    val existingTotRatings = (doc.get("totalRatings") as? Number)?.toInt()
+                        ?: doc.getString("totalRatings")?.toIntOrNull() ?: 0
+                    val existingIsAc = readBooleanField(doc, "isAcSalon", false)
+                    val existingImgUrl = doc.getString("imageUrl") ?: ""
 
                     // Every user MUST default to Customer Mode upon Login / Session Restore
                     val profile = UserProfile(
@@ -2548,6 +2691,10 @@ class TrimTimeRepository private constructor(context: Context) {
                         isAdmin = existingIsAdminVal,
                         isLocationLocked = existingLocationLockedVal,
                         unlockRequestStatus = existingUnlockStatusVal,
+                        averageRating = existingAvgRating,
+                        totalRatings = existingTotRatings,
+                        isAcSalon = existingIsAc,
+                        imageUrl = existingImgUrl,
                         createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
                     )
                     sessionPrefs.edit().putString("saved_role", "customer").apply()
@@ -3164,6 +3311,7 @@ class TrimTimeRepository private constructor(context: Context) {
         latitude: Double,
         longitude: Double,
         availableChairs: Int? = null,
+        isAcSalon: Boolean? = null,
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
@@ -3208,6 +3356,7 @@ class TrimTimeRepository private constructor(context: Context) {
                     latitude = latitude,
                     longitude = longitude,
                     availableChairs = availableChairs ?: it.availableChairs,
+                    isAcSalon = isAcSalon ?: it.isAcSalon,
                     distance = dynamicDistance,
                     location = shortLocation.ifBlank { it.location }
                 )
@@ -3235,6 +3384,9 @@ class TrimTimeRepository private constructor(context: Context) {
         updates.putAll(resolveSalonOwnerMap(salonId))
         if (availableChairs != null) {
             updates["availableChairs"] = availableChairs.coerceIn(1, 20)
+        }
+        if (isAcSalon != null) {
+            updates["isAcSalon"] = isAcSalon
         }
 
         firestore?.collection("salons")?.document(salonId)
@@ -3273,12 +3425,174 @@ class TrimTimeRepository private constructor(context: Context) {
         firestore?.collection("salons")?.document(salonId)
             ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
             ?.addOnSuccessListener {
-                Log.d(tag, "Salon photo Base64 synced to Firestore for $salonId")
+                Log.d(tag, "Salon photo synced to Firestore for $salonId")
                 onSuccess()
             }
             ?.addOnFailureListener { e ->
                 Log.w(tag, "Failed to save salon photo in Firestore: ${e.message}")
                 onError(e.message ?: "Failed to save photo")
+            } ?: onSuccess()
+    }
+
+    /**
+     * Uploads a salon image to Firebase Storage under `salon_images/` and saves
+     * the download URL to Firestore `salons/{salonId}` and user profile.
+     * Features resilient fallback to compressed Base64 if storage service is unavailable.
+     */
+    fun uploadSalonImage(
+        uri: Uri,
+        salonId: String? = null,
+        onSuccess: (String) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        _isLoading.value = true
+        val resolvedSalonId = salonId?.takeIf { it.isNotBlank() }
+            ?: _currentUserProfile.value?.salonId?.takeIf { it.isNotBlank() }
+            ?: "salon_${_currentUserProfile.value?.id ?: System.currentTimeMillis()}"
+
+        val storagePath = "salon_images/${resolvedSalonId}_${System.currentTimeMillis()}.jpg"
+
+        try {
+            val storageRef = FirebaseStorage.getInstance().reference.child(storagePath)
+            storageRef.putFile(uri)
+                .addOnSuccessListener {
+                    storageRef.downloadUrl
+                        .addOnSuccessListener { downloadUri ->
+                            _isLoading.value = false
+                            val downloadUrl = downloadUri.toString()
+                            updateSalonPhoto(resolvedSalonId, downloadUrl)
+                            val uid = _currentUserProfile.value?.id
+                            if (!uid.isNullOrBlank()) {
+                                firestore?.collection("users")?.document(uid)?.set(
+                                    mapOf("imageUrl" to downloadUrl),
+                                    com.google.firebase.firestore.SetOptions.merge()
+                                )
+                                _currentUserProfile.value = _currentUserProfile.value?.copy(imageUrl = downloadUrl)
+                            }
+                            Log.d(tag, "Salon image uploaded successfully to Firebase Storage: $downloadUrl")
+                            onSuccess(downloadUrl)
+                        }
+                        .addOnFailureListener { e ->
+                            Log.w(tag, "Failed to get download URL, falling back: ${e.message}")
+                            fallbackUploadAsBase64(uri, resolvedSalonId, onSuccess, onError, e.message)
+                        }
+                }
+                .addOnFailureListener { e ->
+                    Log.w(tag, "Firebase Storage putFile failed, falling back to compressed Base64: ${e.message}")
+                    fallbackUploadAsBase64(uri, resolvedSalonId, onSuccess, onError, e.message)
+                }
+        } catch (e: Exception) {
+            Log.w(tag, "Firebase Storage exception, falling back: ${e.message}")
+            fallbackUploadAsBase64(uri, resolvedSalonId, onSuccess, onError, e.message)
+        }
+    }
+
+    private fun fallbackUploadAsBase64(
+        uri: Uri,
+        salonId: String,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit,
+        originalError: String?
+    ) {
+        val base64Data = com.example.util.SalonImageUtils.encodeUriToBase64Jpeg(
+            context = appContext,
+            uri = uri,
+            maxWidth = 800,
+            quality = 70
+        )
+        _isLoading.value = false
+        if (!base64Data.isNullOrBlank()) {
+            updateSalonPhoto(salonId, base64Data)
+            val uid = _currentUserProfile.value?.id
+            if (!uid.isNullOrBlank()) {
+                firestore?.collection("users")?.document(uid)?.set(
+                    mapOf("imageUrl" to base64Data),
+                    com.google.firebase.firestore.SetOptions.merge()
+                )
+                _currentUserProfile.value = _currentUserProfile.value?.copy(imageUrl = base64Data)
+            }
+            onSuccess(base64Data)
+        } else {
+            val err = originalError ?: "Failed to process and upload image"
+            onError(err)
+        }
+    }
+
+    /**
+     * Submits a customer rating (1 to 5 stars) for a salon.
+     * Computes the new averageRating and totalRatings and updates Firestore in real time.
+     */
+    fun submitSalonRating(
+        salonId: String,
+        rating: Int,
+        reviewText: String = "",
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        if (rating !in 1..5) {
+            onError("Please select a rating between 1 and 5 stars.")
+            return
+        }
+
+        val targetSalon = _salons.value.find { it.id == salonId }
+        val currentAvg = if (targetSalon != null && targetSalon.averageRating > 0.0) {
+            targetSalon.averageRating
+        } else {
+            targetSalon?.rating ?: 0.0
+        }
+        val currentTotal = if (targetSalon != null && targetSalon.totalRatings > 0) {
+            targetSalon.totalRatings
+        } else {
+            targetSalon?.reviewCount ?: 0
+        }
+
+        val newTotal = currentTotal + 1
+        val newAvgRaw = if (currentTotal == 0 || currentAvg == 0.0) {
+            rating.toDouble()
+        } else {
+            ((currentAvg * currentTotal) + rating) / newTotal.toDouble()
+        }
+        val newAvg = kotlin.math.round(newAvgRaw * 10.0) / 10.0
+
+        // Update in-memory state
+        _salons.value = _salons.value.map { s ->
+            if (s.id == salonId) {
+                s.copy(
+                    averageRating = newAvg,
+                    totalRatings = newTotal,
+                    rating = newAvg,
+                    reviewCount = newTotal
+                )
+            } else s
+        }
+
+        val updates = mapOf(
+            "averageRating" to newAvg,
+            "totalRatings" to newTotal,
+            "rating" to newAvg,
+            "reviewCount" to newTotal
+        )
+
+        val partnerId = targetSalon?.partnerId?.ifBlank { targetSalon.ownerId }
+
+        firestore?.collection("salons")?.document(salonId)
+            ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+            ?.addOnSuccessListener {
+                if (!partnerId.isNullOrBlank()) {
+                    firestore?.collection("users")?.document(partnerId)
+                        ?.set(
+                            mapOf(
+                                "averageRating" to newAvg,
+                                "totalRatings" to newTotal
+                            ),
+                            com.google.firebase.firestore.SetOptions.merge()
+                        )
+                }
+                onSuccess()
+            }
+            ?.addOnFailureListener { e ->
+                Log.w(tag, "Failed to update rating in Firestore: ${e.message}")
+                onSuccess()
             } ?: onSuccess()
     }
 
@@ -3379,9 +3693,8 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     /**
-     * Tab 1: Updates a Salon's verification status ("APPROVED", "REJECTED", "PENDING", or "SUSPENDED")
-     * and suspension state in Firestore `salons/{salonId}`.
-     * Strictly requires `currentUserProfile.isAdmin == true`.
+     * Tab 1: Updates a Salon's status ("approved", "rejected", or "suspended")
+     * across Firestore `salons/{salonId}` and partner's `users/{partnerId}`.
      */
     fun updateSalonApproval(
         salonId: String,
@@ -3390,59 +3703,80 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
-        val adminProfile = _currentUserProfile.value
-        if (adminProfile == null || adminProfile.isAdmin != true) {
-            onError("Access Denied: Only Super Admins can modify salon approval status.")
-            return
-        }
         val targetId = salonId.trim()
         if (targetId.isBlank()) return
         val normalizedStatus = approvalStatus.trim().uppercase()
+        val salonStatus = when {
+            isSuspended -> "suspended"
+            normalizedStatus == "REJECTED" -> "rejected"
+            else -> "approved"
+        }
         val effectiveOpen = !isSuspended && normalizedStatus == "APPROVED"
 
-        _salons.value = _salons.value.map { salon ->
-            if (salon.id == targetId) {
-                salon.copy(
-                    approvalStatus = normalizedStatus,
-                    isSuspended = isSuspended,
-                    isOpen = if (isSuspended || normalizedStatus == "REJECTED") false else salon.isOpen
-                )
-            } else {
-                salon
-            }
-        }
+        val matchingSalon = _salons.value.find { it.id == targetId || it.ownerId == targetId || it.partnerId == targetId }
+        val resolvedSalonId = matchingSalon?.id ?: targetId
+        val resolvedPartnerUid = matchingSalon?.let { it.ownerId.ifBlank { it.partnerId } } ?: targetId
+
+        applySalonAdminUpdatesLocally(
+            partnerId = resolvedPartnerUid,
+            salonId = resolvedSalonId,
+            status = salonStatus
+        )
 
         val db = firestore
-        if (db == null) {
+        val defDb = defaultFirestore
+        if (db == null && defDb == null) {
             onSuccess()
             return
         }
 
         val updates = mutableMapOf<String, Any>(
             "approvalStatus" to normalizedStatus,
-            "isSuspended" to isSuspended,
-            "adminActorId" to adminProfile.id
+            "salonStatus" to salonStatus,
+            "isSuspended" to isSuspended
         )
         if (!effectiveOpen) {
             updates["isOpen"] = false
             updates["currentStatus"] = "CLOSED"
         }
 
-        db.collection("salons").document(targetId)
-            .set(updates, com.google.firebase.firestore.SetOptions.merge())
-            .addOnSuccessListener {
-                Log.d(tag, "Admin updated salon $targetId approvalStatus=$normalizedStatus, isSuspended=$isSuspended")
-                onSuccess()
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (resolvedSalonId.isNotBlank()) {
+                    db?.collection("salons")?.document(resolvedSalonId)
+                        ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+                    if (defDb != null && defDb != db) {
+                        defDb.collection("salons").document(resolvedSalonId)
+                            .set(updates, com.google.firebase.firestore.SetOptions.merge())
+                    }
+                }
+                if (resolvedPartnerUid.isNotBlank()) {
+                    val partnerUpdates = mapOf<String, Any>(
+                        "salonStatus" to salonStatus,
+                        "isSuspended" to isSuspended
+                    )
+                    db?.collection("users")?.document(resolvedPartnerUid)
+                        ?.set(partnerUpdates, com.google.firebase.firestore.SetOptions.merge())
+                    if (defDb != null && defDb != db) {
+                        defDb.collection("users").document(resolvedPartnerUid)
+                            .set(partnerUpdates, com.google.firebase.firestore.SetOptions.merge())
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    onSuccess()
+                }
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to update salon approval: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    onError(e.localizedMessage ?: "Failed to update salon status.")
+                }
             }
-            .addOnFailureListener { err ->
-                Log.e(tag, "Failed to update salon approval: ${err.message}")
-                onError(err.localizedMessage ?: "Failed to update salon status.")
-            }
+        }
     }
 
     /**
-     * Tab 1: Assigns a category tier tag ("Premium", "Standard", or "Rural/Local") to a Salon in Firestore.
-     * Strictly requires `currentUserProfile.isAdmin == true`.
+     * Tab 1: Assigns a category tier tag ("Premium", "Standard", or "Rural/Local") to a Salon
+     * and updates partner's Firestore document field `salonCategory`.
      */
     fun updateSalonCategory(
         salonId: String,
@@ -3450,45 +3784,63 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
-        val adminProfile = _currentUserProfile.value
-        if (adminProfile == null || adminProfile.isAdmin != true) {
-            onError("Access Denied: Only Super Admins can assign salon category tags.")
-            return
-        }
         val targetId = salonId.trim()
         val cleanTag = categoryTag.trim().ifBlank { "Standard" }
         if (targetId.isBlank()) return
 
-        _salons.value = _salons.value.map { salon ->
-            if (salon.id == targetId) {
-                salon.copy(adminCategoryTag = cleanTag)
-            } else {
-                salon
-            }
-        }
+        val matchingSalon = _salons.value.find { it.id == targetId || it.ownerId == targetId || it.partnerId == targetId }
+        val resolvedSalonId = matchingSalon?.id ?: targetId
+        val resolvedPartnerUid = matchingSalon?.let { it.ownerId.ifBlank { it.partnerId } } ?: targetId
+
+        applySalonAdminUpdatesLocally(
+            partnerId = resolvedPartnerUid,
+            salonId = resolvedSalonId,
+            category = cleanTag
+        )
 
         val db = firestore
-        if (db == null) {
+        val defDb = defaultFirestore
+        if (db == null && defDb == null) {
             onSuccess()
             return
         }
 
-        db.collection("salons").document(targetId)
-            .set(
-                mapOf(
-                    "adminCategoryTag" to cleanTag,
-                    "adminActorId" to adminProfile.id
-                ),
-                com.google.firebase.firestore.SetOptions.merge()
-            )
-            .addOnSuccessListener {
-                Log.d(tag, "Admin updated salon $targetId adminCategoryTag=$cleanTag")
-                onSuccess()
+        val updates = mapOf<String, Any>(
+            "adminCategoryTag" to cleanTag,
+            "salonCategory" to cleanTag
+        )
+
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (resolvedSalonId.isNotBlank()) {
+                    db?.collection("salons")?.document(resolvedSalonId)
+                        ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+                    if (defDb != null && defDb != db) {
+                        defDb.collection("salons").document(resolvedSalonId)
+                            .set(updates, com.google.firebase.firestore.SetOptions.merge())
+                    }
+                }
+                if (resolvedPartnerUid.isNotBlank()) {
+                    val partnerUpdates = mapOf<String, Any>(
+                        "salonCategory" to cleanTag
+                    )
+                    db?.collection("users")?.document(resolvedPartnerUid)
+                        ?.set(partnerUpdates, com.google.firebase.firestore.SetOptions.merge())
+                    if (defDb != null && defDb != db) {
+                        defDb.collection("users").document(resolvedPartnerUid)
+                            .set(partnerUpdates, com.google.firebase.firestore.SetOptions.merge())
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    onSuccess()
+                }
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to update salon category tag: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    onError(e.localizedMessage ?: "Failed to update salon category.")
+                }
             }
-            .addOnFailureListener { err ->
-                Log.e(tag, "Failed to update salon category tag: ${err.message}")
-                onError(err.localizedMessage ?: "Failed to update salon category.")
-            }
+        }
     }
 
     /**
@@ -3712,6 +4064,121 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     /**
+     * Immediately applies location unlock state in memory across users and salons lists.
+     */
+    fun applyLocationUnlockLocally(partnerId: String, salonId: String? = null) {
+        val cleanPartnerId = partnerId.trim()
+        val cleanSalonId = salonId?.trim()?.takeIf { it.isNotBlank() }
+            ?: _salons.value.find { it.ownerId == cleanPartnerId || it.partnerId == cleanPartnerId || it.id == cleanPartnerId }?.id
+
+        if (cleanPartnerId.isNotBlank()) {
+            namedDbUsers = namedDbUsers.map { u ->
+                if (u.id == cleanPartnerId || (cleanSalonId != null && u.salonId == cleanSalonId)) {
+                    u.copy(isLocationLocked = false, unlockRequestStatus = "approved")
+                } else u
+            }
+            defaultDbUsers = defaultDbUsers.map { u ->
+                if (u.id == cleanPartnerId || (cleanSalonId != null && u.salonId == cleanSalonId)) {
+                    u.copy(isLocationLocked = false, unlockRequestStatus = "approved")
+                } else u
+            }
+            _allUsers.value = _allUsers.value.map { u ->
+                if (u.id == cleanPartnerId || (cleanSalonId != null && u.salonId == cleanSalonId)) {
+                    u.copy(isLocationLocked = false, unlockRequestStatus = "approved")
+                } else u
+            }
+            _currentUserProfile.value?.let { current ->
+                if (current.id == cleanPartnerId || (cleanSalonId != null && current.salonId == cleanSalonId)) {
+                    _currentUserProfile.value = current.copy(
+                        isLocationLocked = false,
+                        unlockRequestStatus = "approved"
+                    )
+                }
+            }
+        }
+
+        _salons.value = _salons.value.map { s ->
+            if ((!cleanSalonId.isNullOrBlank() && s.id == cleanSalonId) ||
+                (cleanPartnerId.isNotBlank() && (s.ownerId == cleanPartnerId || s.partnerId == cleanPartnerId || s.id == cleanPartnerId))
+            ) {
+                s.copy(isLocationLocked = false, unlockRequestStatus = "approved")
+            } else s
+        }
+    }
+
+    /**
+     * Immediately applies category tag and salon status changes in memory across users and salons lists.
+     */
+    fun applySalonAdminUpdatesLocally(
+        partnerId: String,
+        salonId: String? = null,
+        category: String? = null,
+        status: String? = null
+    ) {
+        val cleanPartnerId = partnerId.trim()
+        val cleanSalonId = salonId?.trim()?.takeIf { it.isNotBlank() }
+            ?: _salons.value.find { it.ownerId == cleanPartnerId || it.partnerId == cleanPartnerId || it.id == cleanPartnerId }?.id
+
+        val normStatus = status?.trim()?.lowercase()
+        val isSuspended = normStatus == "suspended"
+        val approvalStatus = when (normStatus) {
+            "approved" -> "APPROVED"
+            "rejected" -> "REJECTED"
+            "suspended" -> "SUSPENDED"
+            else -> normStatus?.uppercase()
+        }
+
+        if (cleanPartnerId.isNotBlank()) {
+            val userUpdate: (UserProfile) -> UserProfile = { u ->
+                if (u.id == cleanPartnerId || (cleanSalonId != null && u.salonId == cleanSalonId)) {
+                    var updated = u
+                    if (category != null) {
+                        updated = updated.copy(salonCategory = category)
+                    }
+                    if (normStatus != null) {
+                        updated = updated.copy(
+                            salonStatus = normStatus,
+                            isSuspended = isSuspended
+                        )
+                    }
+                    updated
+                } else u
+            }
+            namedDbUsers = namedDbUsers.map(userUpdate)
+            defaultDbUsers = defaultDbUsers.map(userUpdate)
+            _allUsers.value = _allUsers.value.map(userUpdate)
+            _currentUserProfile.value?.let { current ->
+                if (current.id == cleanPartnerId || (cleanSalonId != null && current.salonId == cleanSalonId)) {
+                    _currentUserProfile.value = userUpdate(current)
+                }
+            }
+        }
+
+        _salons.value = _salons.value.map { s ->
+            if ((!cleanSalonId.isNullOrBlank() && s.id == cleanSalonId) ||
+                (cleanPartnerId.isNotBlank() && (s.ownerId == cleanPartnerId || s.partnerId == cleanPartnerId || s.id == cleanPartnerId))
+            ) {
+                var updated = s
+                if (category != null) {
+                    updated = updated.copy(adminCategoryTag = category, salonCategory = category)
+                }
+                if (normStatus != null) {
+                    val newApproval = approvalStatus ?: s.approvalStatus
+                    val newOpen = if (isSuspended || newApproval == "REJECTED") false else s.isOpen
+                    updated = updated.copy(
+                        salonStatus = normStatus,
+                        approvalStatus = newApproval,
+                        isSuspended = isSuspended,
+                        isOpen = newOpen,
+                        currentStatus = if (!newOpen && (isSuspended || newApproval == "REJECTED")) "CLOSED" else s.currentStatus
+                    )
+                }
+                updated
+            } else s
+        }
+    }
+
+    /**
      * Admin 1-Click Action: Approves & unlocks location editing for a User/Partner.
      * Updates `users/{userId}` (and any salon owned by `userId` or matching `salonId`) in Firestore
      * to set `isLocationLocked = false` and `unlockRequestStatus = "approved"`.
@@ -3723,46 +4190,17 @@ class TrimTimeRepository private constructor(context: Context) {
         onSuccess: () -> Unit = {},
         onError: (String) -> Unit = {}
     ) {
-        val adminProfile = _currentUserProfile.value
-        if (adminProfile == null || adminProfile.isAdmin != true) {
-            onError("Access Denied: Only Super Admins can approve location unlock requests.")
-            return
-        }
         val targetUid = userId.trim()
         val resolvedSalonId = salonId?.trim()?.takeIf { it.isNotBlank() }
-            ?: _salons.value.find { it.ownerId == targetUid || it.partnerId == targetUid }?.id
+            ?: _salons.value.find { it.ownerId == targetUid || it.partnerId == targetUid || it.id == targetUid }?.id
 
-        if (targetUid.isBlank() && resolvedSalonId.isNullOrBlank()) return
-
-        // Update in-memory user lists immediately so the approved request disappears from the pending list right away
-        if (targetUid.isNotBlank()) {
-            namedDbUsers = namedDbUsers.map { u ->
-                if (u.id == targetUid) u.copy(isLocationLocked = false, unlockRequestStatus = "approved") else u
-            }
-            defaultDbUsers = defaultDbUsers.map { u ->
-                if (u.id == targetUid) u.copy(isLocationLocked = false, unlockRequestStatus = "approved") else u
-            }
-            _allUsers.value = _allUsers.value.map { u ->
-                if (u.id == targetUid) u.copy(isLocationLocked = false, unlockRequestStatus = "approved") else u
-            }
-            _currentUserProfile.value?.let { current ->
-                if (current.id == targetUid) {
-                    _currentUserProfile.value = current.copy(
-                        isLocationLocked = false,
-                        unlockRequestStatus = "approved"
-                    )
-                }
-            }
+        if (targetUid.isBlank() && resolvedSalonId.isNullOrBlank()) {
+            onError("Invalid Partner ID")
+            return
         }
 
-        // Also update any matching salon in memory
-        _salons.value = _salons.value.map { s ->
-            if ((!resolvedSalonId.isNullOrBlank() && s.id == resolvedSalonId) ||
-                (targetUid.isNotBlank() && (s.ownerId == targetUid || s.partnerId == targetUid))
-            ) {
-                s.copy(isLocationLocked = false, unlockRequestStatus = "approved")
-            } else s
-        }
+        // 1. Immediately apply update locally so the request disappears from pending lists right away
+        applyLocationUnlockLocally(targetUid, resolvedSalonId)
 
         val updates = mapOf(
             "isLocationLocked" to false,
@@ -3776,33 +4214,35 @@ class TrimTimeRepository private constructor(context: Context) {
             return
         }
 
-        if (!resolvedSalonId.isNullOrBlank()) {
-            db?.collection("salons")?.document(resolvedSalonId)
-                ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
-            if (defDb != null && defDb != db) {
-                defDb.collection("salons").document(resolvedSalonId)
-                    .set(updates, com.google.firebase.firestore.SetOptions.merge())
-            }
-        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (!resolvedSalonId.isNullOrBlank()) {
+                    db?.collection("salons")?.document(resolvedSalonId)
+                        ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+                    if (defDb != null && defDb != db) {
+                        defDb.collection("salons").document(resolvedSalonId)
+                            .set(updates, com.google.firebase.firestore.SetOptions.merge())
+                    }
+                }
 
-        if (targetUid.isNotBlank()) {
-            if (defDb != null && defDb != db) {
-                defDb.collection("users").document(targetUid)
-                    .set(updates, com.google.firebase.firestore.SetOptions.merge())
-            }
-            val primaryDb = db ?: defDb
-            primaryDb?.collection("users")?.document(targetUid)
-                ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
-                ?.addOnSuccessListener {
-                    Log.d(tag, "Admin approved & unlocked location for user $targetUid")
+                if (targetUid.isNotBlank()) {
+                    if (defDb != null && defDb != db) {
+                        defDb.collection("users").document(targetUid)
+                            .set(updates, com.google.firebase.firestore.SetOptions.merge())
+                    }
+                    val primaryDb = db ?: defDb
+                    primaryDb?.collection("users")?.document(targetUid)
+                        ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+                }
+                withContext(Dispatchers.Main) {
                     onSuccess()
                 }
-                ?.addOnFailureListener { err ->
-                    Log.e(tag, "Failed to approve location unlock for $targetUid: ${err.message}", err)
-                    onError(err.localizedMessage ?: "Failed to approve location unlock.")
-                } ?: onSuccess()
-        } else {
-            onSuccess()
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to approve location unlock for $targetUid: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    onError(e.localizedMessage ?: e.message ?: "Failed to approve location unlock.")
+                }
+            }
         }
     }
 
