@@ -112,6 +112,7 @@ jobs:
           robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
           firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
           firebase-firestore = { group = "com.google.firebase", name = "firebase-firestore" }
+          firebase-storage = { group = "com.google.firebase", name = "firebase-storage" }
           firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
           androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
           androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
@@ -239,6 +240,7 @@ jobs:
             implementation(libs.androidx.lifecycle.viewmodel.compose)
             implementation(libs.coil.compose)
             implementation(libs.firebase.firestore)
+            implementation(libs.firebase.storage)
             implementation(libs.firebase.auth)
             implementation(libs.androidx.credentials)
             implementation(libs.androidx.credentials.play.services)
