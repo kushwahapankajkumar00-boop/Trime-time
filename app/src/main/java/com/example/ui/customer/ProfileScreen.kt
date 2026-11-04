@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.LocationOn
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.PrivacyTip
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storefront
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -77,10 +79,11 @@ import com.example.model.AppPreferences
 import com.example.model.AppThemeMode
 import com.example.model.UserProfile
 import com.example.ui.components.HelpAndSupportCenterDialog
-import com.example.ui.components.LegalPoliciesViewerDialog
 import com.example.ui.components.LegalPolicyTab
+import com.example.ui.components.PrivacyPolicyScreen
 import com.example.ui.components.SendFeedbackDialog
 import com.example.ui.components.SupportFeedbackLegalSectionCard
+import com.example.ui.components.TermsAndConditionsScreen
 import com.example.ui.components.VerifiedBlueTickIcon
 import com.example.ui.theme.AmberPrimary
 import com.example.ui.theme.GreenSuccess
@@ -124,6 +127,18 @@ fun ProfileScreen(
     var activeLegalTab by remember { mutableStateOf<LegalPolicyTab?>(null) }
     var showAdminPasswordDialog by remember { mutableStateOf(false) }
     var enteredAdminPassword by remember { mutableStateOf("") }
+
+    when (activeLegalTab) {
+        LegalPolicyTab.PRIVACY -> {
+            PrivacyPolicyScreen(onBack = { activeLegalTab = null })
+            return
+        }
+        LegalPolicyTab.TERMS -> {
+            TermsAndConditionsScreen(onBack = { activeLegalTab = null })
+            return
+        }
+        null -> Unit
+    }
 
     val currentUser = userProfile
     val firebaseCurrentUserEmail = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.email
@@ -917,6 +932,68 @@ fun ProfileScreen(
                             )
                         }
                     }
+
+                    // (f) & (g) Mandatory Play Store Legal Screens: Privacy Policy & Terms & Conditions Buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { activeLegalTab = LegalPolicyTab.PRIVACY },
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("profile_privacy_policy_btn"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, GreenSuccess.copy(alpha = 0.65f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PrivacyTip,
+                                contentDescription = "Privacy Policy",
+                                tint = GreenSuccess,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isHinglish) "प्राइवेसी पॉलिसी" else "Privacy Policy",
+                                color = primaryTextColor,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = { activeLegalTab = LegalPolicyTab.TERMS },
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("profile_terms_conditions_btn"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.65f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Gavel,
+                                contentDescription = "Terms & Conditions",
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isHinglish) "नियम और शर्तें" else "Terms & Conditions",
+                                color = primaryTextColor,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1027,13 +1104,7 @@ fun ProfileScreen(
         )
     }
 
-    // Dialog 5: Dedicated Terms & Conditions and Privacy Policy Viewer
-    activeLegalTab?.let { tab ->
-        LegalPoliciesViewerDialog(
-            initialTab = tab,
-            onDismiss = { activeLegalTab = null }
-        )
-    }
+    // Dedicated Terms & Conditions and Privacy Policy screens are rendered via full-screen state above
 
     // Dialog 6: Admin Password Verification Dialog
     if (showAdminPasswordDialog) {

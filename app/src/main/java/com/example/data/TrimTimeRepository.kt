@@ -498,15 +498,16 @@ class TrimTimeRepository private constructor(context: Context) {
                                 val servicesRaw = doc.get("services") as? List<Map<String, Any?>> ?: emptyList()
                                 val parsedServices = servicesRaw.mapIndexed { idx, sMap ->
                                     val sId = (sMap["id"] as? String) ?: "${docId}_s${idx + 1}"
-                                    val sName = (sMap["name"] as? String)
-                                        ?: (sMap["serviceName"] as? String)
+                                    val sName = (sMap["serviceName"] as? String)?.takeIf { it.isNotBlank() }
+                                        ?: (sMap["name"] as? String)?.takeIf { it.isNotBlank() }
                                         ?: "Grooming Service"
                                     val sCategory = (sMap["category"] as? String) ?: "Haircut"
                                     val sPrice = (sMap["price"] as? Number)?.toInt()
                                         ?: (sMap["price"] as? String)?.toIntOrNull()
                                         ?: 100
-                                    val sDuration = (sMap["durationMinutes"] as? Number)?.toInt()
-                                        ?: (sMap["duration"] as? Number)?.toInt()
+                                    val sDuration = (sMap["duration"] as? Number)?.toInt()
+                                        ?: (sMap["durationMinutes"] as? Number)?.toInt()
+                                        ?: (sMap["duration"] as? String)?.toIntOrNull()
                                         ?: (sMap["durationMinutes"] as? String)?.toIntOrNull()
                                         ?: 20
                                     val sDesc = (sMap["description"] as? String) ?: ""
@@ -517,9 +518,11 @@ class TrimTimeRepository private constructor(context: Context) {
                                     SalonService(
                                         id = sId,
                                         name = sName,
+                                        serviceName = sName,
                                         category = sCategory,
                                         price = sPrice,
                                         durationMinutes = sDuration,
+                                        duration = sDuration,
                                         description = sDesc,
                                         isPopular = sPop
                                     )
@@ -893,6 +896,16 @@ class TrimTimeRepository private constructor(context: Context) {
             } else {
                 exactDoc.isLocationLocked
             }
+            val resolvedFavs = if (exactDoc.favoriteSalons.isNotEmpty()) {
+                exactDoc.favoriteSalons
+            } else {
+                current.favoriteSalons
+            }
+            val resolvedServices = if (exactDoc.services.isNotEmpty()) {
+                exactDoc.services
+            } else {
+                current.services
+            }
             val updated = current.copy(
                 isAdmin = anyIsAdmin,
                 isBlocked = anyIsBlocked,
@@ -900,7 +913,9 @@ class TrimTimeRepository private constructor(context: Context) {
                 cancellationCount = maxStrikes,
                 cancellationStrikes = maxStrikes,
                 isLocationLocked = resolvedLocked,
-                unlockRequestStatus = resolvedStatus
+                unlockRequestStatus = resolvedStatus,
+                favoriteSalons = resolvedFavs,
+                services = resolvedServices
             )
             if (updated != current) {
                 _currentUserProfile.value = updated
@@ -939,6 +954,38 @@ class TrimTimeRepository private constructor(context: Context) {
                 ?: doc.getString("totalRatings")?.toIntOrNull() ?: 0
             val isAcSalon = readBooleanField(doc, "isAcSalon", false)
             val imageUrl = doc.getString("imageUrl") ?: ""
+            val favSalonsRaw = doc.get("favoriteSalons") as? List<*> ?: emptyList<Any?>()
+            val favSalonsList = favSalonsRaw.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }.distinct()
+
+            val userServicesRaw = doc.get("services") as? List<Map<String, Any?>> ?: emptyList()
+            val userParsedServices = userServicesRaw.mapIndexed { idx, sMap ->
+                val sId = (sMap["id"] as? String) ?: "${uid}_s${idx + 1}"
+                val sName = (sMap["serviceName"] as? String)?.takeIf { it.isNotBlank() }
+                    ?: (sMap["name"] as? String)?.takeIf { it.isNotBlank() }
+                    ?: "Grooming Service"
+                val sCategory = (sMap["category"] as? String) ?: "Haircut"
+                val sPrice = (sMap["price"] as? Number)?.toInt()
+                    ?: (sMap["price"] as? String)?.toIntOrNull()
+                    ?: 100
+                val sDuration = (sMap["duration"] as? Number)?.toInt()
+                    ?: (sMap["durationMinutes"] as? Number)?.toInt()
+                    ?: (sMap["duration"] as? String)?.toIntOrNull()
+                    ?: (sMap["durationMinutes"] as? String)?.toIntOrNull()
+                    ?: 20
+                val sDesc = (sMap["description"] as? String) ?: ""
+                val sPop = (sMap["isPopular"] as? Boolean) ?: false
+                SalonService(
+                    id = sId,
+                    name = sName,
+                    serviceName = sName,
+                    category = sCategory,
+                    price = sPrice,
+                    durationMinutes = sDuration,
+                    duration = sDuration,
+                    description = sDesc,
+                    isPopular = sPop
+                )
+            }
 
             UserProfile(
                 id = uid,
@@ -967,6 +1014,8 @@ class TrimTimeRepository private constructor(context: Context) {
                 totalRatings = totRatings,
                 isAcSalon = isAcSalon,
                 imageUrl = imageUrl,
+                favoriteSalons = favSalonsList,
+                services = userParsedServices,
                 createdAt = doc.getLong("createdAt") ?: 0L
             )
         } catch (e: Exception) {
@@ -2692,6 +2741,8 @@ class TrimTimeRepository private constructor(context: Context) {
                         ?: doc.getString("totalRatings")?.toIntOrNull() ?: 0
                     val existingIsAc = readBooleanField(doc, "isAcSalon", false)
                     val existingImgUrl = doc.getString("imageUrl") ?: ""
+                    val existingFavRaw = doc.get("favoriteSalons") as? List<*> ?: emptyList<Any?>()
+                    val existingFavSalons = existingFavRaw.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }.distinct()
 
                     // Every user MUST default to Customer Mode upon Login / Session Restore
                     val profile = UserProfile(
@@ -2715,6 +2766,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         totalRatings = existingTotRatings,
                         isAcSalon = existingIsAc,
                         imageUrl = existingImgUrl,
+                        favoriteSalons = existingFavSalons,
                         createdAt = doc.getLong("createdAt") ?: System.currentTimeMillis()
                     )
                     sessionPrefs.edit().putString("saved_role", "customer").apply()
@@ -3208,11 +3260,16 @@ class TrimTimeRepository private constructor(context: Context) {
         }
 
         val sanitizedServices = updatedServices.map { srv ->
+            val cleanName = SecurityValidator.sanitizeName(srv.name.ifBlank { srv.serviceName }, trimEdges = true).ifBlank { "Grooming Service" }
+            val cleanDuration = srv.durationMinutes.takeIf { it > 0 } ?: srv.duration
+            val clampedDuration = cleanDuration.coerceIn(SecurityValidator.MIN_SERVICE_DURATION, SecurityValidator.MAX_SERVICE_DURATION)
             srv.copy(
-                name = SecurityValidator.sanitizeName(srv.name, trimEdges = true).ifBlank { "Grooming Service" },
+                name = cleanName,
+                serviceName = cleanName,
                 category = SecurityValidator.sanitizeName(srv.category, trimEdges = true).ifBlank { "Haircut" },
                 price = srv.price.coerceIn(SecurityValidator.MIN_SERVICE_PRICE, SecurityValidator.MAX_SERVICE_PRICE),
-                durationMinutes = srv.durationMinutes.coerceIn(SecurityValidator.MIN_SERVICE_DURATION, SecurityValidator.MAX_SERVICE_DURATION),
+                durationMinutes = clampedDuration,
+                duration = clampedDuration,
                 description = SecurityValidator.sanitizeTagline(srv.description, trimEdges = true)
             )
         }
@@ -3223,7 +3280,23 @@ class TrimTimeRepository private constructor(context: Context) {
         }
         _salons.value = updated
 
+        val targetSalon = updated.find { it.id == salonId }
+        val resolvedPartnerUid = targetSalon?.ownerId?.takeIf { it.isNotBlank() }
+            ?: targetSalon?.partnerId?.takeIf { it.isNotBlank() }
+            ?: _currentUserProfile.value?.id.orEmpty()
+
+        if (resolvedPartnerUid.isNotBlank() && _currentUserProfile.value?.id == resolvedPartnerUid) {
+            _currentUserProfile.value = _currentUserProfile.value?.copy(services = sanitizedServices)
+        }
+
         val servicesMap = sanitizedServices.map { it.toMap() }
+        if (resolvedPartnerUid.isNotBlank()) {
+            firestore?.collection("users")?.document(resolvedPartnerUid)
+                ?.set(
+                    mapOf("services" to servicesMap),
+                    com.google.firebase.firestore.SetOptions.merge()
+                )
+        }
         firestore?.collection("salons")?.document(salonId)
             ?.set(
                 mapOf("services" to servicesMap) + resolveSalonOwnerMap(salonId),
@@ -3237,6 +3310,47 @@ class TrimTimeRepository private constructor(context: Context) {
                 Log.w(tag, "Failed to update services in Firestore: ${e.message}")
                 onError(e.message ?: "Failed to update services")
             } ?: onSuccess()
+    }
+
+    /**
+     * Toggles a Salon in the Customer's `favoriteSalons` array in Firestore (`users/{uid}`).
+     */
+    fun toggleFavoriteSalon(
+        salonId: String,
+        partnerId: String = "",
+        onResult: (Boolean) -> Unit = {}
+    ) {
+        val currentProfile = _currentUserProfile.value ?: return
+        val uid = currentProfile.id.trim()
+        if (uid.isBlank()) return
+
+        val keyToUse = partnerId.trim().ifBlank { salonId.trim() }
+        val altKey = salonId.trim()
+        if (keyToUse.isBlank() && altKey.isBlank()) return
+
+        val currentFavs = currentProfile.favoriteSalons.toMutableList()
+        val isCurrentlyLiked = currentFavs.contains(keyToUse) || (altKey.isNotBlank() && currentFavs.contains(altKey))
+
+        val updatedFavs = if (isCurrentlyLiked) {
+            currentFavs.filterNot { it == keyToUse || (altKey.isNotBlank() && it == altKey) }
+        } else {
+            (currentFavs + listOfNotNull(keyToUse.takeIf { it.isNotBlank() }, altKey.takeIf { it.isNotBlank() })).distinct()
+        }
+
+        _currentUserProfile.value = currentProfile.copy(favoriteSalons = updatedFavs)
+
+        val updates = mapOf("favoriteSalons" to updatedFavs)
+        firestore?.collection("users")?.document(uid)
+            ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
+            ?.addOnFailureListener { e ->
+                Log.w(tag, "Failed to sync favoriteSalons for user $uid: ${e.message}")
+            }
+        val defDb = defaultFirestore
+        if (defDb != null && defDb != firestore) {
+            defDb.collection("users").document(uid)
+                .set(updates, com.google.firebase.firestore.SetOptions.merge())
+        }
+        onResult(!isCurrentlyLiked)
     }
 
     /**

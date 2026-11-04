@@ -300,6 +300,120 @@ class MyBookingsViewModel : ViewModel() {
         )
     }
 
+    /**
+     * Submits a 1 to 5 star rating for a completed booking's Salon.
+     * Recalculates `averageRating` and increments `totalRatings` in the Salon's Firestore document.
+     */
+    fun rateSalon(
+        booking: Booking,
+        stars: Int,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        if (stars !in 1..5) {
+            onError("Please select a rating between 1 and 5 stars.")
+            return
+        }
+
+        val db = try {
+            FirebaseFirestore.getInstance()
+        } catch (e: Exception) {
+            val errMsg = "Failed to initialize Firestore: ${e.message ?: e.toString()}"
+            Log.e(tag, errMsg, e)
+            onError(errMsg)
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                val targetPartnerId = booking.resolvedPartnerId.trim()
+                val targetSalonName = booking.salonName.trim()
+
+                var salonDoc: DocumentSnapshot? = null
+                if (targetPartnerId.isNotBlank()) {
+                    val directDoc = db.collection("salons").document(targetPartnerId).get().await()
+                    if (directDoc.exists()) {
+                        salonDoc = directDoc
+                    } else {
+                        val byPartnerQuery = db.collection("salons")
+                            .whereEqualTo("partnerId", targetPartnerId)
+                            .get()
+                            .await()
+                        salonDoc = byPartnerQuery.documents.firstOrNull()
+                            ?: db.collection("salons")
+                                .whereEqualTo("ownerId", targetPartnerId)
+                                .get()
+                                .await()
+                                .documents
+                                .firstOrNull()
+                    }
+                }
+
+                if (salonDoc == null && targetSalonName.isNotBlank()) {
+                    val byNameQuery = db.collection("salons")
+                        .whereEqualTo("name", targetSalonName)
+                        .get()
+                        .await()
+                    salonDoc = byNameQuery.documents.firstOrNull()
+                }
+
+                val currentTotal = ((salonDoc?.get("totalRatings") as? Number)?.toInt()
+                    ?: salonDoc?.getString("totalRatings")?.toIntOrNull()
+                    ?: (salonDoc?.get("reviewCount") as? Number)?.toInt()
+                    ?: 0).coerceAtLeast(0)
+
+                val currentAvg = ((salonDoc?.get("averageRating") as? Number)?.toDouble()
+                    ?: salonDoc?.getString("averageRating")?.toDoubleOrNull()
+                    ?: (salonDoc?.get("rating") as? Number)?.toDouble()
+                    ?: 0.0).coerceAtLeast(0.0)
+
+                val newTotal = currentTotal + 1
+                val newAvgRaw = if (currentTotal <= 0 || currentAvg <= 0.0) {
+                    stars.toDouble()
+                } else {
+                    ((currentAvg * currentTotal) + stars) / newTotal.toDouble()
+                }
+                val newAvg = kotlin.math.round(newAvgRaw * 10.0) / 10.0
+
+                val updates = mapOf(
+                    "averageRating" to newAvg,
+                    "totalRatings" to newTotal,
+                    "rating" to newAvg,
+                    "reviewCount" to newTotal
+                )
+
+                val resolvedSalonDocId = salonDoc?.id
+                    ?: targetPartnerId.ifBlank {
+                        targetSalonName.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifBlank { "salon_rated" }
+                    }
+
+                db.collection("salons")
+                    .document(resolvedSalonDocId)
+                    .set(updates, SetOptions.merge())
+                    .await()
+
+                if (targetPartnerId.isNotBlank()) {
+                    db.collection("users")
+                        .document(targetPartnerId)
+                        .set(
+                            mapOf(
+                                "averageRating" to newAvg,
+                                "totalRatings" to newTotal
+                            ),
+                            SetOptions.merge()
+                        )
+                        .await()
+                }
+
+                onSuccess()
+            } catch (e: Exception) {
+                val errMsg = "Failed to submit salon rating: ${e.message ?: e.localizedMessage ?: e.toString()}"
+                Log.e(tag, errMsg, e)
+                onError(errMsg)
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         bookingsListener?.remove()

@@ -72,6 +72,7 @@ fun BookingBottomSheet(
     selectedSlot: String,
     hasActiveBooking: Boolean = false,
     isSuspended: Boolean = false,
+    onServiceChanged: (SalonService) -> Unit = {},
     onSlotSelected: (String) -> Unit,
     onConfirm: (name: String, phone: String) -> Unit,
     onDismiss: () -> Unit
@@ -128,14 +129,16 @@ fun BookingBottomSheet(
                             .padding(end = 8.dp)
                     ) {
                         Text(
-                            text = "Select Time Slot",
+                            text = "Select Service & Time Slot",
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
                             color = Color.White,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        val displayServiceName = service.serviceName.ifBlank { service.name }
+                        val displayDuration = if (service.duration > 0) service.duration else service.durationMinutes
                         Text(
-                            text = "${salon.name} • ${service.name}",
+                            text = "${salon.name} • $displayServiceName (₹${service.price} • ${displayDuration}m)",
                             fontSize = 12.sp,
                             color = AmberPrimary,
                             fontWeight = FontWeight.SemiBold,
@@ -153,6 +156,65 @@ fun BookingBottomSheet(
                             contentDescription = "Close",
                             tint = Color(0xFF94A3B8)
                         )
+                    }
+                }
+
+                // Dynamic Salon Custom Services Selector (fetched from salon's Firestore services list)
+                if (salon.services.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "SALON MENU SERVICES (${salon.services.size})",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF94A3B8),
+                        letterSpacing = 1.sp
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        salon.services.forEach { itemService ->
+                            val isSelectedService = itemService.id == service.id ||
+                                (itemService.id.isBlank() && itemService.name == service.name)
+                            val srvLabel = itemService.serviceName.ifBlank { itemService.name }
+                            val srvDuration = if (itemService.duration > 0) itemService.duration else itemService.durationMinutes
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isSelectedService) Color(0xFF2E2210) else DarkCardSurface)
+                                    .border(
+                                        width = if (isSelectedService) 1.5.dp else 1.dp,
+                                        color = if (isSelectedService) AmberPrimary else Color(0xFF334155),
+                                        shape = RoundedCornerShape(10.dp)
+                                    )
+                                    .clickable { onServiceChanged(itemService) }
+                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .testTag("booking_sheet_service_${itemService.id}"),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = srvLabel,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelectedService) AmberPrimary else Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${srvDuration} mins • ${itemService.category}",
+                                        fontSize = 10.sp,
+                                        color = Color(0xFF94A3B8)
+                                    )
+                                }
+                                Text(
+                                    text = "₹${itemService.price}",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (isSelectedService) AmberPrimary else GreenSuccess
+                                )
+                            }
+                        }
                     }
                 }
 

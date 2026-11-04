@@ -32,6 +32,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Star
@@ -88,6 +90,8 @@ fun SalonDetailScreen(
     currentUserId: String = "",
     hasActiveBooking: Boolean = false,
     isSuspended: Boolean = false,
+    isFavorite: Boolean = false,
+    onToggleFavorite: () -> Unit = {},
     onBack: () -> Unit,
     onServiceSelected: (SalonService) -> Unit,
     onBookingBlocked: (String) -> Unit = {},
@@ -149,6 +153,18 @@ fun SalonDetailScreen(
                             color = AmberPrimary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("salon_detail_favorite_btn")
+                    ) {
+                        Icon(
+                            imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = if (isFavorite) "Remove from Favorites" else "Add to Favorites",
+                            tint = if (isFavorite) Color(0xFFF43F5E) else Color(0xFFCBD5E1)
                         )
                     }
                 }
@@ -845,7 +861,7 @@ fun ServiceCatalogItem(
                 }
 
                 Text(
-                    text = service.name,
+                    text = service.serviceName.ifBlank { service.name },
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
@@ -874,8 +890,9 @@ fun ServiceCatalogItem(
                             modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(3.dp))
+                        val displayDuration = if (service.duration > 0) service.duration else service.durationMinutes
                         Text(
-                            text = "${service.durationMinutes} mins",
+                            text = "$displayDuration mins",
                             fontSize = 11.sp,
                             color = Color(0xFFCBD5E1),
                             maxLines = 1,

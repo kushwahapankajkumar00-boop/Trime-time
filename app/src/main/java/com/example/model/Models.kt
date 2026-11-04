@@ -65,6 +65,8 @@ data class UserProfile(
     val isBlocked: Boolean = false,
     val isLocationLocked: Boolean = true,
     val unlockRequestStatus: String = "none", // "none", "pending", "approved"
+    val favoriteSalons: List<String> = emptyList(),
+    val services: List<SalonService> = emptyList(),
     val createdAt: Long = System.currentTimeMillis()
 ) {
     val effectiveCancellationStrikes: Int
@@ -98,6 +100,10 @@ data class UserProfile(
         put("isBlocked", isBlocked)
         put("isLocationLocked", isLocationLocked)
         put("unlockRequestStatus", unlockRequestStatus)
+        put("favoriteSalons", favoriteSalons)
+        if (services.isNotEmpty()) {
+            put("services", services.map { it.toMap() })
+        }
         put("createdAt", createdAt)
     }
 }
@@ -105,21 +111,29 @@ data class UserProfile(
 data class SalonService(
     val id: String = "",
     val name: String = "",
+    val serviceName: String = name,
     val category: String = "Haircut",
     val price: Int = 100,
     val durationMinutes: Int = 20,
+    val duration: Int = durationMinutes,
     val description: String = "",
     val isPopular: Boolean = false
 ) {
-    fun toMap(): Map<String, Any> = mapOf(
-        "id" to id,
-        "name" to name,
-        "category" to category,
-        "price" to price,
-        "durationMinutes" to durationMinutes,
-        "description" to description,
-        "isPopular" to isPopular
-    )
+    fun toMap(): Map<String, Any> {
+        val resolvedName = name.ifBlank { serviceName }
+        val resolvedDuration = if (durationMinutes > 0) durationMinutes else duration
+        return mapOf(
+            "id" to id,
+            "name" to resolvedName,
+            "serviceName" to serviceName.ifBlank { resolvedName },
+            "category" to category,
+            "price" to price,
+            "duration" to resolvedDuration,
+            "durationMinutes" to resolvedDuration,
+            "description" to description,
+            "isPopular" to isPopular
+        )
+    }
 }
 
 data class Salon(

@@ -72,6 +72,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.widget.Toast
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.StarOutline
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.Booking
 import com.example.ui.theme.AmberPrimary
@@ -102,8 +110,11 @@ fun MyBookingsScreen(
     onBackClick: (() -> Unit)? = null,
     onCancelBooking: ((String) -> Unit)? = null,
     onBrowseSalons: (() -> Unit)? = null,
+    onRateSalon: ((salonId: String, stars: Int) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+
     if (onBackClick != null) {
         BackHandler { onBackClick() }
     }
@@ -118,6 +129,9 @@ fun MyBookingsScreen(
 
     var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
     val tabs = listOf("Upcoming", "Past")
+
+    var bookingToRate by remember { mutableStateOf<Booking?>(null) }
+    var isSubmittingRating by remember { mutableStateOf(false) }
 
     Scaffold(
         modifier = modifier
@@ -372,6 +386,9 @@ fun MyBookingsScreen(
                                     }
                                 }
                             ) { booking ->
+                                val isPastCompletedBooking = selectedTabIndex == 1 &&
+                                    booking.normalizedStatus.equals("Completed", ignoreCase = true)
+
                                 BookingCard(
                                     booking = booking,
                                     onCancelBooking = if (selectedTabIndex == 0 && onCancelBooking != null) {
@@ -379,6 +396,9 @@ fun MyBookingsScreen(
                                             onCancelBooking(booking.resolvedBookingId)
                                             myBookingsViewModel.fetchBookings()
                                         }
+                                    } else null,
+                                    onRateSalonClick = if (isPastCompletedBooking) {
+                                        { bookingToRate = booking }
                                     } else null
                                 )
                             }
@@ -387,6 +407,47 @@ fun MyBookingsScreen(
                 }
             }
         }
+    }
+
+    // 1-to-5 Star "Rate Salon" Dialog for Completed Bookings in the Past Tab
+    bookingToRate?.let { targetBooking ->
+        RateSalonDialog(
+            booking = targetBooking,
+            isSubmitting = isSubmittingRating,
+            onDismiss = {
+                if (!isSubmittingRating) {
+                    bookingToRate = null
+                }
+            },
+            onSubmitRating = { selectedStars ->
+                isSubmittingRating = true
+                myBookingsViewModel.rateSalon(
+                    booking = targetBooking,
+                    stars = selectedStars,
+                    onSuccess = {
+                        val salonId = targetBooking.resolvedPartnerId
+                        if (salonId.isNotBlank()) {
+                            onRateSalon?.invoke(salonId, selectedStars)
+                        }
+                        isSubmittingRating = false
+                        bookingToRate = null
+                        Toast.makeText(
+                            context,
+                            "Thank you for your feedback!",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    onError = { errMsg ->
+                        isSubmittingRating = false
+                        Toast.makeText(
+                            context,
+                            errMsg,
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                )
+            }
+        )
     }
 }
 
@@ -401,6 +462,7 @@ fun MyBookingsScreen(
 fun BookingCard(
     booking: Booking,
     onCancelBooking: (() -> Unit)? = null,
+    onRateSalonClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val canonicalStatus = booking.normalizedStatus
@@ -429,6 +491,7 @@ fun BookingCard(
     val displayTime = booking.resolvedTime.ifBlank { "Instant Slot" }
     val isUpcoming = canonicalStatus.equals("Pending", ignoreCase = true) ||
         canonicalStatus.equals("Confirmed", ignoreCase = true)
+    val isCompleted = canonicalStatus.equals("Completed", ignoreCase = true)
 
     Card(
         modifier = modifier
@@ -651,6 +714,193 @@ fun BookingCard(
                                     fontWeight = FontWeight.Bold
                                 )
                             }
+                        }
+                    }
+                }
+
+                // Prominent "Rate Salon" Button for Completed Bookings in the Past Tab
+                if (isCompleted && onRateSalonClick != null) {
+                    HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
+                    Button(
+                        onClick = onRateSalonClick,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AmberPrimary,
+                            contentColor = Color.Black
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .testTag("rate_salon_btn_${booking.resolvedBookingId}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Star,
+                            contentDescription = "Rate Salon",
+                            tint = Color.Black,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Rate Salon",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 14.sp,
+                            color = Color.Black
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dialog allowing the customer to submit a 1 to 5 star rating for a completed salon booking.
+ */
+@Composable
+private fun RateSalonDialog(
+    booking: Booking,
+    isSubmitting: Boolean,
+    onDismiss: () -> Unit,
+    onSubmitRating: (Int) -> Unit
+) {
+    var selectedStars by rememberSaveable { mutableIntStateOf(5) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("rate_salon_dialog"),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
+            border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.5f)),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(CircleShape)
+                        .background(AmberPrimary.copy(alpha = 0.16f))
+                        .border(1.dp, AmberPrimary.copy(alpha = 0.5f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = "Rate Salon",
+                        tint = AmberPrimary,
+                        modifier = Modifier.size(30.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Text(
+                    text = "Rate Salon",
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 20.sp
+                    ),
+                    color = Color.White,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "How was your experience at ${booking.salonName.ifBlank { "this salon" }}?",
+                    fontSize = 13.sp,
+                    color = Color(0xFF94A3B8),
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // 1 to 5 Star Rating Selector Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    for (star in 1..5) {
+                        val isFilled = star <= selectedStars
+                        IconButton(
+                            onClick = { selectedStars = star },
+                            enabled = !isSubmitting,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("rate_salon_star_$star")
+                        ) {
+                            Icon(
+                                imageVector = if (isFilled) Icons.Default.Star else Icons.Outlined.StarOutline,
+                                contentDescription = "$star Star${if (star > 1) "s" else ""}",
+                                tint = if (isFilled) AmberPrimary else Color(0xFF64748B),
+                                modifier = Modifier.size(34.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Text(
+                    text = "$selectedStars out of 5 Stars",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AmberPrimary
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        enabled = !isSubmitting,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("cancel_rate_salon_btn")
+                    ) {
+                        Text(
+                            text = "Cancel",
+                            color = Color(0xFF94A3B8),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Button(
+                        onClick = { onSubmitRating(selectedStars) },
+                        enabled = !isSubmitting,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AmberPrimary,
+                            contentColor = Color.Black
+                        ),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .weight(1.4f)
+                            .heightIn(min = 48.dp)
+                            .testTag("submit_salon_rating_btn")
+                    ) {
+                        if (isSubmitting) {
+                            CircularProgressIndicator(
+                                color = Color.Black,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        } else {
+                            Text(
+                                text = "Submit Rating",
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color.Black
+                            )
                         }
                     }
                 }

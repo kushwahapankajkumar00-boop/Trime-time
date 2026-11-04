@@ -231,7 +231,10 @@ fun PinDisplayDialog(
                 Spacer(modifier = Modifier.height(18.dp))
 
                 Button(
-                    onClick = onViewBookings,
+                    onClick = {
+                        onDismiss()
+                        onViewBookings()
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(50.dp)

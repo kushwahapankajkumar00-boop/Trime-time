@@ -26,7 +26,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -43,6 +46,7 @@ import com.example.ui.components.AppBottomNav
 import com.example.ui.components.AppTopBar
 import com.example.ui.components.PinDisplayDialog
 import com.example.ui.components.PinVerificationDialog
+import com.example.ui.components.TrimTimeSplashScreen
 import com.example.ui.customer.BookingBottomSheet
 import com.example.ui.customer.CustomerBookingsContent
 import com.example.ui.customer.CustomerHomeScreen
@@ -109,6 +113,7 @@ fun TrimTimeApp(
     val serviceToBook by viewModel.serviceToBook.collectAsState()
     val selectedTimeSlot by viewModel.selectedTimeSlot.collectAsState()
     val newlyConfirmedBooking by viewModel.newlyConfirmedBooking.collectAsState()
+    val showConfirmationDialog by viewModel.showConfirmationDialog.collectAsState()
 
     val authMode by viewModel.authMode.collectAsState()
     val isAuthLoading by viewModel.isLoading.collectAsState()
@@ -149,6 +154,19 @@ fun TrimTimeApp(
             com.example.util.SecurityValidator.isBookingActiveStatus(it.status)
     }
 
+    val favoriteSalonIds by viewModel.favoriteSalonIds.collectAsState()
+    var showSplashScreen by rememberSaveable { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        delay(1500L)
+        showSplashScreen = false
+    }
+
+    if (showSplashScreen) {
+        TrimTimeSplashScreen()
+        return
+    }
+
     AnimatedContent(
         targetState = authState,
         transitionSpec = { fadeIn() togetherWith fadeOut() },
@@ -156,28 +174,7 @@ fun TrimTimeApp(
     ) { state ->
         when (state) {
             is AppAuthState.Loading -> {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(DarkBackground),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            color = AmberPrimary,
-                            modifier = Modifier.size(42.dp),
-                            strokeWidth = 3.dp
-                        )
-                        Text(
-                            text = "Loading TrimTime...",
-                            color = Color(0xFF94A3B8),
-                            fontSize = 14.sp
-                        )
-                    }
-                }
+                TrimTimeSplashScreen()
             }
 
             is AppAuthState.Unauthenticated -> {
@@ -311,14 +308,21 @@ fun TrimTimeApp(
                                             .background(MaterialTheme.colorScheme.background)
                                     ) {
                                         val activeSalon = selectedSalon?.let { sel ->
-                                            filteredSalons.find { it.id == sel.id } ?: sel
+                                            allSalons.find { it.id == sel.id } ?: filteredSalons.find { it.id == sel.id } ?: sel
                                         }
                                         if (activeSalon != null) {
+                                            val isActiveSalonFav = activeSalon.id in favoriteSalonIds ||
+                                                (activeSalon.partnerId.isNotBlank() && activeSalon.partnerId in favoriteSalonIds) ||
+                                                (activeSalon.ownerId.isNotBlank() && activeSalon.ownerId in favoriteSalonIds)
                                             SalonDetailScreen(
                                                 salon = activeSalon,
                                                 currentUserId = currentCustomerUid,
                                                 hasActiveBooking = hasActivePendingBooking,
                                                 isSuspended = isUserSuspended,
+                                                isFavorite = isActiveSalonFav,
+                                                onToggleFavorite = {
+                                                    viewModel.toggleFavoriteSalon(activeSalon)
+                                                },
                                                 onBack = { viewModel.selectSalon(null) },
                                                 onServiceSelected = { service ->
                                                     viewModel.setServiceToBook(service)
@@ -339,6 +343,10 @@ fun TrimTimeApp(
                                                     CustomerHomeScreen(
                                                         salons = filteredSalons,
                                                         currentUserId = currentCustomerUid,
+                                                        favoriteSalonIds = favoriteSalonIds,
+                                                        onToggleFavorite = { salon ->
+                                                            viewModel.toggleFavoriteSalon(salon)
+                                                        },
                                                         searchQuery = searchQuery,
                                                         onSearchChanged = { viewModel.setSearchQuery(it) },
                                                         selectedCategory = selectedCategory,
@@ -383,6 +391,10 @@ fun TrimTimeApp(
                                                         },
                                                         onBrowseSalons = {
                                                             viewModel.setNavTab(CustomerNavTab.SALONS)
+                                                        },
+                                                        onRateSalon = { salonId, stars ->
+                                                            viewModel.submitSalonRating(salonId, stars)
+                                                            viewModel.clearUserMessage()
                                                         }
                                                     )
                                                 }
@@ -546,13 +558,17 @@ fun TrimTimeApp(
 
     // Customer Booking Bottom Sheet
     if (serviceToBook != null && selectedSalon != null) {
+        val liveBookingSalon = allSalons.find { it.id == selectedSalon?.id } ?: selectedSalon!!
         BookingBottomSheet(
-            salon = selectedSalon!!,
+            salon = liveBookingSalon,
             service = serviceToBook!!,
             userProfile = currentUserProfile ?: com.example.model.UserProfile(name = "Customer", phone = "+91 98765 43210"),
             selectedSlot = selectedTimeSlot,
             hasActiveBooking = hasActivePendingBooking,
             isSuspended = isUserSuspended,
+            onServiceChanged = { updatedService ->
+                viewModel.setServiceToBook(updatedService)
+            },
             onSlotSelected = { viewModel.setSelectedTimeSlot(it) },
             onConfirm = { name, phone ->
                 viewModel.confirmBooking(name, phone)
@@ -562,15 +578,18 @@ fun TrimTimeApp(
     }
 
     // Customer Booking Confirmation Dialog (displays 4-Digit PIN)
-    newlyConfirmedBooking?.let { confirmedBooking ->
-        PinDisplayDialog(
-            booking = confirmedBooking,
-            onDismiss = { viewModel.dismissConfirmationDialog() },
-            onViewBookings = {
-                viewModel.selectSalon(null)
-                viewModel.setNavTab(CustomerNavTab.MY_BOOKINGS)
-            }
-        )
+    if (showConfirmationDialog) {
+        newlyConfirmedBooking?.let { confirmedBooking ->
+            PinDisplayDialog(
+                booking = confirmedBooking,
+                onDismiss = { viewModel.dismissConfirmationDialog() },
+                onViewBookings = {
+                    viewModel.dismissConfirmationDialog()
+                    viewModel.selectSalon(null)
+                    viewModel.setNavTab(CustomerNavTab.MY_BOOKINGS)
+                }
+            )
+        }
     }
 
     // Partner Anti-Fake Service PIN Verification Dialog

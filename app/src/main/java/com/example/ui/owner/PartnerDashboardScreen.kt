@@ -58,6 +58,8 @@ import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.PrivacyTip
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.SelfImprovement
@@ -106,11 +108,12 @@ import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.model.UserProfile
 import com.example.ui.components.HelpAndSupportCenterDialog
-import com.example.ui.components.LegalPoliciesViewerDialog
 import com.example.ui.components.LegalPolicyTab
 import com.example.ui.components.PartnerLocationPickerOsmMap
+import com.example.ui.components.PrivacyPolicyScreen
 import com.example.ui.components.SendFeedbackDialog
 import com.example.ui.components.SupportFeedbackLegalSectionCard
+import com.example.ui.components.TermsAndConditionsScreen
 import com.example.ui.components.fetchDeviceGpsLocation
 import com.example.ui.components.hasLocationPermission
 import com.example.ui.components.launchPhoneDialer
@@ -126,7 +129,8 @@ import androidx.compose.material.icons.filled.SupportAgent
 
 enum class PartnerTab(val title: String) {
     LIVE_QUEUE("Live Queue"),
-    SERVICES_PRICING("Services & Pricing"),
+    SERVICES_PRICING("Manage Menu"),
+    EARNINGS_WALLET("Earnings/Wallet"),
     SHOP_PROFILE("Shop Profile")
 }
 
@@ -212,6 +216,24 @@ fun PartnerDashboardScreen(
     var showFeedbackDialog by remember { mutableStateOf(false) }
     var activeLegalTab by remember { mutableStateOf<LegalPolicyTab?>(null) }
 
+    when (activeLegalTab) {
+        LegalPolicyTab.PRIVACY -> {
+            PrivacyPolicyScreen(
+                onBack = { activeLegalTab = null },
+                modifier = modifier
+            )
+            return
+        }
+        LegalPolicyTab.TERMS -> {
+            TermsAndConditionsScreen(
+                onBack = { activeLegalTab = null },
+                modifier = modifier
+            )
+            return
+        }
+        null -> Unit
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -261,6 +283,15 @@ fun PartnerDashboardScreen(
                 )
             }
 
+            PartnerTab.EARNINGS_WALLET -> {
+                PartnerEarningsWalletTabContent(
+                    salon = currentSalon,
+                    completedBookings = strictlyCompletedBookings,
+                    pendingBookings = pendingBookings,
+                    allSalonBookings = salonBookings
+                )
+            }
+
             PartnerTab.SHOP_PROFILE -> {
                 PartnerShopProfileTabContent(
                     salon = currentSalon,
@@ -306,12 +337,7 @@ fun PartnerDashboardScreen(
         )
     }
 
-    activeLegalTab?.let { tab ->
-        LegalPoliciesViewerDialog(
-            initialTab = tab,
-            onDismiss = { activeLegalTab = null }
-        )
-    }
+    // Legal Policy screens are rendered via full-screen state above
 }
 
 /**
@@ -1438,7 +1464,7 @@ fun LiveQueueBookingCard(
                 )
             }
 
-            // Accept & Reject Action Row (Syncs directly to Firestore bookings/{bookingId})
+            // Accept & Decline Action Row (Syncs directly to Firestore bookings/{bookingId})
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1448,7 +1474,7 @@ fun LiveQueueBookingCard(
                         onClick = onAcceptClick,
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 44.dp)
+                            .heightIn(min = 48.dp)
                             .testTag("accept_booking_btn_${booking.id}"),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                         colors = ButtonDefaults.buttonColors(
@@ -1464,7 +1490,7 @@ fun LiveQueueBookingCard(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Accept Booking",
+                            text = "Accept",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
@@ -1478,7 +1504,7 @@ fun LiveQueueBookingCard(
                     onClick = onRejectClick,
                     modifier = Modifier
                         .weight(1f)
-                        .heightIn(min = 44.dp)
+                        .heightIn(min = 48.dp)
                         .testTag("reject_booking_btn_${booking.id}"),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
@@ -1487,12 +1513,12 @@ fun LiveQueueBookingCard(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
-                        contentDescription = "Reject Booking",
+                        contentDescription = "Decline Booking",
                         modifier = Modifier.size(15.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
-                        text = "Reject Slot",
+                        text = "Decline",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
@@ -1703,13 +1729,13 @@ fun PartnerMenuManagerTabContent(
                     )
                     Column {
                         Text(
-                            text = "Services & Pricing Manager",
+                            text = "Manage Menu — Services & Prices",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
                         Text(
-                            text = "Add, Edit, or Delete services (₹ & mins) in your salon service catalog.",
+                            text = "Add, Edit, or Delete custom services (Name, ₹ Price & Duration in mins).",
                             fontSize = 11.sp,
                             color = Color(0xFFCBD5E1)
                         )
@@ -3525,7 +3551,96 @@ fun PartnerShopProfileTabContent(
             }
         }
 
-        // 3. Partner Help, Support, Feedback & Legal Policies Card
+        // 3. Partner Legal & Play Store Compliance Buttons + Help & Support Card
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("partner_legal_settings_card"),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Legal & Play Store Policies",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "Review TrimTime's official Privacy Policy and Partner Terms & Conditions.",
+                        fontSize = 11.sp,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onOpenPrivacyPolicy,
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("partner_privacy_policy_btn"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, GreenSuccess.copy(alpha = 0.65f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PrivacyTip,
+                                contentDescription = "Privacy Policy",
+                                tint = GreenSuccess,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Privacy Policy",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = onOpenTerms,
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("partner_terms_conditions_btn"),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.65f))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Gavel,
+                                contentDescription = "Terms & Conditions",
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Terms & Conditions",
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Partner Help, Support, Feedback & Legal Policies Card
         item {
             SupportFeedbackLegalSectionCard(
                 isHinglish = false,
@@ -3540,3 +3655,278 @@ fun PartnerShopProfileTabContent(
         }
     }
 }
+
+/**
+ * TAB 3: Partner Earnings / Wallet Tab
+ * Calculates and displays total revenue generated from bookings marked as "Completed",
+ * along with average ticket value, pending queue revenue, and completed transaction history.
+ */
+@Composable
+fun PartnerEarningsWalletTabContent(
+    salon: Salon?,
+    completedBookings: List<Booking>,
+    pendingBookings: List<Booking>,
+    allSalonBookings: List<Booking>
+) {
+    val totalRevenue = completedBookings.sumOf { it.servicePrice }
+    val completedCount = completedBookings.size
+    val pendingQueueRevenue = pendingBookings.sumOf { it.servicePrice }
+    val averageTicket = if (completedCount > 0) totalRevenue / completedCount else 0
+    val declinedOrCancelledCount = allSalonBookings.count {
+        it.status.equals("cancelled", ignoreCase = true) ||
+            it.status.equals("rejected", ignoreCase = true) ||
+            it.status.equals("declined", ignoreCase = true)
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("partner_earnings_wallet_tab"),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("partner_total_revenue_card"),
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF064E3B)),
+                border = androidx.compose.foundation.BorderStroke(1.5.dp, GreenSuccess)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(GreenSuccess.copy(alpha = 0.22f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Payments,
+                                    contentDescription = "Total Revenue",
+                                    tint = GreenSuccess,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "EARNINGS & WALLET",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFFA7F3D0),
+                                    letterSpacing = 0.8.sp
+                                )
+                                Text(
+                                    text = salon?.name ?: "My Salon",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF022C22))
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        ) {
+                            Text(
+                                text = "100% Pay at Salon",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = GreenSuccess
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = GreenSuccess.copy(alpha = 0.3f))
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "Total Completed Revenue",
+                            fontSize = 12.sp,
+                            color = Color(0xFFD1FAE5)
+                        )
+                        Text(
+                            text = "₹$totalRevenue",
+                            fontSize = 34.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color.White,
+                            modifier = Modifier.testTag("partner_wallet_total_amount")
+                        )
+                        Text(
+                            text = "Generated from $completedCount verified Completed booking${if (completedCount == 1) "" else "s"}",
+                            fontSize = 11.sp,
+                            color = Color(0xFFA7F3D0),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        }
+
+        // Key Metrics Breakdown Row
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Card(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkCardSurface)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "COMPLETED",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF94A3B8)
+                        )
+                        Text(
+                            text = "$completedCount",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            color = GreenSuccess
+                        )
+                        Text(
+                            text = "Avg ₹$averageTicket / visit",
+                            fontSize = 10.sp,
+                            color = Color(0xFFCBD5E1)
+                        )
+                    }
+                }
+
+                Card(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkCardSurface)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "IN QUEUE (PENDING)",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF94A3B8)
+                        )
+                        Text(
+                            text = "₹$pendingQueueRevenue",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            color = AmberPrimary
+                        )
+                        Text(
+                            text = "${pendingBookings.size} active request${if (pendingBookings.size == 1) "" else "s"}",
+                            fontSize = 10.sp,
+                            color = Color(0xFFCBD5E1)
+                        )
+                    }
+                }
+
+                Card(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkCardSurface)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "DECLINED / CANCEL",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF94A3B8)
+                        )
+                        Text(
+                            text = "$declinedOrCancelledCount",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            color = RedAlert
+                        )
+                        Text(
+                            text = "₹0 charged",
+                            fontSize = 10.sp,
+                            color = Color(0xFFCBD5E1)
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            Text(
+                text = "COMPLETED BOOKINGS LEDGER (${completedBookings.size})",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(0xFF94A3B8),
+                letterSpacing = 0.8.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+
+        if (completedBookings.isEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkCardSurface)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Payments,
+                            contentDescription = null,
+                            tint = Color(0xFF64748B),
+                            modifier = Modifier.size(36.dp)
+                        )
+                        Text(
+                            text = "No Completed Earnings Yet",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "Verify customer 4-digit PINs in the Live Queue tab to mark services Completed and record revenue here.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF94A3B8),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            }
+        } else {
+            items(completedBookings, key = { it.id }) { booking ->
+                CompletedBookingCard(booking = booking)
+            }
+        }
+    }
+}
+

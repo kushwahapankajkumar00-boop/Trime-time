@@ -163,25 +163,46 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         combine(userLatitude, userLongitude, appPreferences) { lat, lng, prefs -> Triple(lat, lng, prefs) }
     ) { (salons, query, category), (uLat, uLng, prefs) ->
         val recalculated = repository.recalculateAndSortSalons(salons, uLat, uLng)
+        val trimmedQuery = query.trim()
         recalculated.filter { salon ->
             val includeByDemoSetting = prefs.showDemoSalons || !repository.isDemoSalon(salon.id)
 
-            val matchesQuery = query.isBlank() ||
-                    salon.name.contains(query, ignoreCase = true) ||
-                    salon.location.contains(query, ignoreCase = true) ||
-                    salon.shopAddress.contains(query, ignoreCase = true) ||
-                    salon.services.any { it.name.contains(query, ignoreCase = true) }
+            val matchesQuery = trimmedQuery.isBlank() ||
+                    salon.name.contains(trimmedQuery, ignoreCase = true) ||
+                    salon.location.contains(trimmedQuery, ignoreCase = true) ||
+                    salon.shopAddress.contains(trimmedQuery, ignoreCase = true) ||
+                    salon.landmark.contains(trimmedQuery, ignoreCase = true) ||
+                    salon.pincode.contains(trimmedQuery, ignoreCase = true) ||
+                    salon.adminCategoryTag.contains(trimmedQuery, ignoreCase = true) ||
+                    salon.salonCategory.contains(trimmedQuery, ignoreCase = true) ||
+                    salon.shopCategory.contains(trimmedQuery, ignoreCase = true) ||
+                    salon.tagline.contains(trimmedQuery, ignoreCase = true) ||
+                    ((trimmedQuery.equals("ac", ignoreCase = true) || trimmedQuery.equals("a/c", ignoreCase = true)) && salon.isAcSalon) ||
+                    salon.services.any {
+                        it.name.contains(trimmedQuery, ignoreCase = true) ||
+                            it.serviceName.contains(trimmedQuery, ignoreCase = true) ||
+                            it.category.contains(trimmedQuery, ignoreCase = true)
+                    }
 
             val isNotRejectedOrSuspended = !salon.isSuspended &&
                     !salon.approvalStatus.equals("REJECTED", ignoreCase = true)
 
             val matchesCategory = category == "All" ||
                     salon.adminCategoryTag.equals(category, ignoreCase = true) ||
+                    salon.salonCategory.equals(category, ignoreCase = true) ||
                     salon.services.any { it.category.equals(category, ignoreCase = true) }
 
             includeByDemoSetting && isNotRejectedOrSuspended && matchesQuery && matchesCategory
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Customer's Favorite Salon IDs / Partner IDs synced with Firestore `users/{uid}.favoriteSalons`
+    val favoriteSalonIds: StateFlow<Set<String>> = combine(
+        currentUserProfile,
+        allSalons
+    ) { profile, _ ->
+        profile?.favoriteSalons?.toSet() ?: emptySet()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
 
     // Selected Salon for Detail Screen
     private val _selectedSalon = MutableStateFlow<Salon?>(null)
@@ -196,6 +217,9 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
 
     private val _newlyConfirmedBooking = MutableStateFlow<Booking?>(null)
     val newlyConfirmedBooking: StateFlow<Booking?> = _newlyConfirmedBooking.asStateFlow()
+
+    private val _showConfirmationDialog = MutableStateFlow(false)
+    val showConfirmationDialog: StateFlow<Boolean> = _showConfirmationDialog.asStateFlow()
 
     // Auth Dialog state
     private val _authMode = MutableStateFlow(AuthMode.NONE)
@@ -253,6 +277,21 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         if (salon == null) {
             _serviceToBook.value = null
         }
+    }
+
+    fun toggleFavoriteSalon(salon: Salon) {
+        val partnerOrOwnerId = salon.partnerId.ifBlank { salon.ownerId }
+        repository.toggleFavoriteSalon(
+            salonId = salon.id,
+            partnerId = partnerOrOwnerId,
+            onResult = { isNowFavorite ->
+                _userMessage.value = if (isNowFavorite) {
+                    "❤️ Added '${salon.name}' to My Favorites"
+                } else {
+                    "Removed '${salon.name}' from My Favorites"
+                }
+            }
+        )
     }
 
     fun setServiceToBook(service: SalonService?) {
@@ -369,13 +408,16 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
 
             _serviceToBook.value = null
             _newlyConfirmedBooking.value = newBooking
+            _showConfirmationDialog.value = true
         } catch (e: Exception) {
             _userMessage.value = e.message
         }
     }
 
     fun dismissConfirmationDialog() {
+        _showConfirmationDialog.value = false
         _newlyConfirmedBooking.value = null
+        _serviceToBook.value = null
     }
 
     // ==========================================

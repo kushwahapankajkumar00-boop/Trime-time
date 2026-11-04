@@ -42,6 +42,8 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.CurrencyRupee
 import androidx.compose.material.icons.filled.Directions
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -134,6 +136,8 @@ import org.osmdroid.config.Configuration
 fun CustomerHomeScreen(
     salons: List<Salon>,
     currentUserId: String = "",
+    favoriteSalonIds: Set<String> = emptySet(),
+    onToggleFavorite: (Salon) -> Unit = {},
     searchQuery: String,
     onSearchChanged: (String) -> Unit,
     selectedCategory: String,
@@ -167,6 +171,8 @@ fun CustomerHomeScreen(
 
     // Smart Filter state (Blinkit style)
     var selectedFilter by remember { mutableStateOf<String?>(null) }
+    // My Favorites Tab state ("All Salons" vs "My Favorites")
+    var showFavoritesTab by remember { mutableStateOf(false) }
     // Toggle between "List View" and "Live Map View" (OpenStreetMap)
     var isMapView by remember { mutableStateOf(false) }
     // Interactive "Change / Detect Location" Bottom Sheet state
@@ -256,9 +262,17 @@ fun CustomerHomeScreen(
         }
     }
 
-    // Filter salons according to selected Smart Filter, dynamically recalculate live Haversine distance
+    val isSalonFavorited: (Salon) -> Boolean = remember(favoriteSalonIds) {
+        { salon ->
+            salon.id in favoriteSalonIds ||
+                (salon.partnerId.isNotBlank() && salon.partnerId in favoriteSalonIds) ||
+                (salon.ownerId.isNotBlank() && salon.ownerId in favoriteSalonIds)
+        }
+    }
+
+    // Filter salons according to selected Smart Filter / My Favorites tab, dynamically recalculate live Haversine distance
     // from (userLatitude, userLongitude), and sort by shortest distance first!
-    val displayedSalons = remember(salons, selectedFilter, userLatitude, userLongitude) {
+    val displayedSalons = remember(salons, selectedFilter, showFavoritesTab, favoriteSalonIds, userLatitude, userLongitude) {
         val withLiveDistances = salons.map { salon ->
             val sLat = salon.latitude
             val sLng = salon.longitude
@@ -278,7 +292,8 @@ fun CustomerHomeScreen(
             }
         }
 
-        val baseList = when (selectedFilter) {
+        val filteredByChip = when (selectedFilter) {
+            "My Favorites" -> withLiveDistances.filter { isSalonFavorited(it) }
             "Open Now" -> withLiveDistances.filter { it.isOpen }
             "Under ₹150" -> withLiveDistances.filter { salon ->
                 val minPrice = salon.services.minOfOrNull { it.price } ?: 100
@@ -286,12 +301,18 @@ fun CustomerHomeScreen(
             }
             "Top Rated" -> withLiveDistances.filter { it.rating >= 4.7 }
             "A/C Salons" -> withLiveDistances.filter { salon ->
+                salon.isAcSalon ||
                 salon.tagline.contains("AC", ignoreCase = true) ||
                 salon.tagline.contains("Luxury", ignoreCase = true) ||
                 salon.name.contains("Unisex", ignoreCase = true) ||
                 salon.rating >= 4.7
             }
             else -> withLiveDistances
+        }
+        val baseList = if (showFavoritesTab) {
+            filteredByChip.filter { isSalonFavorited(it) }
+        } else {
+            filteredByChip
         }
         baseList.distinctBy { it.id.ifBlank { it.name } }
     }
@@ -446,7 +467,7 @@ fun CustomerHomeScreen(
             }
         }
 
-        // 4. Smart Filter Chips ("Open Now", "Under ₹150", "Top Rated", "A/C Salons")
+        // 4. Smart Filter Chips ("My Favorites", "Open Now", "Under ₹150", "Top Rated", "A/C Salons")
         item {
             SmartFilterChipsRow(
                 selectedFilter = selectedFilter,
@@ -454,6 +475,69 @@ fun CustomerHomeScreen(
                     selectedFilter = if (selectedFilter == filter) null else filter
                 }
             )
+        }
+
+        // 4b. "All Salons" vs "❤️ My Favorites" Tab Switcher
+        item {
+            val favCount = salons.count { isSalonFavorited(it) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(DarkCardSurface)
+                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(12.dp))
+                    .padding(4.dp)
+                    .testTag("customer_favorites_tab_row"),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 44.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(if (!showFavoritesTab) AmberPrimary else Color.Transparent)
+                        .clickable { showFavoritesTab = false }
+                        .testTag("tab_all_salons"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "All Salons (${salons.size})",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = if (!showFavoritesTab) DarkBackground else Color(0xFFCBD5E1)
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 44.dp)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(if (showFavoritesTab) Color(0xFFF43F5E) else Color.Transparent)
+                        .clickable { showFavoritesTab = true }
+                        .testTag("tab_my_favorites"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Favorite,
+                            contentDescription = "My Favorites",
+                            tint = if (showFavoritesTab) Color.White else Color(0xFFF43F5E),
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = "My Favorites ($favCount)",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (showFavoritesTab) Color.White else Color(0xFFCBD5E1)
+                        )
+                    }
+                }
+            }
         }
 
         // 5. Section Header with Live Counter & List / Live Map View Switcher
@@ -591,6 +675,7 @@ fun CustomerHomeScreen(
                 EmptySalonsPlaceholder(
                     onClearFilters = {
                         selectedFilter = null
+                        showFavoritesTab = false
                         onSearchChanged("")
                     }
                 )
@@ -603,6 +688,8 @@ fun CustomerHomeScreen(
                 BlinkitSalonCard(
                     salon = salon,
                     currentUserId = currentUserId,
+                    isFavorite = isSalonFavorited(salon),
+                    onToggleFavorite = { onToggleFavorite(salon) },
                     onRateClick = { salonToRate = salon },
                     onBookClick = { onSalonSelected(salon) }
                 )
@@ -1080,7 +1167,7 @@ fun BlinkitSearchBar(
             .testTag("search_salons_input"),
         placeholder = {
             Text(
-                text = "Search 'Fade cut', 'Beard trim', 'A/C Parlour'...",
+                text = "Search by salon name, address, or tags ('AC', 'Standard', 'Fade')...",
                 color = Color(0xFF64748B),
                 fontSize = 13.sp
             )
@@ -1261,6 +1348,7 @@ fun SmartFilterChipsRow(
     onFilterSelected: (String) -> Unit
 ) {
     val filters = listOf(
+        FilterChipItem("My Favorites", Icons.Default.Favorite),
         FilterChipItem("Open Now", Icons.Default.AccessTime),
         FilterChipItem("Under ₹150", Icons.Default.CurrencyRupee),
         FilterChipItem("Top Rated", Icons.Default.Star),
@@ -1297,7 +1385,7 @@ fun SmartFilterChipsRow(
                     Icon(
                         imageVector = chip.icon,
                         contentDescription = null,
-                        tint = contentColor,
+                        tint = if (!isSelected && chip.label == "My Favorites") Color(0xFFF43F5E) else contentColor,
                         modifier = Modifier.size(14.dp)
                     )
                     Text(
@@ -1321,12 +1409,14 @@ data class FilterChipItem(
  * 4. Nearby Salons Feed & 5. Salon Card UI:
  * Displays Salon Name, Distance (e.g., "1.2 km"), Price starting from (e.g., "Starts at ₹100"),
  * and a highly visible "Live Wait Time" badge (e.g., "🟢 No Wait" or "🔴 15 Min Wait").
- * 6. Booking Action: A clear "View & Book" button.
+ * 6. Booking Action: A clear "View & Book" button + Favorite (Heart) toggle icon.
  */
 @Composable
 fun BlinkitSalonCard(
     salon: Salon,
     currentUserId: String = "",
+    isFavorite: Boolean = false,
+    onToggleFavorite: () -> Unit = {},
     onRateClick: () -> Unit = {},
     onBookClick: () -> Unit
 ) {
@@ -1563,21 +1653,31 @@ fun BlinkitSalonCard(
                         }
                     }
 
-                    // Salon Scissors Badge Icon
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xD90F172A))
-                            .border(1.dp, AmberPrimary.copy(alpha = 0.6f), CircleShape),
-                        contentAlignment = Alignment.Center
+                    // Favorite (Heart) Toggle Icon + Salon Scissors Badge Icon
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.ContentCut,
-                            contentDescription = "Salon",
-                            tint = AmberPrimary,
-                            modifier = Modifier.size(22.dp)
-                        )
+                        IconButton(
+                            onClick = onToggleFavorite,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xD90F172A))
+                                .border(
+                                    1.dp,
+                                    if (isFavorite) Color(0xFFF43F5E) else Color(0xFF475569),
+                                    CircleShape
+                                )
+                                .testTag("favorite_salon_btn_${salon.id}")
+                        ) {
+                            Icon(
+                                imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                contentDescription = if (isFavorite) "Remove ${salon.name} from Favorites" else "Add ${salon.name} to Favorites",
+                                tint = if (isFavorite) Color(0xFFF43F5E) else Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                     }
                 }
             }
