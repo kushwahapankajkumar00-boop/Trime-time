@@ -1,13 +1,7 @@
 package com.example.ui.admin
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -24,12 +18,8 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.HolidayVillage
-import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Refresh
@@ -43,7 +33,6 @@ import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.WorkspacePremium
-import java.security.MessageDigest
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -383,9 +372,6 @@ fun AdminDashboardScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Temporary Google Sign-In Fix (SHA-1 & SHA-256 Certificate Hash Extractor)
-            AdminShaExtractorCard(context = context)
-
             // Search Filter Bar
             OutlinedTextField(
                 value = searchQuery,
@@ -483,227 +469,6 @@ fun AdminDashboardScreen(
                             context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$clean")))
                         }
                     }
-                )
-            }
-        }
-    }
-}
-
-private data class AppCertHashes(
-    val packageName: String,
-    val sha1: String,
-    val sha256: String
-)
-
-@Suppress("DEPRECATION")
-private fun getAppCertificateHashes(context: Context): AppCertHashes {
-    return try {
-        val packageManager = context.packageManager
-        val packageName = context.packageName
-        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val packageInfo = packageManager.getPackageInfo(
-                packageName,
-                PackageManager.GET_SIGNING_CERTIFICATES
-            )
-            val signingInfo = packageInfo.signingInfo
-            if (signingInfo != null) {
-                if (signingInfo.hasMultipleSigners()) {
-                    signingInfo.apkContentsSigners
-                } else {
-                    signingInfo.signingCertificateHistory
-                }
-            } else {
-                null
-            }
-        } else {
-            val packageInfo = packageManager.getPackageInfo(
-                packageName,
-                PackageManager.GET_SIGNATURES
-            )
-            packageInfo.signatures
-        }
-
-        val certBytes = signatures?.firstOrNull()?.toByteArray()
-        if (certBytes != null) {
-            val sha1 = MessageDigest.getInstance("SHA-1")
-                .digest(certBytes)
-                .joinToString(":") { "%02X".format(it) }
-            val sha256 = MessageDigest.getInstance("SHA-256")
-                .digest(certBytes)
-                .joinToString(":") { "%02X".format(it) }
-            AppCertHashes(packageName = packageName, sha1 = sha1, sha256 = sha256)
-        } else {
-            AppCertHashes(packageName = packageName, sha1 = "Unavailable", sha256 = "Unavailable")
-        }
-    } catch (e: Exception) {
-        AppCertHashes(
-            packageName = context.packageName,
-            sha1 = "Error: ${e.localizedMessage ?: "Unable to read"}",
-            sha256 = "Error: ${e.localizedMessage ?: "Unable to read"}"
-        )
-    }
-}
-
-private fun copyToClipboard(context: Context, label: String, value: String) {
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-    clipboard?.setPrimaryClip(ClipData.newPlainText(label, value))
-    Toast.makeText(context, "$label copied to clipboard!", Toast.LENGTH_SHORT).show()
-}
-
-@Composable
-private fun AdminShaExtractorCard(
-    context: Context
-) {
-    val certHashes = remember(context) { getAppCertificateHashes(context) }
-    var isExpanded by remember { mutableStateOf(true) }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
-            .testTag("admin_sha_extractor_card"),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF172033)),
-        border = BorderStroke(1.dp, TrimTimeGold.copy(alpha = 0.65f))
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { isExpanded = !isExpanded }
-                    .testTag("admin_sha_extractor_toggle"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(30.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(TrimTimeGold.copy(alpha = 0.18f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Key,
-                            contentDescription = null,
-                            tint = TrimTimeGold,
-                            modifier = Modifier.size(17.dp)
-                        )
-                    }
-                    Column {
-                        Text(
-                            text = "Developer Tools • App Certificate Hashes",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                        Text(
-                            text = "Pkg: ${certHashes.packageName} • Copy SHA-1 & SHA-256 for Firebase Console",
-                            color = Color(0xFF94A3B8),
-                            fontSize = 10.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-                Icon(
-                    imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (isExpanded) "Collapse SHA section" else "Expand SHA section",
-                    tint = TrimTimeGold
-                )
-            }
-
-            if (isExpanded) {
-                AdminHashCopyRow(
-                    label = "SHA-1",
-                    hashValue = certHashes.sha1,
-                    copyTestTag = "copy_sha1_button",
-                    onCopy = { copyToClipboard(context, "SHA-1", certHashes.sha1) }
-                )
-                AdminHashCopyRow(
-                    label = "SHA-256",
-                    hashValue = certHashes.sha256,
-                    copyTestTag = "copy_sha256_button",
-                    onCopy = { copyToClipboard(context, "SHA-256", certHashes.sha256) }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun AdminHashCopyRow(
-    label: String,
-    hashValue: String,
-    copyTestTag: String,
-    onCopy: () -> Unit
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = Color(0xFF0F172A),
-        shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, Color(0xFF334155))
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 10.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(end = 8.dp)
-            ) {
-                Text(
-                    text = label,
-                    color = TrimTimeGold,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.ExtraBold
-                )
-                Text(
-                    text = hashValue,
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    lineHeight = 14.sp
-                )
-            }
-            OutlinedButton(
-                onClick = onCopy,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.dp, TrimTimeGold.copy(alpha = 0.7f)),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = Color(0xFF1E293B),
-                    contentColor = TrimTimeGold
-                ),
-                modifier = Modifier
-                    .heightIn(min = 48.dp)
-                    .testTag(copyTestTag)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.ContentCopy,
-                    contentDescription = "Copy $label",
-                    tint = TrimTimeGold,
-                    modifier = Modifier.size(14.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = "Copy",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = TrimTimeGold
                 )
             }
         }

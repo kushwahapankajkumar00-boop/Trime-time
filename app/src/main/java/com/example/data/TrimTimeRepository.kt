@@ -240,7 +240,7 @@ class TrimTimeRepository private constructor(context: Context) {
 
     /**
      * Dynamically recalculates every salon's Haversine distance in `km` from `(userLat, userLng)`
-     * and sorts salons by shortest distance first.
+     * and sorts salons by shortest geographic distance first (nearest at the very top).
      */
     fun recalculateAndSortSalons(
         salonsList: List<Salon>,
@@ -259,15 +259,18 @@ class TrimTimeRepository private constructor(context: Context) {
                 } else {
                     salon
                 }
-            }.sortedBy { salon ->
-                val sLat = salon.latitude
-                val sLng = salon.longitude
-                if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
-                    calculateDistanceKm(userLat, userLng, sLat, sLng)
-                } else {
-                    salon.distance.replace("km", "", ignoreCase = true).trim().toDoubleOrNull() ?: 999.0
-                }
-            }
+            }.sortedWith(
+                compareBy<Salon> { salon ->
+                    val sLat = salon.latitude
+                    val sLng = salon.longitude
+                    if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
+                        calculateRawDistanceKm(userLat, userLng, sLat, sLng)
+                    } else {
+                        val parsed = salon.distance.replace("km", "", ignoreCase = true).trim().toDoubleOrNull()
+                        if (parsed != null) parsed + 5000.0 else 99999.0
+                    }
+                }.thenBy { it.name.lowercase(java.util.Locale.US) }
+            )
     }
 
     fun openPartnerRegistrationForm() {
@@ -443,10 +446,17 @@ class TrimTimeRepository private constructor(context: Context) {
                                 val landmark = doc.getString("landmark") ?: ""
 
                                 val coordinatesMap = doc.get("coordinates") as? Map<String, Any?>
+                                val geoPoint = try { doc.getGeoPoint("coordinates") ?: doc.getGeoPoint("location") } catch (_: Exception) { null }
                                 val lat = (coordinatesMap?.get("lat") as? Number)?.toDouble()
+                                    ?: (coordinatesMap?.get("latitude") as? Number)?.toDouble()
                                     ?: (doc.get("latitude") as? Number)?.toDouble()
+                                    ?: doc.getString("latitude")?.toDoubleOrNull()
+                                    ?: geoPoint?.latitude
                                 val lng = (coordinatesMap?.get("lng") as? Number)?.toDouble()
+                                    ?: (coordinatesMap?.get("longitude") as? Number)?.toDouble()
                                     ?: (doc.get("longitude") as? Number)?.toDouble()
+                                    ?: doc.getString("longitude")?.toDoubleOrNull()
+                                    ?: geoPoint?.longitude
 
                                 val distance = if (lat != null && lng != null && lat != 0.0 && lng != 0.0) {
                                     val dKm = calculateDistanceKm(_userLatitude.value, _userLongitude.value, lat, lng)
@@ -563,14 +573,22 @@ class TrimTimeRepository private constructor(context: Context) {
                                     parsedServices
                                 }
 
-                                val imageUrl = doc.getString("imageUrl")
-                                    ?: doc.getString("photoBase64")
-                                    ?: ""
-                                val photoBase64 = doc.getString("photoBase64")
-                                    ?: doc.getString("imageUrl")
-                                    ?: ""
-
                                 val resolvedDocId = doc.getString("id")?.takeIf { it.isNotBlank() } ?: docId
+                                val partnerUserImg = _allUsers.value.find { u ->
+                                    (ownerId.isNotBlank() && u.id == ownerId) ||
+                                        (partnerId.isNotBlank() && u.id == partnerId) ||
+                                        (u.salonId == resolvedDocId)
+                                }?.imageUrl?.takeIf { it.isNotBlank() }
+
+                                val imageUrl = doc.getString("imageUrl")?.takeIf { it.isNotBlank() }
+                                    ?: doc.getString("shopImageUrl")?.takeIf { it.isNotBlank() }
+                                    ?: doc.getString("photoUrl")?.takeIf { it.isNotBlank() }
+                                    ?: doc.getString("coverImageUrl")?.takeIf { it.isNotBlank() }
+                                    ?: partnerUserImg
+                                    ?: doc.getString("photoBase64")?.takeIf { it.isNotBlank() }
+                                    ?: ""
+                                val photoBase64 = doc.getString("photoBase64")?.takeIf { it.isNotBlank() }
+                                    ?: imageUrl
                                 val ownerName = doc.getString("ownerName") ?: ""
                                 val pincode = doc.getString("pincode") ?: ""
                                 val shopCategory = doc.getString("shopCategory") ?: "Men's Salon"
@@ -883,6 +901,31 @@ class TrimTimeRepository private constructor(context: Context) {
         val mergedList = combinedById.values.sortedByDescending { it.createdAt }
         _allUsers.value = mergedList
 
+        // Enrich any loaded salon whose imageUrl is blank using its Partner's Firestore user profile imageUrl
+        if (_salons.value.isNotEmpty()) {
+            var anySalonEnriched = false
+            val enrichedSalons = _salons.value.map { salon ->
+                if (salon.imageUrl.isBlank()) {
+                    val partnerImg = mergedList.find { u ->
+                        (salon.ownerId.isNotBlank() && u.id == salon.ownerId) ||
+                            (salon.partnerId.isNotBlank() && u.id == salon.partnerId) ||
+                            (u.salonId == salon.id)
+                    }?.imageUrl?.takeIf { it.isNotBlank() }
+                    if (!partnerImg.isNullOrBlank()) {
+                        anySalonEnriched = true
+                        salon.copy(imageUrl = partnerImg, photoBase64 = salon.photoBase64.ifBlank { partnerImg })
+                    } else {
+                        salon
+                    }
+                } else {
+                    salon
+                }
+            }
+            if (anySalonEnriched) {
+                _salons.value = enrichedSalons
+            }
+        }
+
         val current = _currentUserProfile.value ?: return
         val matchingDocs = (namedDbUsers + defaultDbUsers).filter { isSameUserIdentity(it, current) }
         if (matchingDocs.isNotEmpty()) {
@@ -906,7 +949,13 @@ class TrimTimeRepository private constructor(context: Context) {
             } else {
                 current.services
             }
+            val resolvedPhone = exactDoc.phoneNumber.ifBlank { exactDoc.phone }
+                .ifBlank { current.phoneNumber.ifBlank { current.phone } }
+            val resolvedImgUrl = exactDoc.imageUrl.ifBlank { current.imageUrl }
             val updated = current.copy(
+                phone = resolvedPhone,
+                phoneNumber = resolvedPhone,
+                imageUrl = resolvedImgUrl,
                 isAdmin = anyIsAdmin,
                 isBlocked = anyIsBlocked,
                 isSuspended = exactDoc.isSuspended || anyIsBlocked,
@@ -938,7 +987,9 @@ class TrimTimeRepository private constructor(context: Context) {
             )
             val isBlockedFlag = readBooleanField(doc, "isBlocked", false)
             val isSuspendedFlag = readBooleanField(doc, "isSuspended", strikes >= 3) || isBlockedFlag
-            val phoneVal = doc.getString("phone") ?: ""
+            val phoneVal = doc.getString("phoneNumber")?.takeIf { it.isNotBlank() }
+                ?: doc.getString("phone")?.takeIf { it.isNotBlank() }
+                ?: ""
             val emailVal = doc.getString("email") ?: ""
             val isAdminFlag = readIsAdminFromDoc(doc)
             val unlockStatusVal = doc.getString("unlockRequestStatus")?.trim()?.lowercase()
@@ -996,6 +1047,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 ),
                 email = emailVal,
                 phone = phoneVal,
+                phoneNumber = phoneVal,
                 isPhoneVerified = readBooleanField(doc, "isPhoneVerified", phoneVal.isNotBlank()),
                 role = doc.getString("role") ?: "customer",
                 salonId = doc.getString("salonId"),
@@ -1795,7 +1847,10 @@ class TrimTimeRepository private constructor(context: Context) {
                     // Existing User: Do NOT overwrite. Read real values from Firestore.
                     val existingName = existingDoc.getString("name") ?: displayName
                     val existingEmail = existingDoc.getString("email") ?: email
-                    val existingPhone = existingDoc.getString("phone") ?: ""
+                    val existingPhone = existingDoc.getString("phoneNumber")?.takeIf { it.isNotBlank() }
+                        ?: existingDoc.getString("phone")?.takeIf { it.isNotBlank() }
+                        ?: sessionPrefs.getString("saved_phone", "")
+                        ?: ""
                     val existingIsPhoneVerified = readBooleanField(existingDoc, "isPhoneVerified", existingPhone.isNotBlank())
                     val existingCancellationCount = maxOf(
                         existingDoc.getLong("cancellationStrikes")?.toInt() ?: 0,
@@ -1832,6 +1887,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         name = existingName,
                         email = existingEmail,
                         phone = existingPhone,
+                        phoneNumber = existingPhone,
                         isPhoneVerified = existingIsPhoneVerified,
                         role = "customer",
                         salonId = existingSalonId,
@@ -1851,6 +1907,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         .putString("saved_uid", uid)
                         .putString("saved_name", existingName)
                         .putString("saved_email", existingEmail)
+                        .putString("saved_phone", existingPhone)
                         .putString("saved_role", "customer")
                         .apply()
                     _currentUserProfile.value = userProfile
@@ -2717,7 +2774,11 @@ class TrimTimeRepository private constructor(context: Context) {
                         doc.getString("defaultCity")?.takeIf { it.isNotBlank() } ?: _appPreferences.value.defaultCity
                     )
 
-                    val existingPhoneVal = doc.getString("phone") ?: user?.phoneNumber ?: ""
+                    val existingPhoneVal = doc.getString("phoneNumber")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("phone")?.takeIf { it.isNotBlank() }
+                        ?: user?.phoneNumber?.takeIf { it.isNotBlank() }
+                        ?: sessionPrefs.getString("saved_phone", "")
+                        ?: ""
                     val existingEmailVal = doc.getString("email") ?: user?.email ?: ""
                     val existingPhoneVerifiedVal = readBooleanField(doc, "isPhoneVerified", existingPhoneVal.isNotBlank())
                     val existingIsBlockedVal = readBooleanField(doc, "isBlocked", false)
@@ -2750,6 +2811,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         name = SecurityValidator.sanitizeName(doc.getString("name") ?: user?.displayName ?: "Customer"),
                         email = existingEmailVal,
                         phone = existingPhoneVal,
+                        phoneNumber = existingPhoneVal,
                         isPhoneVerified = existingPhoneVerifiedVal,
                         role = "customer",
                         salonId = salonIdVal,
@@ -2884,16 +2946,32 @@ class TrimTimeRepository private constructor(context: Context) {
             throw IllegalArgumentException("Please enter a valid customer name (2–60 characters).")
         }
 
-        val rawPhone = customerPhone.ifBlank { currentProfile?.phone ?: "" }
+        val rawPhone = customerPhone.ifBlank { currentProfile?.phoneNumber?.ifBlank { currentProfile.phone } ?: "" }
         val phoneErr = SecurityValidator.validateIndianMobileError(rawPhone)
         if (phoneErr != null) {
             throw IllegalArgumentException(phoneErr)
         }
+        val tenDigitPhone = SecurityValidator.extractTenDigitMobile(rawPhone)
         val resolvedCustomerPhone = SecurityValidator.formatIndianMobile(rawPhone)
 
         if (!SecurityValidator.isValidServicePrice(servicePrice)) {
             throw IllegalArgumentException("Service price must be between ₹10 and ₹25,000.")
         }
+
+        // Persist the validated 10-digit phoneNumber (and updated name) into currentUserProfile & Firestore users/{uid}
+        // so it automatically pre-fills in all future booking dialogs.
+        if (currentProfile != null) {
+            _currentUserProfile.value = currentProfile.copy(
+                name = resolvedCustomerName,
+                phone = tenDigitPhone,
+                phoneNumber = tenDigitPhone,
+                isPhoneVerified = true
+            )
+        }
+        sessionPrefs.edit()
+            .putString("saved_phone", tenDigitPhone)
+            .putString("saved_name", resolvedCustomerName)
+            .apply()
 
         val generatedPin = String.format("%04d", Random.nextInt(1000, 9999))
         val newBookingId = "bk_" + System.currentTimeMillis().toString().takeLast(6) + "_" + Random.nextInt(10, 99)
@@ -2928,9 +3006,18 @@ class TrimTimeRepository private constructor(context: Context) {
         _bookings.value = listOf(newBooking) + _bookings.value
         _customerBookings.value = listOf(newBooking) + _customerBookings.value.filter { it.customerId == resolvedCustomerId }
 
-        // Write directly to Firestore 'bookings' collection
+        // Write directly to Firestore 'bookings' collection and persist phoneNumber in 'users/{uid}'
         firestore?.let { db ->
             try {
+                db.collection("users").document(resolvedCustomerId).set(
+                    mapOf(
+                        "phoneNumber" to tenDigitPhone,
+                        "phone" to tenDigitPhone,
+                        "isPhoneVerified" to true,
+                        "name" to resolvedCustomerName
+                    ),
+                    com.google.firebase.firestore.SetOptions.merge()
+                )
                 db.collection("bookings").document(newBooking.id).set(newBooking.toMap())
                     .addOnSuccessListener {
                         Log.d(tag, "Live booking synced to Firestore: ${newBooking.id} for customerId: $resolvedCustomerId")
@@ -3562,10 +3649,23 @@ class TrimTimeRepository private constructor(context: Context) {
             } else it
         }
 
+        val ownerMap = resolveSalonOwnerMap(salonId)
+        val ownerUid = (ownerMap["ownerId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: (ownerMap["partnerId"] as? String)?.takeIf { it.isNotBlank() }
+            ?: _currentUserProfile.value?.id?.takeIf { it.isNotBlank() }
+
+        if (!ownerUid.isNullOrBlank()) {
+            if (_currentUserProfile.value?.id == ownerUid) {
+                _currentUserProfile.value = _currentUserProfile.value?.copy(imageUrl = photoDataUrl)
+            }
+            firestore?.collection("users")?.document(ownerUid)
+                ?.set(mapOf("imageUrl" to photoDataUrl), com.google.firebase.firestore.SetOptions.merge())
+        }
+
         val updates = mapOf(
             "imageUrl" to photoDataUrl,
             "photoBase64" to photoDataUrl
-        ) + resolveSalonOwnerMap(salonId)
+        ) + ownerMap
         firestore?.collection("salons")?.document(salonId)
             ?.set(updates, com.google.firebase.firestore.SetOptions.merge())
             ?.addOnSuccessListener {
@@ -3597,8 +3697,23 @@ class TrimTimeRepository private constructor(context: Context) {
         val storagePath = "salon_images/${resolvedSalonId}_${System.currentTimeMillis()}.jpg"
 
         try {
-            val storageRef = FirebaseStorage.getInstance().reference.child(storagePath)
-            storageRef.putFile(uri)
+            val storage = FirebaseStorage.getInstance().apply {
+                maxUploadRetryTimeMillis = 10_000L
+                maxOperationRetryTimeMillis = 10_000L
+            }
+            val storageRef = storage.reference.child(storagePath)
+            val compressedBytes = com.example.util.SalonImageUtils.compressUriToJpegBytes(
+                context = appContext,
+                uri = uri,
+                maxWidth = 960,
+                quality = 78
+            )
+            val uploadTask = if (compressedBytes != null && compressedBytes.isNotEmpty()) {
+                storageRef.putBytes(compressedBytes)
+            } else {
+                storageRef.putFile(uri)
+            }
+            uploadTask
                 .addOnSuccessListener {
                     storageRef.downloadUrl
                         .addOnSuccessListener { downloadUri ->
@@ -3622,7 +3737,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         }
                 }
                 .addOnFailureListener { e ->
-                    Log.w(tag, "Firebase Storage putFile failed, falling back to compressed Base64: ${e.message}")
+                    Log.w(tag, "Firebase Storage upload failed, falling back to compressed Base64: ${e.message}")
                     fallbackUploadAsBase64(uri, resolvedSalonId, onSuccess, onError, e.message)
                 }
         } catch (e: Exception) {
@@ -4402,7 +4517,7 @@ class TrimTimeRepository private constructor(context: Context) {
 
         fun getProductionSeedSalons(): List<Salon> = emptyList()
 
-        fun calculateDistanceKm(
+        fun calculateRawDistanceKm(
             lat1: Double,
             lon1: Double,
             lat2: Double,
@@ -4415,7 +4530,16 @@ class TrimTimeRepository private constructor(context: Context) {
                     Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
                     Math.sin(dLon / 2) * Math.sin(dLon / 2)
             val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-            val dist = r * c
+            return r * c
+        }
+
+        fun calculateDistanceKm(
+            lat1: Double,
+            lon1: Double,
+            lat2: Double,
+            lon2: Double
+        ): Double {
+            val dist = calculateRawDistanceKm(lat1, lon1, lat2, lon2)
             return Math.max(0.1, Math.round(dist * 10.0) / 10.0)
         }
     }

@@ -163,20 +163,103 @@ object SalonImageUtils {
     }
 
     /**
+     * Reads an image from a gallery Uri, scales it down to maxWidth, and returns compressed JPEG bytes
+     * suitable for fast Firebase Storage upload (`putBytes`).
+     */
+    fun compressUriToJpegBytes(
+        context: Context,
+        uri: Uri,
+        maxWidth: Int = 960,
+        quality: Int = 78
+    ): ByteArray? {
+        return try {
+            val inputStream = context.contentResolver.openInputStream(uri) ?: return null
+            val originalBitmap = BitmapFactory.decodeStream(inputStream)
+            inputStream.close()
+            if (originalBitmap == null) return null
+
+            val ratio = originalBitmap.width.toFloat() / originalBitmap.height.toFloat().coerceAtLeast(1f)
+            val targetWidth = if (originalBitmap.width > maxWidth) maxWidth else originalBitmap.width
+            val targetHeight = (targetWidth / ratio).toInt().coerceAtLeast(1)
+
+            val scaledBitmap = if (targetWidth != originalBitmap.width) {
+                Bitmap.createScaledBitmap(originalBitmap, targetWidth, targetHeight, true)
+            } else {
+                originalBitmap
+            }
+
+            val outputStream = ByteArrayOutputStream()
+            scaledBitmap.compress(Bitmap.CompressFormat.JPEG, quality, outputStream)
+            outputStream.toByteArray()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Resolves any salon `imageUrl` (whether an `https://` Firebase Storage download URL,
+     * a `content://` URI, or a `data:image/jpeg;base64,...` string) into a model supported natively
+     * by Coil's `AsyncImage` (`String` URL for HTTP/HTTPS/content, or decoded `ByteArray` for Base64).
+     */
+    fun resolveCoilImageModel(rawImageUrl: String?): Any? {
+        if (rawImageUrl.isNullOrBlank()) return null
+        val trimmed = rawImageUrl.trim()
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true) ||
+            trimmed.startsWith("content://", ignoreCase = true) ||
+            trimmed.startsWith("file://", ignoreCase = true) ||
+            trimmed.startsWith("android.resource://", ignoreCase = true)
+        ) {
+            return trimmed
+        }
+        return decodeBase64ToByteArray(trimmed) ?: trimmed
+    }
+
+    /**
+     * Decodes a Base64 string or `data:image/jpeg;base64,...` data URL into a raw ByteArray for Coil AsyncImage.
+     * Returns null if the string is an HTTP/HTTPS/content/file URL.
+     */
+    fun decodeBase64ToByteArray(rawString: String?): ByteArray? {
+        if (rawString.isNullOrBlank()) return null
+        val trimmed = rawString.trim()
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true) ||
+            trimmed.startsWith("content://", ignoreCase = true) ||
+            trimmed.startsWith("file://", ignoreCase = true)
+        ) {
+            return null
+        }
+        return try {
+            val cleanBase64 = if (trimmed.contains(",")) {
+                trimmed.substringAfter(",")
+            } else {
+                trimmed
+            }
+            Base64.decode(cleanBase64, Base64.DEFAULT)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
      * Decodes a Base64 string or `data:image/jpeg;base64,...` data URL into a cached Compose ImageBitmap.
+     * Returns null immediately if rawString is an HTTP/HTTPS URL so Coil AsyncImage can load it directly.
      */
     fun decodeBase64ToImageBitmap(rawString: String?): ImageBitmap? {
         if (rawString.isNullOrBlank()) return null
-        val cacheKey = rawString.hashCode()
+        val trimmed = rawString.trim()
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true) ||
+            trimmed.startsWith("content://", ignoreCase = true) ||
+            trimmed.startsWith("file://", ignoreCase = true)
+        ) {
+            return null
+        }
+        val cacheKey = trimmed.hashCode()
         bitmapCache.get(cacheKey)?.let { return it }
 
         return try {
-            val cleanBase64 = if (rawString.contains(",")) {
-                rawString.substringAfter(",")
-            } else {
-                rawString
-            }
-            val bytes = Base64.decode(cleanBase64, Base64.DEFAULT)
+            val bytes = decodeBase64ToByteArray(trimmed) ?: return null
             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
             val imageBitmap = bitmap.asImageBitmap()
             bitmapCache.put(cacheKey, imageBitmap)

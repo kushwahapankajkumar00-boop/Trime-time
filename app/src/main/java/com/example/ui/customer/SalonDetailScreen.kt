@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -71,6 +73,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.ui.components.TRIMTIME_SUPPORT_PHONE
@@ -125,12 +128,15 @@ fun SalonDetailScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                        .statusBarsPadding()
+                        .padding(top = 12.dp, bottom = 8.dp, start = 8.dp, end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(
                         onClick = onBack,
-                        modifier = Modifier.testTag("salon_detail_back_button")
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("salon_detail_back_button")
                     ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -155,17 +161,44 @@ fun SalonDetailScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    IconButton(
-                        onClick = onToggleFavorite,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("salon_detail_favorite_btn")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        Icon(
-                            imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                            contentDescription = if (isFavorite) "Remove from Favorites" else "Add to Favorites",
-                            tint = if (isFavorite) Color(0xFFF43F5E) else Color(0xFFCBD5E1)
-                        )
+                        IconButton(
+                            onClick = onToggleFavorite,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("salon_detail_favorite_btn")
+                        ) {
+                            Icon(
+                                imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                contentDescription = if (isFavorite) "Remove from Favorites" else "Add to Favorites",
+                                tint = if (isFavorite) Color(0xFFF43F5E) else Color(0xFFCBD5E1)
+                            )
+                        }
+                        IconButton(
+                            onClick = onBack,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("salon_detail_close_btn")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF1E293B))
+                                    .border(1.dp, Color(0xFF334155), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close Salon Details",
+                                    tint = Color(0xFFCBD5E1),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -393,11 +426,15 @@ fun SalonHeaderBanner(
     salon: Salon,
     onRateClick: () -> Unit = {}
 ) {
-    val rawPhotoData = salon.imageUrl.takeIf { it.isNotBlank() } ?: salon.resolvedPhotoData.trim()
+    val context = LocalContext.current
+    val rawPhotoData = salon.imageUrl.trim().takeIf { it.isNotEmpty() } ?: salon.resolvedPhotoData.trim()
+    val coilImageModel = remember(rawPhotoData) {
+        SalonImageUtils.resolveCoilImageModel(rawPhotoData)
+    }
     val salonCoverBitmap = remember(rawPhotoData) {
         SalonImageUtils.decodeBase64ToImageBitmap(rawPhotoData)
     }
-    val hasCustomPhoto = salonCoverBitmap != null || rawPhotoData.isNotBlank()
+    val hasCustomPhoto = coilImageModel != null || salonCoverBitmap != null || rawPhotoData.isNotBlank()
     val highContrastShadow = Shadow(
         color = Color.Black,
         offset = Offset(0f, 2f),
@@ -415,23 +452,26 @@ fun SalonHeaderBanner(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 124.dp)
+                    .heightIn(min = 148.dp)
                     .background(
                         Brush.linearGradient(
                             listOf(Color(0xFF1E1B4B), Color(0xFF451A03), Color(0xFF0F172A))
                         )
                     )
             ) {
-                if (salonCoverBitmap != null) {
-                    Image(
-                        bitmap = salonCoverBitmap,
+                if (coilImageModel != null) {
+                    AsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(coilImageModel)
+                            .crossfade(true)
+                            .build(),
                         contentDescription = "${salon.name} Cover Photo",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.matchParentSize()
                     )
-                } else if (rawPhotoData.isNotBlank()) {
-                    AsyncImage(
-                        model = rawPhotoData,
+                } else if (salonCoverBitmap != null) {
+                    Image(
+                        bitmap = salonCoverBitmap,
                         contentDescription = "${salon.name} Cover Photo",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.matchParentSize()
@@ -439,16 +479,16 @@ fun SalonHeaderBanner(
                 }
 
                 if (hasCustomPhoto) {
-                    // Strong multi-stop dark vertical gradient scrim so text & badges always have crisp contrast
+                    // Balanced vertical gradient scrim so the salon cover photo is clearly visible while keeping text crisp
                     Box(
                         modifier = Modifier
                             .matchParentSize()
                             .background(
                                 Brush.verticalGradient(
                                     colorStops = arrayOf(
-                                        0.0f to Color.Black.copy(alpha = 0.55f),
-                                        0.45f to Color(0xCC090D16),
-                                        1.0f to Color(0xF5090D16)
+                                        0.0f to Color.Black.copy(alpha = 0.25f),
+                                        0.50f to Color.Black.copy(alpha = 0.45f),
+                                        1.0f to Color(0xD9090D16)
                                     )
                                 )
                             )

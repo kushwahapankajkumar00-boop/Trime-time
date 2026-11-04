@@ -562,7 +562,7 @@ fun TrimTimeApp(
         BookingBottomSheet(
             salon = liveBookingSalon,
             service = serviceToBook!!,
-            userProfile = currentUserProfile ?: com.example.model.UserProfile(name = "Customer", phone = "+91 98765 43210"),
+            userProfile = currentUserProfile ?: com.example.model.UserProfile(name = "Customer", phone = "", phoneNumber = ""),
             selectedSlot = selectedTimeSlot,
             hasActiveBooking = hasActivePendingBooking,
             isSuspended = isUserSuspended,

@@ -47,6 +47,7 @@ data class UserProfile(
     val name: String = "",
     val email: String = "",
     val phone: String = "",
+    val phoneNumber: String = phone,
     val isPhoneVerified: Boolean = false,
     val role: String = "customer", // "customer", "partner", or "admin"
     val isAdmin: Boolean = false,
@@ -76,10 +77,12 @@ data class UserProfile(
         get() = isBlocked || isSuspended || effectiveCancellationStrikes >= 3
 
     fun toMap(): Map<String, Any?> = buildMap {
+        val resolvedPhone = phoneNumber.ifBlank { phone }
         put("id", id)
         put("name", name)
         put("email", email)
-        put("phone", phone)
+        put("phone", resolvedPhone)
+        put("phoneNumber", resolvedPhone)
         put("isPhoneVerified", isPhoneVerified)
         put("role", role)
         if (isAdmin) {
@@ -189,7 +192,7 @@ data class Salon(
         get() = !isBusy
 
     val resolvedPhotoData: String
-        get() = photoBase64.ifBlank { imageUrl }
+        get() = imageUrl.ifBlank { photoBase64 }
 
     val hasLocationSetup: Boolean
         get() = (shopAddress.isNotBlank() || location.isNotBlank()) &&

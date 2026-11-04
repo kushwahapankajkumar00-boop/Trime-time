@@ -12,16 +12,20 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Payments
@@ -47,8 +51,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,8 +84,25 @@ fun BookingBottomSheet(
     onConfirm: (name: String, phone: String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var customerName by remember { mutableStateOf(userProfile.name) }
-    var customerPhone by remember { mutableStateOf(userProfile.phone) }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    val initialTenDigitPhone = remember(userProfile.phone, userProfile.phoneNumber) {
+        val raw = userProfile.phoneNumber.ifBlank { userProfile.phone }
+        val digits = raw.filter { it.isDigit() }
+        val ten = if (digits.length > 10 && digits.startsWith("91")) {
+            digits.drop(2).take(10)
+        } else {
+            digits.takeLast(10)
+        }
+        if (ten.length == 10 && ten != "9876543210") ten else ""
+    }
+
+    var customerName by remember(userProfile.name) { mutableStateOf(userProfile.name) }
+    var customerPhone by remember(initialTenDigitPhone) { mutableStateOf(initialTenDigitPhone) }
+    val cleanPhoneDigits = customerPhone.filter { it.isDigit() }
+    val isValidTenDigitPhone = cleanPhoneDigits.length == 10 &&
+        cleanPhoneDigits.firstOrNull() in listOf('6', '7', '8', '9')
 
     val isBusy = salon.isBusy
     val availableSlots = if (isBusy) {
@@ -105,7 +129,9 @@ fun BookingBottomSheet(
         Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(8.dp)
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(top = 24.dp, bottom = 16.dp, start = 8.dp, end = 8.dp)
                 .testTag("booking_sheet_modal"),
             shape = RoundedCornerShape(24.dp),
             colors = CardDefaults.cardColors(containerColor = DarkSurface),
@@ -117,9 +143,11 @@ fun BookingBottomSheet(
                     .verticalScroll(rememberScrollState())
                     .padding(20.dp)
             ) {
-                // Header with Close
+                // Header with Close (safe top padding & status-bar-aware container)
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -147,15 +175,34 @@ fun BookingBottomSheet(
                         )
                     }
 
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.testTag("close_booking_sheet")
+                    Box(
+                        modifier = Modifier
+                            .statusBarsPadding()
+                            .padding(top = 4.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
-                            tint = Color(0xFF94A3B8)
-                        )
+                        IconButton(
+                            onClick = onDismiss,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("close_booking_sheet")
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF1E293B))
+                                    .border(1.dp, Color(0xFF334155), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close",
+                                    tint = Color(0xFFCBD5E1),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -289,7 +336,7 @@ fun BookingBottomSheet(
 
                 // Customer Info inputs
                 Text(
-                    text = "YOUR CONTACT INFO",
+                    text = "YOUR CONTACT INFO (10-DIGIT MOBILE MANDATORY *)",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF94A3B8),
@@ -307,7 +354,16 @@ fun BookingBottomSheet(
                     leadingIcon = {
                         Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = Color(0xFF94A3B8))
                     },
-                    placeholder = { Text("Your Name", color = Color(0xFF64748B)) },
+                    placeholder = { Text("Your Name *", color = Color(0xFF64748B)) },
+                    keyboardOptions = KeyboardOptions(
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            keyboardController?.hide()
+                            focusManager.clearFocus()
+                        }
+                    ),
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = AmberPrimary,
@@ -324,25 +380,87 @@ fun BookingBottomSheet(
 
                 OutlinedTextField(
                     value = customerPhone,
-                    onValueChange = { customerPhone = it },
+                    onValueChange = { input ->
+                        val digits = input.filter { it.isDigit() }
+                        val normalized = if (digits.length > 10 && digits.startsWith("91")) {
+                            digits.drop(2).take(10)
+                        } else {
+                            digits.take(10)
+                        }
+                        val wasUnder10 = customerPhone.filter { it.isDigit() }.length < 10
+                        customerPhone = normalized
+                        if (normalized.length == 10 && wasUnder10) {
+                            keyboardController?.hide()
+                            focusManager.clearFocus()
+                        }
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("customer_phone_input"),
                     leadingIcon = {
-                        Icon(imageVector = Icons.Default.Phone, contentDescription = null, tint = Color(0xFF94A3B8))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(start = 12.dp, end = 4.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.Phone, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("+91", color = AmberPrimary, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                        }
                     },
-                    placeholder = { Text("Phone Number", color = Color(0xFF64748B)) },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    trailingIcon = {
+                        if (isValidTenDigitPhone) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "Valid 10-digit mobile",
+                                tint = GreenSuccess,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    },
+                    placeholder = { Text("10-Digit Mobile Number *", color = Color(0xFF64748B)) },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Number,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onDone = {
+                            keyboardController?.hide()
+                            focusManager.clearFocus()
+                        }
+                    ),
+                    isError = cleanPhoneDigits.isNotEmpty() && !isValidTenDigitPhone,
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = AmberPrimary,
-                        unfocusedBorderColor = Color(0xFF334155),
+                        focusedBorderColor = if (isValidTenDigitPhone) GreenSuccess else AmberPrimary,
+                        unfocusedBorderColor = if (isValidTenDigitPhone) GreenSuccess.copy(alpha = 0.6f) else Color(0xFF334155),
+                        errorBorderColor = RedAlert,
                         focusedContainerColor = DarkCardSurface,
                         unfocusedContainerColor = DarkCardSurface,
+                        errorContainerColor = DarkCardSurface,
                         focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
+                        unfocusedTextColor = Color.White,
+                        errorTextColor = Color.White
                     ),
                     shape = RoundedCornerShape(10.dp)
+                )
+
+                val phoneHelperText = when {
+                    cleanPhoneDigits.isEmpty() -> "* Mandatory: Enter your 10-digit Indian mobile number"
+                    cleanPhoneDigits.first() !in listOf('6', '7', '8', '9') -> "Invalid number: Indian mobile numbers must start with 6, 7, 8, or 9"
+                    cleanPhoneDigits.length < 10 -> "Please enter all 10 digits (${cleanPhoneDigits.length}/10)"
+                    else -> "✓ 10-digit mobile verified & will be saved for future bookings"
+                }
+                val phoneHelperColor = when {
+                    isValidTenDigitPhone -> GreenSuccess
+                    cleanPhoneDigits.isEmpty() -> Color(0xFF94A3B8)
+                    else -> RedAlert
+                }
+                Text(
+                    text = phoneHelperText,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = phoneHelperColor,
+                    modifier = Modifier.padding(top = 4.dp, start = 4.dp)
                 )
 
                 Spacer(modifier = Modifier.height(14.dp))
@@ -466,11 +584,13 @@ fun BookingBottomSheet(
                 }
 
                 // Confirm / Book Button (Flexible minHeight = 52.dp so second line is never clipped)
-                val isButtonEnabled = !hasActiveBooking && !isSuspended && customerName.isNotBlank() && customerPhone.isNotBlank()
+                val isButtonEnabled = !hasActiveBooking && !isSuspended && customerName.trim().length >= 2 && isValidTenDigitPhone
 
                 Button(
                     onClick = {
-                        onConfirm(customerName, customerPhone)
+                        keyboardController?.hide()
+                        focusManager.clearFocus()
+                        onConfirm(customerName.trim(), cleanPhoneDigits)
                     },
                     enabled = isButtonEnabled,
                     modifier = Modifier

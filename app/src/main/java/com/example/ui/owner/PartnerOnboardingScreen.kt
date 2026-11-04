@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -63,6 +64,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.google.firebase.storage.FirebaseStorage
 import com.example.util.SalonImageUtils
 import androidx.compose.material3.Text
@@ -80,8 +82,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -133,6 +138,8 @@ fun PartnerOnboardingScreen(
     }
 
     val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
 
     // 1. Salon & Owner Details
     var salonName by remember { mutableStateOf("") }
@@ -141,14 +148,15 @@ fun PartnerOnboardingScreen(
             userProfile?.name?.takeIf { it.isNotBlank() && it != "Customer" } ?: ""
         )
     }
-    val initialProfileTenDigits = remember(userProfile?.phone) {
-        val digits = userProfile?.phone?.filter { it.isDigit() }.orEmpty()
+    val initialProfileTenDigits = remember(userProfile?.phone, userProfile?.phoneNumber) {
+        val raw = userProfile?.phoneNumber?.takeIf { it.isNotBlank() } ?: userProfile?.phone.orEmpty()
+        val digits = raw.filter { it.isDigit() }
         if (digits.length > 10 && digits.startsWith("91")) digits.drop(2).take(10) else digits.takeLast(10)
     }
     var businessPhone by remember(initialProfileTenDigits) {
         mutableStateOf(initialProfileTenDigits)
     }
-    val isBusinessPhoneVerified = businessPhone.length == 10
+    val isBusinessPhoneVerified = businessPhone.length == 10 && businessPhone.firstOrNull() in listOf('6', '7', '8', '9')
 
     // 2. Full Shop Address, City/Area, Pincode & Landmark
     var shopAddress by remember { mutableStateOf("") }
@@ -201,7 +209,7 @@ fun PartnerOnboardingScreen(
     var newServiceCategory by remember { mutableStateOf("Haircut") }
 
     var isAcSalon by remember { mutableStateOf(false) }
-    var uploadedImageUrl by remember { mutableStateOf("") }
+    var uploadedImageUrl by remember { mutableStateOf(userProfile?.imageUrl.orEmpty()) }
     var isUploadingImage by remember { mutableStateOf(false) }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
@@ -209,34 +217,49 @@ fun PartnerOnboardingScreen(
     ) { uri ->
         if (uri != null) {
             isUploadingImage = true
-            val storageRef = FirebaseStorage.getInstance().reference
-                .child("salon_images/onboarding_${System.currentTimeMillis()}.jpg")
-            
-            storageRef.putFile(uri)
-                .addOnSuccessListener {
-                    storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
-                        uploadedImageUrl = downloadUri.toString()
-                        isUploadingImage = false
-                        Toast.makeText(context, "Salon photo uploaded successfully!", Toast.LENGTH_SHORT).show()
-                    }.addOnFailureListener {
-                        val base64 = SalonImageUtils.encodeUriToBase64Jpeg(context, uri)
-                        if (!base64.isNullOrBlank()) {
-                            uploadedImageUrl = base64
-                            Toast.makeText(context, "Salon photo attached!", Toast.LENGTH_SHORT).show()
+            val base64Fallback = SalonImageUtils.encodeUriToBase64Jpeg(context, uri, maxWidth = 800, quality = 72)
+            if (!base64Fallback.isNullOrBlank()) {
+                uploadedImageUrl = base64Fallback
+            }
+
+            try {
+                val storage = FirebaseStorage.getInstance().apply {
+                    maxUploadRetryTimeMillis = 10_000L
+                    maxOperationRetryTimeMillis = 10_000L
+                }
+                val storageRef = storage.reference
+                    .child("salon_images/onboarding_${System.currentTimeMillis()}.jpg")
+                val compressedBytes = SalonImageUtils.compressUriToJpegBytes(context, uri, maxWidth = 960, quality = 78)
+                val uploadTask = if (compressedBytes != null && compressedBytes.isNotEmpty()) {
+                    storageRef.putBytes(compressedBytes)
+                } else {
+                    storageRef.putFile(uri)
+                }
+
+                uploadTask
+                    .addOnSuccessListener {
+                        storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
+                            uploadedImageUrl = downloadUri.toString()
+                            isUploadingImage = false
+                            Toast.makeText(context, "Salon photo uploaded to Cloud Storage!", Toast.LENGTH_SHORT).show()
+                        }.addOnFailureListener {
+                            isUploadingImage = false
+                            if (!base64Fallback.isNullOrBlank()) {
+                                Toast.makeText(context, "Salon photo attached!", Toast.LENGTH_SHORT).show()
+                            }
                         }
+                    }
+                    .addOnFailureListener { ex ->
                         isUploadingImage = false
+                        if (!base64Fallback.isNullOrBlank()) {
+                            Toast.makeText(context, "Salon photo attached!", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Image upload failed: ${ex.message}", Toast.LENGTH_LONG).show()
+                        }
                     }
-                }
-                .addOnFailureListener { ex ->
-                    val base64 = SalonImageUtils.encodeUriToBase64Jpeg(context, uri)
-                    if (!base64.isNullOrBlank()) {
-                        uploadedImageUrl = base64
-                        Toast.makeText(context, "Photo attached locally (cloud storage offline)", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, "Image upload failed: ${ex.message}", Toast.LENGTH_LONG).show()
-                    }
-                    isUploadingImage = false
-                }
+            } catch (e: Exception) {
+                isUploadingImage = false
+            }
         }
     }
 
@@ -487,9 +510,19 @@ fun PartnerOnboardingScreen(
                         OutlinedTextField(
                             value = businessPhone,
                             onValueChange = { input ->
-                                val digits = input.filter { it.isDigit() }.take(10)
-                                businessPhone = digits
+                                val digits = input.filter { it.isDigit() }
+                                val normalized = if (digits.length > 10 && digits.startsWith("91")) {
+                                    digits.drop(2).take(10)
+                                } else {
+                                    digits.take(10)
+                                }
+                                val wasUnder10 = businessPhone.length < 10
+                                businessPhone = normalized
                                 validationError = null
+                                if (normalized.length == 10 && wasUnder10) {
+                                    keyboardController?.hide()
+                                    focusManager.clearFocus()
+                                }
                             },
                             label = { Text("10-Digit Business Phone Number *") },
                             placeholder = { Text("9876543210", color = Color(0xFF64748B)) },
@@ -509,7 +542,16 @@ fun PartnerOnboardingScreen(
                                 }
                             },
                             prefix = { Text("+91 ", color = AmberPrimary, fontWeight = FontWeight.Bold) },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Number,
+                                imeAction = ImeAction.Done
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onDone = {
+                                    keyboardController?.hide()
+                                    focusManager.clearFocus()
+                                }
+                            ),
                             singleLine = true,
                             colors = textFieldColors,
                             shape = RoundedCornerShape(12.dp),
@@ -563,14 +605,20 @@ fun PartnerOnboardingScreen(
                                 }
 
                                 if (uploadedImageUrl.isNotBlank()) {
+                                    val coilModel = remember(uploadedImageUrl) {
+                                        SalonImageUtils.resolveCoilImageModel(uploadedImageUrl)
+                                    }
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(130.dp)
+                                            .height(140.dp)
                                             .clip(RoundedCornerShape(8.dp))
                                     ) {
                                         AsyncImage(
-                                            model = uploadedImageUrl,
+                                            model = ImageRequest.Builder(context)
+                                                .data(coilModel)
+                                                .crossfade(true)
+                                                .build(),
                                             contentDescription = "Salon Photo Preview",
                                             modifier = Modifier.fillMaxSize(),
                                             contentScale = androidx.compose.ui.layout.ContentScale.Crop

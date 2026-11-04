@@ -84,11 +84,15 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
+import android.widget.Toast
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -125,6 +129,8 @@ import com.example.ui.theme.GreenSuccess
 import com.example.ui.theme.RedAlert
 import com.example.util.SalonImageUtils
 import com.example.util.SecurityValidator
+import com.example.viewmodel.LiveQueueViewModel
+import com.example.viewmodel.triggerNewBookingSoundAndVibration
 import androidx.compose.material.icons.filled.SupportAgent
 
 enum class PartnerTab(val title: String) {
@@ -209,6 +215,38 @@ fun PartnerDashboardScreen(
     }
     val todayEarnings = strictlyCompletedBookings.sumOf { it.servicePrice }
     val pendingCashToCollect = pendingBookings.sumOf { it.servicePrice }
+
+    val context = LocalContext.current
+    val liveQueueViewModel: LiveQueueViewModel = viewModel()
+    val newIncomingBooking by liveQueueViewModel.newIncomingBooking.collectAsState()
+
+    // Attach real-time Firestore listener for the Partner's salon (ignores initial load & old bookings)
+    LaunchedEffect(currentSalon?.id, partnerProfile?.id) {
+        liveQueueViewModel.observeSalonLiveQueue(
+            salonId = currentSalon?.id,
+            partnerUid = partnerProfile?.id
+        )
+    }
+
+    // Also keep LiveQueueViewModel synced with the live salonBookings list (skips initial load)
+    LaunchedEffect(currentSalon?.id, salonBookings) {
+        liveQueueViewModel.syncLiveQueueBookings(
+            salonId = currentSalon?.id,
+            bookings = salonBookings
+        )
+    }
+
+    // React to a new incoming "Pending" booking with distinct vibration (500ms-200ms-500ms) & notification ringtone
+    LaunchedEffect(newIncomingBooking?.id) {
+        val incoming = newIncomingBooking ?: return@LaunchedEffect
+        triggerNewBookingSoundAndVibration(context)
+        Toast.makeText(
+            context,
+            "🔔 New Booking: ${incoming.customerName} (${incoming.service})",
+            Toast.LENGTH_SHORT
+        ).show()
+        liveQueueViewModel.consumeNewBookingAlert(incoming.id)
+    }
 
     // Active Tab in Partner Dashboard
     var currentTab by remember { mutableStateOf(PartnerTab.LIVE_QUEUE) }
@@ -1307,10 +1345,16 @@ fun LiveQueueBookingCard(
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.Top
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Row(
+                        modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
@@ -1324,31 +1368,38 @@ fun LiveQueueBookingCard(
                             text = booking.customerName,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(if (isAccepted) Color(0xFF064E3B) else Color(0xFF3B2306))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = if (isAccepted) "✓ ACCEPTED" else "NEW",
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = if (isAccepted) GreenSuccess else AmberPrimary
+                                color = if (isAccepted) GreenSuccess else AmberPrimary,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
                     Row(
+                        modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.padding(top = 2.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         if (booking.customerPhone.isNotBlank()) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.weight(1f, fill = false)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Phone,
@@ -1359,7 +1410,10 @@ fun LiveQueueBookingCard(
                                 Text(
                                     text = displayPhone,
                                     fontSize = 11.sp,
-                                    color = Color(0xFF94A3B8)
+                                    color = Color(0xFF94A3B8),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -1368,13 +1422,16 @@ fun LiveQueueBookingCard(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
                                 .background(Color(0xFF1E293B))
-                                .padding(horizontal = 6.dp, vertical = 1.dp)
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = "PIN: ••••",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFFA5B4FC)
+                                color = Color(0xFFA5B4FC),
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -1389,13 +1446,16 @@ fun LiveQueueBookingCard(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF451A03))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text(
                             text = "⏱ ${booking.timeSlot}",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = AmberPrimary
+                            color = AmberPrimary,
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
 
@@ -1423,7 +1483,9 @@ fun LiveQueueBookingCard(
                                 text = "Call Customer",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFFA7F3D0)
+                                color = Color(0xFFA7F3D0),
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -1439,6 +1501,9 @@ fun LiveQueueBookingCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
@@ -1452,7 +1517,9 @@ fun LiveQueueBookingCard(
                         text = booking.service,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFFF1F5F9)
+                        color = Color(0xFFF1F5F9),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -1460,7 +1527,9 @@ fun LiveQueueBookingCard(
                     text = "₹${booking.servicePrice}",
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Black,
-                    color = GreenSuccess
+                    color = GreenSuccess,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
 
@@ -2432,6 +2501,10 @@ fun PartnerShopProfileTabContent(
         } else null
     }
 
+    val coilShopModel = remember(localPhotoDataUrl) {
+        SalonImageUtils.resolveCoilImageModel(localPhotoDataUrl)
+    }
+
     // Real Gallery Image Picker (`ActivityResultContracts.PickVisualMedia()`) -> Firebase Storage / Base64 JPEG in Firestore
     val galleryImageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -2439,38 +2512,52 @@ fun PartnerShopProfileTabContent(
         if (uri != null && salon != null) {
             isUploadingPhoto = true
             uploadStatusMessage = "Uploading photo to cloud storage..."
-            val storageRef = FirebaseStorage.getInstance().reference
-                .child("salon_images/salon_${salon.id}_${System.currentTimeMillis()}.jpg")
-            
-            storageRef.putFile(uri)
-                .addOnSuccessListener {
-                    storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
-                        val downloadUrl = downloadUri.toString()
-                        localPhotoDataUrl = downloadUrl
-                        onSaveShopPhoto(salon.id, downloadUrl)
-                        isUploadingPhoto = false
-                        uploadStatusMessage = "Shop photo uploaded to Cloud Storage & live!"
-                    }.addOnFailureListener {
-                        val base64Jpeg = SalonImageUtils.encodeUriToBase64Jpeg(context, uri, maxWidth = 600, quality = 60)
-                        if (!base64Jpeg.isNullOrBlank()) {
-                            localPhotoDataUrl = base64Jpeg
-                            onSaveShopPhoto(salon.id, base64Jpeg)
-                            uploadStatusMessage = "Shop photo attached & saved!"
+            val base64Jpeg = SalonImageUtils.encodeUriToBase64Jpeg(context, uri, maxWidth = 800, quality = 70)
+            if (!base64Jpeg.isNullOrBlank()) {
+                localPhotoDataUrl = base64Jpeg
+                onSaveShopPhoto(salon.id, base64Jpeg)
+            }
+
+            try {
+                val storage = FirebaseStorage.getInstance().apply {
+                    maxUploadRetryTimeMillis = 10_000L
+                    maxOperationRetryTimeMillis = 10_000L
+                }
+                val storageRef = storage.reference
+                    .child("salon_images/salon_${salon.id}_${System.currentTimeMillis()}.jpg")
+                val compressedBytes = SalonImageUtils.compressUriToJpegBytes(context, uri, maxWidth = 960, quality = 78)
+                val uploadTask = if (compressedBytes != null && compressedBytes.isNotEmpty()) {
+                    storageRef.putBytes(compressedBytes)
+                } else {
+                    storageRef.putFile(uri)
+                }
+
+                uploadTask
+                    .addOnSuccessListener {
+                        storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
+                            val downloadUrl = downloadUri.toString()
+                            localPhotoDataUrl = downloadUrl
+                            onSaveShopPhoto(salon.id, downloadUrl)
+                            isUploadingPhoto = false
+                            uploadStatusMessage = "Shop photo uploaded to Cloud Storage & live!"
+                        }.addOnFailureListener {
+                            isUploadingPhoto = false
+                            if (!base64Jpeg.isNullOrBlank()) {
+                                uploadStatusMessage = "Shop photo attached & saved!"
+                            }
                         }
+                    }
+                    .addOnFailureListener {
                         isUploadingPhoto = false
+                        if (!base64Jpeg.isNullOrBlank()) {
+                            uploadStatusMessage = "Shop photo saved & live on Customer Card!"
+                        } else {
+                            uploadStatusMessage = "Could not process photo: ${it.message}"
+                        }
                     }
-                }
-                .addOnFailureListener {
-                    val base64Jpeg = SalonImageUtils.encodeUriToBase64Jpeg(context, uri, maxWidth = 600, quality = 60)
-                    if (!base64Jpeg.isNullOrBlank()) {
-                        localPhotoDataUrl = base64Jpeg
-                        onSaveShopPhoto(salon.id, base64Jpeg)
-                        uploadStatusMessage = "Photo saved locally (Cloud Storage offline)!"
-                    } else {
-                        uploadStatusMessage = "Could not process photo: ${it.message}"
-                    }
-                    isUploadingPhoto = false
-                }
+            } catch (e: Exception) {
+                isUploadingPhoto = false
+            }
         }
     }
 
@@ -2522,9 +2609,9 @@ fun PartnerShopProfileTabContent(
                         }
 
                         Text(
-                            text = if (decodedShopBitmap != null) "Live on Customer Card" else "No Photo Yet",
+                            text = if (localPhotoDataUrl.isNotBlank()) "Live on Customer Card" else "No Photo Yet",
                             fontSize = 10.sp,
-                            color = if (decodedShopBitmap != null) GreenSuccess else Color(0xFF94A3B8),
+                            color = if (localPhotoDataUrl.isNotBlank()) GreenSuccess else Color(0xFF94A3B8),
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -2538,7 +2625,7 @@ fun PartnerShopProfileTabContent(
                             .background(Color(0xFF0F172A))
                             .border(
                                 width = 1.dp,
-                                color = if (decodedShopBitmap != null) AmberPrimary else Color(0xFF334155),
+                                color = if (localPhotoDataUrl.isNotBlank()) AmberPrimary else Color(0xFF334155),
                                 shape = RoundedCornerShape(14.dp)
                             )
                             .clickable {
@@ -2568,30 +2655,22 @@ fun PartnerShopProfileTabContent(
                                 )
                             }
                         } else if (localPhotoDataUrl.isNotBlank()) {
-                            if (decodedShopBitmap != null) {
-                                Image(
-                                    bitmap = decodedShopBitmap,
-                                    contentDescription = "Uploaded Shop Cover Photo",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            } else {
-                                AsyncImage(
-                                    model = localPhotoDataUrl,
-                                    contentDescription = "Uploaded Shop Cover Photo",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            }
-                            // Strong dark vertical gradient scrim (0.65f to 0.85f) for crisp white text contrast
+                            AsyncImage(
+                                model = coilShopModel ?: localPhotoDataUrl,
+                                contentDescription = "Uploaded Shop Cover Photo",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            // Subtle gradient scrim so image is bright and text remains readable
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .background(
                                         Brush.verticalGradient(
                                             listOf(
-                                                Color.Black.copy(alpha = 0.65f),
-                                                Color.Black.copy(alpha = 0.85f)
+                                                Color.Black.copy(alpha = 0.35f),
+                                                Color.Transparent,
+                                                Color.Black.copy(alpha = 0.72f)
                                             )
                                         )
                                     )

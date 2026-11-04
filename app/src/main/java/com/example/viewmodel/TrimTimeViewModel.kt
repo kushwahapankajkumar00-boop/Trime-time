@@ -157,42 +157,63 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val selectedCategory: StateFlow<String> = _selectedCategory.asStateFlow()
 
     // Filtered Salons for Customer View: dynamically calculates distance from live (userLatitude, userLongitude),
-    // prioritizes real Firestore-registered salons at the top, and hides Demo Salons unless showDemoSalons is enabled!
+    // sorts nearest salons at the very top, and when searching places exact salon name matches first followed by recommended nearby salons!
     val filteredSalons: StateFlow<List<Salon>> = combine(
         combine(allSalons, _searchQuery, _selectedCategory) { s, q, c -> Triple(s, q, c) },
         combine(userLatitude, userLongitude, appPreferences) { lat, lng, prefs -> Triple(lat, lng, prefs) }
     ) { (salons, query, category), (uLat, uLng, prefs) ->
         val recalculated = repository.recalculateAndSortSalons(salons, uLat, uLng)
         val trimmedQuery = query.trim()
-        recalculated.filter { salon ->
+
+        val eligibleSalons = recalculated.filter { salon ->
             val includeByDemoSetting = prefs.showDemoSalons || !repository.isDemoSalon(salon.id)
-
-            val matchesQuery = trimmedQuery.isBlank() ||
-                    salon.name.contains(trimmedQuery, ignoreCase = true) ||
-                    salon.location.contains(trimmedQuery, ignoreCase = true) ||
-                    salon.shopAddress.contains(trimmedQuery, ignoreCase = true) ||
-                    salon.landmark.contains(trimmedQuery, ignoreCase = true) ||
-                    salon.pincode.contains(trimmedQuery, ignoreCase = true) ||
-                    salon.adminCategoryTag.contains(trimmedQuery, ignoreCase = true) ||
-                    salon.salonCategory.contains(trimmedQuery, ignoreCase = true) ||
-                    salon.shopCategory.contains(trimmedQuery, ignoreCase = true) ||
-                    salon.tagline.contains(trimmedQuery, ignoreCase = true) ||
-                    ((trimmedQuery.equals("ac", ignoreCase = true) || trimmedQuery.equals("a/c", ignoreCase = true)) && salon.isAcSalon) ||
-                    salon.services.any {
-                        it.name.contains(trimmedQuery, ignoreCase = true) ||
-                            it.serviceName.contains(trimmedQuery, ignoreCase = true) ||
-                            it.category.contains(trimmedQuery, ignoreCase = true)
-                    }
-
             val isNotRejectedOrSuspended = !salon.isSuspended &&
-                    !salon.approvalStatus.equals("REJECTED", ignoreCase = true)
-
+                !salon.approvalStatus.equals("REJECTED", ignoreCase = true)
             val matchesCategory = category == "All" ||
-                    salon.adminCategoryTag.equals(category, ignoreCase = true) ||
-                    salon.salonCategory.equals(category, ignoreCase = true) ||
-                    salon.services.any { it.category.equals(category, ignoreCase = true) }
+                salon.adminCategoryTag.equals(category, ignoreCase = true) ||
+                salon.salonCategory.equals(category, ignoreCase = true) ||
+                salon.services.any { it.category.equals(category, ignoreCase = true) }
 
-            includeByDemoSetting && isNotRejectedOrSuspended && matchesQuery && matchesCategory
+            includeByDemoSetting && isNotRejectedOrSuspended && matchesCategory
+        }
+
+        if (trimmedQuery.isBlank()) {
+            eligibleSalons
+        } else {
+            eligibleSalons.sortedWith(
+                compareBy<Salon> { salon ->
+                    val cleanName = salon.name.trim()
+                    when {
+                        cleanName.equals(trimmedQuery, ignoreCase = true) -> 0
+                        cleanName.startsWith(trimmedQuery, ignoreCase = true) -> 1
+                        cleanName.contains(trimmedQuery, ignoreCase = true) -> 2
+                        salon.location.contains(trimmedQuery, ignoreCase = true) ||
+                            salon.shopAddress.contains(trimmedQuery, ignoreCase = true) ||
+                            salon.landmark.contains(trimmedQuery, ignoreCase = true) ||
+                            salon.pincode.contains(trimmedQuery, ignoreCase = true) ||
+                            salon.adminCategoryTag.contains(trimmedQuery, ignoreCase = true) ||
+                            salon.salonCategory.contains(trimmedQuery, ignoreCase = true) ||
+                            salon.shopCategory.contains(trimmedQuery, ignoreCase = true) ||
+                            salon.tagline.contains(trimmedQuery, ignoreCase = true) ||
+                            ((trimmedQuery.equals("ac", ignoreCase = true) || trimmedQuery.equals("a/c", ignoreCase = true)) && salon.isAcSalon) ||
+                            salon.services.any {
+                                it.name.contains(trimmedQuery, ignoreCase = true) ||
+                                    it.serviceName.contains(trimmedQuery, ignoreCase = true) ||
+                                    it.category.contains(trimmedQuery, ignoreCase = true)
+                            } -> 3
+                        else -> 4 // Recommended available & nearby salons
+                    }
+                }.thenBy { salon ->
+                    val sLat = salon.latitude
+                    val sLng = salon.longitude
+                    if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
+                        com.example.data.TrimTimeRepository.calculateRawDistanceKm(uLat, uLng, sLat, sLng)
+                    } else {
+                        val parsed = salon.distance.replace("km", "", ignoreCase = true).trim().toDoubleOrNull()
+                        if (parsed != null) parsed + 5000.0 else 99999.0
+                    }
+                }
+            )
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 

@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
@@ -92,15 +93,22 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.heightIn
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.example.model.Booking
 import com.example.model.Salon
 import com.example.ui.components.CustomerSalonsOsmMapSection
@@ -271,7 +279,7 @@ fun CustomerHomeScreen(
     }
 
     // Filter salons according to selected Smart Filter / My Favorites tab, dynamically recalculate live Haversine distance
-    // from (userLatitude, userLongitude), and sort by shortest distance first!
+    // from (userLatitude, userLongitude), and sort by shortest geographic distance first (nearest salons at the very top)!
     val displayedSalons = remember(salons, selectedFilter, showFavoritesTab, favoriteSalonIds, userLatitude, userLongitude) {
         val withLiveDistances = salons.map { salon ->
             val sLat = salon.latitude
@@ -282,15 +290,18 @@ fun CustomerHomeScreen(
             } else {
                 salon
             }
-        }.sortedBy { salon ->
-            val sLat = salon.latitude
-            val sLng = salon.longitude
-            if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
-                calculateDistanceKm(userLatitude, userLongitude, sLat, sLng).coerceAtLeast(0.1)
-            } else {
-                salon.distance.replace("km", "", ignoreCase = true).trim().toDoubleOrNull() ?: 999.0
-            }
-        }
+        }.sortedWith(
+            compareBy<Salon> { salon ->
+                val sLat = salon.latitude
+                val sLng = salon.longitude
+                if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
+                    com.example.data.TrimTimeRepository.calculateRawDistanceKm(userLatitude, userLongitude, sLat, sLng)
+                } else {
+                    val parsed = salon.distance.replace("km", "", ignoreCase = true).trim().toDoubleOrNull()
+                    if (parsed != null) parsed + 5000.0 else 99999.0
+                }
+            }.thenBy { it.name.lowercase(java.util.Locale.US) }
+        )
 
         val filteredByChip = when (selectedFilter) {
             "My Favorites" -> withLiveDistances.filter { isSalonFavorited(it) }
@@ -315,6 +326,56 @@ fun CustomerHomeScreen(
             filteredByChip
         }
         baseList.distinctBy { it.id.ifBlank { it.name } }
+    }
+
+    val trimmedSearchQuery = searchQuery.trim()
+    val isSearching = trimmedSearchQuery.isNotBlank()
+
+    // When searching: Partition into Exact/Query Matches (with exact salon name matches at the very top)
+    // and Recommended Salons (other available/nearby salons sorted by nearest distance)
+    val (searchExactMatches, searchRecommendedSalons) = remember(displayedSalons, trimmedSearchQuery, userLatitude, userLongitude) {
+        if (trimmedSearchQuery.isBlank()) {
+            Pair(displayedSalons, emptyList<Salon>())
+        } else {
+            val matches = displayedSalons.filter { salon ->
+                salon.name.contains(trimmedSearchQuery, ignoreCase = true) ||
+                    salon.location.contains(trimmedSearchQuery, ignoreCase = true) ||
+                    salon.shopAddress.contains(trimmedSearchQuery, ignoreCase = true) ||
+                    salon.landmark.contains(trimmedSearchQuery, ignoreCase = true) ||
+                    salon.pincode.contains(trimmedSearchQuery, ignoreCase = true) ||
+                    salon.adminCategoryTag.contains(trimmedSearchQuery, ignoreCase = true) ||
+                    salon.salonCategory.contains(trimmedSearchQuery, ignoreCase = true) ||
+                    salon.shopCategory.contains(trimmedSearchQuery, ignoreCase = true) ||
+                    salon.tagline.contains(trimmedSearchQuery, ignoreCase = true) ||
+                    ((trimmedSearchQuery.equals("ac", ignoreCase = true) || trimmedSearchQuery.equals("a/c", ignoreCase = true)) && salon.isAcSalon) ||
+                    salon.services.any {
+                        it.name.contains(trimmedSearchQuery, ignoreCase = true) ||
+                            it.serviceName.contains(trimmedSearchQuery, ignoreCase = true) ||
+                            it.category.contains(trimmedSearchQuery, ignoreCase = true)
+                    }
+            }.sortedWith(
+                compareBy<Salon> { salon ->
+                    val cleanName = salon.name.trim()
+                    when {
+                        cleanName.equals(trimmedSearchQuery, ignoreCase = true) -> 0 // Exact salon name match first
+                        cleanName.startsWith(trimmedSearchQuery, ignoreCase = true) -> 1
+                        cleanName.contains(trimmedSearchQuery, ignoreCase = true) -> 2
+                        else -> 3
+                    }
+                }.thenBy { salon ->
+                    val sLat = salon.latitude
+                    val sLng = salon.longitude
+                    if (sLat != null && sLng != null && sLat != 0.0 && sLng != 0.0) {
+                        com.example.data.TrimTimeRepository.calculateRawDistanceKm(userLatitude, userLongitude, sLat, sLng)
+                    } else {
+                        99999.0
+                    }
+                }
+            )
+            val matchedIds = matches.map { it.id.ifBlank { it.name } }.toSet()
+            val recommended = displayedSalons.filterNot { (it.id.ifBlank { it.name }) in matchedIds }
+            Pair(matches, recommended)
+        }
     }
 
     if (showLocationSheet) {
@@ -669,7 +730,7 @@ fun CustomerHomeScreen(
             }
         }
 
-        // 6. Nearby Salons Feed
+        // 6. Nearby Salons Feed (Sorted by Nearest Location; when searching: Exact Matches first -> "Recommended" Divider -> Other Available/Nearby Salons)
         if (displayedSalons.isEmpty()) {
             item {
                 EmptySalonsPlaceholder(
@@ -679,6 +740,140 @@ fun CustomerHomeScreen(
                         onSearchChanged("")
                     }
                 )
+            }
+        } else if (isSearching) {
+            if (searchExactMatches.isNotEmpty()) {
+                item(key = "exact_matches_header") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "EXACT & MATCHING SALONS (${searchExactMatches.size})",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = GreenSuccess,
+                            letterSpacing = 0.8.sp
+                        )
+                        Text(
+                            text = "Top Match First",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                }
+
+                items(
+                    items = searchExactMatches,
+                    key = { salon -> "exact_${salon.id.ifBlank { salon.name }}" }
+                ) { salon ->
+                    BlinkitSalonCard(
+                        salon = salon,
+                        currentUserId = currentUserId,
+                        isFavorite = isSalonFavorited(salon),
+                        onToggleFavorite = { onToggleFavorite(salon) },
+                        onRateClick = { salonToRate = salon },
+                        onBookClick = { onSalonSelected(salon) }
+                    )
+                }
+            } else {
+                item(key = "no_exact_match_banner") {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
+                        border = BorderStroke(1.dp, Color(0xFF334155))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Search,
+                                contentDescription = null,
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = "No exact match for \"$trimmedSearchQuery\". Showing recommended salons near you below.",
+                                fontSize = 12.sp,
+                                color = Color(0xFFCBD5E1),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+            }
+
+            // "Recommended" Divider below Exact Matches, followed by other available or nearby salons
+            item(key = "recommended_salons_divider_item") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 14.dp)
+                        .testTag("recommended_salons_divider"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    HorizontalDivider(
+                        modifier = Modifier.weight(1f),
+                        color = AmberPrimary.copy(alpha = 0.4f)
+                    )
+                    Surface(
+                        color = Color(0xFF1E293B),
+                        shape = RoundedCornerShape(20.dp),
+                        border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.6f))
+                    ) {
+                        Text(
+                            text = "✨ Recommended • Available & Nearby Salons",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = AmberPrimary,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                        )
+                    }
+                    HorizontalDivider(
+                        modifier = Modifier.weight(1f),
+                        color = AmberPrimary.copy(alpha = 0.4f)
+                    )
+                }
+            }
+
+            if (searchRecommendedSalons.isNotEmpty()) {
+                items(
+                    items = searchRecommendedSalons,
+                    key = { salon -> "rec_${salon.id.ifBlank { salon.name }}" }
+                ) { salon ->
+                    BlinkitSalonCard(
+                        salon = salon,
+                        currentUserId = currentUserId,
+                        isFavorite = isSalonFavorited(salon),
+                        onToggleFavorite = { onToggleFavorite(salon) },
+                        onRateClick = { salonToRate = salon },
+                        onBookClick = { onSalonSelected(salon) }
+                    )
+                }
+            } else {
+                item(key = "all_matched_notice") {
+                    Text(
+                        text = "All available nearby salons matched your search above.",
+                        fontSize = 12.sp,
+                        color = Color(0xFF94A3B8),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
             }
         } else {
             items(
@@ -897,9 +1092,10 @@ fun CustomerLocationBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .statusBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp, vertical = 8.dp)
-                .padding(bottom = 24.dp),
+                .padding(top = 12.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             // Sheet Header
@@ -909,6 +1105,9 @@ fun CustomerLocationBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -932,12 +1131,25 @@ fun CustomerLocationBottomSheet(
                         )
                     }
                 }
-                IconButton(onClick = onDismiss) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        tint = Color(0xFF94A3B8)
-                    )
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF1E293B))
+                            .border(1.dp, Color(0xFF334155), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = Color(0xFFCBD5E1),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
 
@@ -1158,6 +1370,9 @@ fun BlinkitSearchBar(
     searchQuery: String,
     onSearchChanged: (String) -> Unit
 ) {
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
     OutlinedTextField(
         value = searchQuery,
         onValueChange = onSearchChanged,
@@ -1182,7 +1397,13 @@ fun BlinkitSearchBar(
         },
         trailingIcon = {
             if (searchQuery.isNotEmpty()) {
-                IconButton(onClick = { onSearchChanged("") }) {
+                IconButton(
+                    onClick = {
+                        onSearchChanged("")
+                        keyboardController?.hide()
+                        focusManager.clearFocus()
+                    }
+                ) {
                     Icon(
                         imageVector = Icons.Default.Clear,
                         contentDescription = "Clear",
@@ -1192,6 +1413,17 @@ fun BlinkitSearchBar(
                 }
             }
         },
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(
+            onSearch = {
+                keyboardController?.hide()
+                focusManager.clearFocus()
+            },
+            onDone = {
+                keyboardController?.hide()
+                focusManager.clearFocus()
+            }
+        ),
         singleLine = true,
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = AmberPrimary,
@@ -1420,15 +1652,16 @@ fun BlinkitSalonCard(
     onRateClick: () -> Unit = {},
     onBookClick: () -> Unit
 ) {
+    val context = LocalContext.current
     val isOwnSalon = currentUserId.isNotBlank() &&
         (salon.ownerId == currentUserId || salon.partnerId == currentUserId)
     val minPrice = salon.services.minOfOrNull { it.price } ?: 80
     val isBusy = salon.isBusy
-    val rawPhotoData = salon.imageUrl.takeIf { it.isNotBlank() } ?: salon.resolvedPhotoData.trim()
-    val salonCoverBitmap = remember(rawPhotoData) {
-        SalonImageUtils.decodeBase64ToImageBitmap(rawPhotoData)
+    val rawPhotoData = salon.imageUrl.trim().ifBlank { salon.resolvedPhotoData.trim() }
+    val coilImageModel = remember(rawPhotoData) {
+        SalonImageUtils.resolveCoilImageModel(rawPhotoData)
     }
-    val hasCustomPhoto = salonCoverBitmap != null || rawPhotoData.isNotBlank()
+    val hasCustomPhoto = coilImageModel != null
     val highContrastTextShadow = Shadow(
         color = Color.Black,
         offset = Offset(0f, 2f),
@@ -1451,11 +1684,11 @@ fun BlinkitSalonCard(
                 .fillMaxWidth()
                 .wrapContentHeight()
         ) {
-            // Top Salon Visual Banner with Custom Cover Photo + Strong Dark Vertical Gradient Scrim
+            // Top Salon Visual Banner with Custom Cover Photo (AsyncImage via Coil) + Balanced Scrim
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 122.dp)
+                    .heightIn(min = if (hasCustomPhoto) 156.dp else 122.dp)
                     .wrapContentHeight()
                     .background(
                         Brush.horizontalGradient(
@@ -1467,23 +1700,19 @@ fun BlinkitSalonCard(
                         )
                     )
             ) {
-                if (salonCoverBitmap != null) {
-                    Image(
-                        bitmap = salonCoverBitmap,
-                        contentDescription = "${salon.name} Cover Photo",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.matchParentSize()
-                    )
-                } else if (rawPhotoData.isNotBlank()) {
+                if (coilImageModel != null) {
                     AsyncImage(
-                        model = rawPhotoData,
+                        model = ImageRequest.Builder(context)
+                            .data(coilImageModel)
+                            .crossfade(true)
+                            .build(),
                         contentDescription = "${salon.name} Cover Photo",
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.matchParentSize()
                     )
                 }
 
-                // Always apply a strong dark vertical gradient scrim over custom cover photos so white text is 100% readable
+                // Balanced vertical gradient scrim over custom cover photos so the salon photo is clearly visible while white text stays crisp
                 if (hasCustomPhoto) {
                     Box(
                         modifier = Modifier
@@ -1491,9 +1720,9 @@ fun BlinkitSalonCard(
                             .background(
                                 Brush.verticalGradient(
                                     colorStops = arrayOf(
-                                        0.0f to Color.Black.copy(alpha = 0.65f),
-                                        0.50f to Color(0xD9090D16),
-                                        1.0f to Color(0xFA090D16)
+                                        0.0f to Color.Black.copy(alpha = 0.25f),
+                                        0.45f to Color(0x73090D16),
+                                        1.0f to Color(0xD9090D16)
                                     )
                                 )
                             )
