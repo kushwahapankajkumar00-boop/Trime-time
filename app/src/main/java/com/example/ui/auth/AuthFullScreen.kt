@@ -67,9 +67,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
 import android.widget.Toast
+import java.security.MessageDigest
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
@@ -949,6 +954,22 @@ fun AuthFullScreen(
                 lineHeight = 15.sp,
                 modifier = Modifier.padding(horizontal = 20.dp)
             )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Temporary utility to copy current APK SHA-1 and SHA-256 fingerprints
+            TextButton(
+                onClick = { copyBuildShaKeysToClipboard(context) },
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                modifier = Modifier.testTag("copy_build_sha_button")
+            ) {
+                Text(
+                    text = "Copy Build SHA",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color(0xFF64748B)
+                )
+            }
         }
 
         if (showAccountNotFoundPrompt && !isSignUpMode) {
@@ -1132,3 +1153,57 @@ private fun GoogleLogoBadge(modifier: Modifier = Modifier) {
         )
     }
 }
+
+private fun copyBuildShaKeysToClipboard(context: Context) {
+    try {
+        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            context.packageManager.getPackageInfo(
+                context.packageName,
+                PackageManager.GET_SIGNING_CERTIFICATES
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(
+                context.packageName,
+                PackageManager.GET_SIGNATURES
+            )
+        }
+
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfo = packageInfo.signingInfo
+            if (signingInfo != null) {
+                if (signingInfo.hasMultipleSigners()) {
+                    signingInfo.apkContentsSigners
+                } else {
+                    signingInfo.signingCertificateHistory
+                }
+            } else {
+                emptyArray()
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.signatures ?: emptyArray()
+        }
+
+        val certBytes = signatures.firstOrNull()?.toByteArray()
+        if (certBytes != null) {
+            val sha1 = MessageDigest.getInstance("SHA-1")
+                .digest(certBytes)
+                .joinToString(":") { "%02X".format(it) }
+            val sha256 = MessageDigest.getInstance("SHA-256")
+                .digest(certBytes)
+                .joinToString(":") { "%02X".format(it) }
+
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            val clipText = "SHA-1: $sha1\nSHA-256: $sha256"
+            clipboard?.setPrimaryClip(ClipData.newPlainText("Build SHA Keys", clipText))
+            Toast.makeText(context, "Keys Copied!", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "No signing certificate found", Toast.LENGTH_SHORT).show()
+        }
+    } catch (e: Exception) {
+        Log.e("AuthFullScreen", "Failed to extract build SHA keys: ${e.message}")
+        Toast.makeText(context, "Error copying keys: ${e.message}", Toast.LENGTH_SHORT).show()
+    }
+}
+
