@@ -233,6 +233,7 @@ private val defaultSupportFaqs = listOf(
 @Composable
 fun SupportFeedbackLegalSectionCard(
     isHinglish: Boolean = false,
+    isPartnerMode: Boolean = false,
     cardBackgroundColor: Color = Color(0xFF1E293B),
     primaryTextColor: Color = Color.White,
     secondaryTextColor: Color = Color(0xFF94A3B8),
@@ -288,10 +289,18 @@ fun SupportFeedbackLegalSectionCard(
                         color = primaryTextColor
                     )
                     Text(
-                        text = if (isHinglish) {
-                            "24×7 कस्टमर सपोर्ट कॉल, व्हाट्सएप, ईमेल, फ़ीडबैक और नियम"
+                        text = if (isPartnerMode) {
+                            if (isHinglish) {
+                                "24×7 पार्टनर सपोर्ट कॉल, व्हाट्सएप, फ़ीडबैक और नियम"
+                            } else {
+                                "1-tap Call & WhatsApp partner support, live feedback & policies"
+                            }
                         } else {
-                            "1-tap Call, WhatsApp, Email support, live feedback & policies"
+                            if (isHinglish) {
+                                "24×7 व्हाट्सएप कस्टमर सपोर्ट, फ़ीडबैक और नियम"
+                            } else {
+                                "1-tap WhatsApp customer support, live feedback & policies"
+                            }
                         },
                         fontSize = 11.sp,
                         color = secondaryTextColor
@@ -299,41 +308,43 @@ fun SupportFeedbackLegalSectionCard(
                 }
             }
 
-            // Quick 1-Tap Direct Contact Strip (Call, WhatsApp, Email)
+            // Quick 1-Tap Direct Contact Strip (Customer Mode: WhatsApp only; Partner Mode: Call & WhatsApp)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Call Support
-                OutlinedButton(
-                    onClick = { launchPhoneDialer(context, TRIMTIME_SUPPORT_PHONE) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 44.dp)
-                        .testTag("quick_call_support_btn"),
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.6f)),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Call,
-                        contentDescription = "Call Customer Support",
-                        tint = Color(0xFF38BDF8),
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = "Call",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = primaryTextColor,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                if (isPartnerMode) {
+                    // Call Support (Partner Mode Only)
+                    OutlinedButton(
+                        onClick = { launchPhoneDialer(context, TRIMTIME_SUPPORT_PHONE) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 44.dp)
+                            .testTag("quick_call_support_btn"),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.6f)),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Call,
+                            contentDescription = "Call Partner Support",
+                            tint = Color(0xFF38BDF8),
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = "Call",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = primaryTextColor,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
-                // WhatsApp Support
+                // WhatsApp Support (Active in both Customer Mode and Partner Mode)
                 OutlinedButton(
                     onClick = { launchWhatsAppSupport(context, TRIMTIME_WHATSAPP_URL) },
                     modifier = Modifier
@@ -361,45 +372,20 @@ fun SupportFeedbackLegalSectionCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-
-                // Email Support
-                OutlinedButton(
-                    onClick = { launchEmailSupport(context) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 44.dp)
-                        .testTag("quick_email_support_btn"),
-                    shape = RoundedCornerShape(10.dp),
-                    border = BorderStroke(1.dp, AmberPrimary.copy(alpha = 0.6f)),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Email,
-                        contentDescription = "Email Support",
-                        tint = AmberPrimary,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = "Email",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = primaryTextColor,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
             }
 
             HorizontalDivider(color = Color(0xFF334155).copy(alpha = 0.5f))
 
-            // 1. Help & Support Center Row (opens full sheet with Call, WhatsApp, Email & FAQs)
+            // 1. Help & Support Center Row
             SupportNavigationRow(
                 icon = Icons.AutoMirrored.Filled.HelpOutline,
                 iconTint = Color(0xFF38BDF8),
                 title = if (isHinglish) "हेल्प और सपोर्ट सेंटर (Help & Support Center)" else "Help & Support Center",
-                subtitle = "Call +91 62000 92115, WhatsApp chat, Email & Quick FAQs",
+                subtitle = if (isPartnerMode) {
+                    "Call +91 62000 92115, WhatsApp chat & Quick FAQs"
+                } else {
+                    "WhatsApp live support chat & Quick FAQs"
+                },
                 badgeText = "24×7",
                 badgeColor = Color(0xFF0284C7),
                 primaryTextColor = primaryTextColor,
@@ -552,7 +538,8 @@ fun HelpAndSupportCenterDialog(
     onDismiss: () -> Unit,
     onOpenFeedbackForm: () -> Unit,
     onOpenTerms: () -> Unit = {},
-    onOpenPrivacy: () -> Unit = {}
+    onOpenPrivacy: () -> Unit = {},
+    isPartnerMode: Boolean = false
 ) {
     val context = LocalContext.current
     var expandedFaqId by remember { mutableStateOf<String?>(defaultSupportFaqs.first().id) }
@@ -607,7 +594,11 @@ fun HelpAndSupportCenterDialog(
                                 color = Color.White
                             )
                             Text(
-                                text = "Instant Call, WhatsApp, Email & Grooming FAQs",
+                                text = if (isPartnerMode) {
+                                    "Instant Call, WhatsApp & Partner FAQs"
+                                } else {
+                                    "Instant WhatsApp Support & Grooming FAQs"
+                                },
                                 fontSize = 11.sp,
                                 color = Color(0xFF94A3B8)
                             )
@@ -650,44 +641,50 @@ fun HelpAndSupportCenterDialog(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Text(
-                                text = "DIRECT CUSTOMER & PARTNER SUPPORT",
+                                text = if (isPartnerMode) {
+                                    "DIRECT PARTNER SUPPORT"
+                                } else {
+                                    "DIRECT CUSTOMER SUPPORT"
+                                },
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = AmberPrimary,
                                 letterSpacing = 0.8.sp
                             )
 
-                            // (a) Call Customer Support Button
-                            Button(
-                                onClick = { launchPhoneDialer(context, TRIMTIME_SUPPORT_PHONE) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 50.dp)
-                                    .testTag("support_call_customer_support_btn"),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF0284C7),
-                                    contentColor = Color.White
-                                )
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Call,
-                                    contentDescription = "Call Customer Support",
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Call Customer Support (+91 62000 92115)",
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 12.sp,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                            // (a) Call Support Button (Strictly Partner Mode Only)
+                            if (isPartnerMode) {
+                                Button(
+                                    onClick = { launchPhoneDialer(context, TRIMTIME_SUPPORT_PHONE) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 50.dp)
+                                        .testTag("support_call_customer_support_btn"),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF0284C7),
+                                        contentColor = Color.White
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Call,
+                                        contentDescription = "Call Partner Support",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Call Partner Support (+91 62000 92115)",
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
 
-                            // (b) WhatsApp Live Support Button
+                            // (b) WhatsApp Live Support Button (Active in both Customer and Partner Mode)
                             Button(
                                 onClick = { launchWhatsAppSupport(context, TRIMTIME_WHATSAPP_URL) },
                                 modifier = Modifier
@@ -711,41 +708,6 @@ fun HelpAndSupportCenterDialog(
                                     text = "WhatsApp Live Support (Instant Chat)",
                                     fontWeight = FontWeight.ExtraBold,
                                     fontSize = 12.sp,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-
-                            // (c) Email Support Button
-                            OutlinedButton(
-                                onClick = {
-                                    launchEmailSupport(
-                                        context = context,
-                                        email = TRIMTIME_SUPPORT_EMAIL,
-                                        subject = TRIMTIME_SUPPORT_EMAIL_SUBJECT
-                                    )
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 48.dp)
-                                    .testTag("support_email_support_btn"),
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                border = BorderStroke(1.dp, AmberPrimary)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Email,
-                                    contentDescription = "Email Support",
-                                    tint = AmberPrimary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Email Support (support@trimtime.app)",
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 12.sp,
-                                    color = AmberPrimary,
                                     maxLines = 1,
                                     softWrap = false,
                                     overflow = TextOverflow.Ellipsis

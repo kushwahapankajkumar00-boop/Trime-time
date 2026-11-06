@@ -654,11 +654,63 @@ fun BookingCard(
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            text = displayTime,
+                            text = booking.allocatedTime.ifBlank { displayTime },
                             color = Color(0xFF38BDF8),
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
                         )
+                    }
+                }
+
+                // Dynamic Partner-Allocated Arrival Time Banner (eliminates physical waiting time)
+                if (isUpcoming) {
+                    val exactArrivalTime = booking.allocatedTime.ifBlank { displayTime }
+                    val isConfirmedByPartner = canonicalStatus.equals("Confirmed", ignoreCase = true)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                if (isConfirmedByPartner) Color(0xFF064E3B).copy(alpha = 0.55f)
+                                else Color(0xFF172554).copy(alpha = 0.65f)
+                            )
+                            .border(
+                                1.dp,
+                                if (isConfirmedByPartner) GreenSuccess.copy(alpha = 0.65f) else Color(0xFF38BDF8).copy(alpha = 0.55f),
+                                RoundedCornerShape(10.dp)
+                            )
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .testTag("booking_allocated_time_banner_${booking.resolvedBookingId}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AccessTime,
+                            contentDescription = "Allocated Shop Arrival Time",
+                            tint = if (isConfirmedByPartner) GreenSuccess else Color(0xFF38BDF8),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (isConfirmedByPartner) {
+                                    "✓ Partner Allocated Arrival Time: $exactArrivalTime"
+                                } else {
+                                    "⏱ Estimated Arrival Time (ETA): $exactArrivalTime"
+                                },
+                                color = if (isConfirmedByPartner) Color(0xFFA7F3D0) else Color(0xFF7DD3FC),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                            Text(
+                                text = if (isConfirmedByPartner) {
+                                    "Reach the shop at $exactArrivalTime — zero physical waiting time!"
+                                } else {
+                                    "Waiting for salon partner to confirm your exact arrival slot."
+                                },
+                                color = Color(0xFFCBD5E1),
+                                fontSize = 11.sp
+                            )
+                        }
                     }
                 }
 

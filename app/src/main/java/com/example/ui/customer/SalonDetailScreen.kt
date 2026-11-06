@@ -74,6 +74,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.example.model.Booking
 import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.ui.components.TRIMTIME_SUPPORT_PHONE
@@ -90,6 +91,8 @@ import com.example.util.SalonImageUtils
 @Composable
 fun SalonDetailScreen(
     salon: Salon,
+    activeLiveQueueCount: Int = 0,
+    isGlobalRushModeEnabled: Boolean = false,
     currentUserId: String = "",
     hasActiveBooking: Boolean = false,
     isSuspended: Boolean = false,
@@ -106,13 +109,42 @@ fun SalonDetailScreen(
 
     var showRatingDialog by remember { mutableStateOf(false) }
 
+    val defaultServiceDuration = remember(salon.services) {
+        salon.services
+            .map { if (it.duration > 0) it.duration else it.durationMinutes }
+            .filter { it > 0 }
+            .average()
+            .takeIf { !it.isNaN() }
+            ?.toInt() ?: 20
+    }
+    val isLocalRushMode = remember(activeLiveQueueCount) {
+        Booking.isLocalRushMode(activeLiveQueueCount)
+    }
+    val isRushActive = remember(isGlobalRushModeEnabled, isLocalRushMode) {
+        isGlobalRushModeEnabled || isLocalRushMode
+    }
+    val systemWaitMinutes = remember(activeLiveQueueCount, defaultServiceDuration) {
+        Booking.calculateSystemWaitMinutes(activeLiveQueueCount, defaultServiceDuration)
+    }
+    val systemEtaClockTime = remember(activeLiveQueueCount, defaultServiceDuration) {
+        Booking.calculateFormattedEtaClockTime(activeLiveQueueCount, defaultServiceDuration)
+    }
+    val isExceedingClosingTime = remember(salon.closingTime, activeLiveQueueCount, defaultServiceDuration) {
+        Booking.isEtaExceedingClosingTime(
+            closingTimeStr = salon.closingTime.ifBlank { "9:00 PM" },
+            activeBookingsCount = activeLiveQueueCount,
+            defaultServiceDurationMinutes = defaultServiceDuration
+        )
+    }
+
     val isOwnSalon = currentUserId.isNotBlank() &&
         (salon.ownerId == currentUserId || salon.partnerId == currentUserId)
 
-    val isBookDisabled = isOwnSalon || hasActiveBooking || isSuspended
+    val isBookDisabled = isOwnSalon || hasActiveBooking || isSuspended || isExceedingClosingTime
     val disabledReason = when {
         isOwnSalon -> "This is your own registered salon. Manage it in Partner Mode."
         isSuspended -> "Your account has been suspended for too many cancellations"
+        isExceedingClosingTime -> "Booking Blocked: Newly calculated ETA ($systemEtaClockTime) exceeds official closing time (${salon.closingTime.ifBlank { "9:00 PM" }})."
         hasActiveBooking -> "You already have an active booking. Please complete or cancel it first."
         else -> ""
     }
@@ -154,9 +186,13 @@ fun SalonDetailScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${salon.distance} away • Next slot in ${salon.nextSlotMinutes}m",
+                            text = if (isRushActive) {
+                                "${salon.distance} away • Rush ETA: $systemEtaClockTime (~${systemWaitMinutes}m wait)"
+                            } else {
+                                "${salon.distance} away • ${salon.location}"
+                            },
                             fontSize = 11.sp,
-                            color = AmberPrimary,
+                            color = if (isRushActive) AmberPrimary else Color(0xFF94A3B8),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -222,6 +258,72 @@ fun SalonDetailScreen(
             // Pay-at-salon banner
             item {
                 PayAtSalonBanner()
+            }
+
+            // Dynamic Rush Mode (Festival / Local Crowd >= 3) Smart ETA Banner
+            if (isRushActive) {
+                item {
+                    val rushReasonLabel = if (isGlobalRushModeEnabled) {
+                        "🎉 FESTIVAL RUSH MODE • SMART ETA: $systemEtaClockTime"
+                    } else {
+                        "🔥 HIGH CROWD RUSH (${activeLiveQueueCount} IN QUEUE) • ETA: $systemEtaClockTime"
+                    }
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                            .testTag("salon_live_eta_banner"),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF451A03)
+                        ),
+                        border = CardDefaults.outlinedCardBorder().copy(
+                            brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
+                        ),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(38.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(AmberPrimary.copy(alpha = 0.22f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AccessTime,
+                                        contentDescription = "Rush Mode Smart ETA",
+                                        tint = AmberPrimary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = rushReasonLabel,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = Color(0xFFFDE68A)
+                                    )
+                                    Text(
+                                        text = "Est. Wait: ~${systemWaitMinutes} mins ($activeLiveQueueCount active in queue). Partner will confirm your exact arrival time in My Bookings.",
+                                        fontSize = 11.sp,
+                                        color = Color(0xFFE2E8F0)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Real-Time Busy Status Banner

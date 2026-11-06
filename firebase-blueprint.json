@@ -56,6 +56,17 @@
         "createdAt": { "type": "integer" }
       },
       "required": ["id", "customerId", "salonId", "service", "status"]
+    },
+    "AppSettings": {
+      "title": "AppSettings",
+      "description": "Central application settings controlled by Super Admin including Global Festival / Rush Mode",
+      "type": "object",
+      "properties": {
+        "isGlobalRushModeEnabled": { "type": "boolean" },
+        "updatedAt": { "type": "integer" },
+        "adminActorId": { "type": "string" }
+      },
+      "required": ["isGlobalRushModeEnabled"]
     }
   },
   "firestore": {
@@ -70,6 +81,10 @@
     "/bookings/{bookingId}": {
       "schema": { "$ref": "#/entities/Booking" },
       "description": "Customer bookings and partner verification state"
+    },
+    "/app_settings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppSettings" },
+      "description": "Central platform configuration including Global Festival / Rush Mode toggle"
     }
   }
 }

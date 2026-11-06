@@ -155,7 +155,9 @@ fun PartnerDashboardScreen(
     activeFilter: String,
     onFilterChange: (String) -> Unit,
     onOpenPinVerification: (Booking) -> Unit,
+    isGlobalRushModeEnabled: Boolean = false,
     onAcceptBooking: (String) -> Unit = {},
+    onAcceptBookingWithTime: (String, String) -> Unit = { id, _ -> onAcceptBooking(id) },
     onRejectBooking: (String) -> Unit = {},
     onToggleSalonOpen: (String) -> Unit,
     onSetSalonOpen: (String, Boolean) -> Unit = { id, _ -> onToggleSalonOpen(id) },
@@ -304,8 +306,10 @@ fun PartnerDashboardScreen(
                     pendingCashToCollect = pendingCashToCollect,
                     pendingBookings = pendingBookings,
                     completedBookings = completedBookings,
+                    isGlobalRushModeEnabled = isGlobalRushModeEnabled,
                     onOpenPinVerification = onOpenPinVerification,
                     onAcceptBooking = onAcceptBooking,
+                    onAcceptBookingWithTime = onAcceptBookingWithTime,
                     onRejectBooking = onRejectBooking,
                     onNavigateToProfile = { currentTab = PartnerTab.SHOP_PROFILE }
                 )
@@ -350,6 +354,7 @@ fun PartnerDashboardScreen(
 
     if (showSupportDialog) {
         HelpAndSupportCenterDialog(
+            isPartnerMode = true,
             onDismiss = { showSupportDialog = false },
             onOpenFeedbackForm = {
                 showSupportDialog = false
@@ -571,11 +576,17 @@ fun PartnerLiveQueueTabContent(
     pendingCashToCollect: Int,
     pendingBookings: List<Booking>,
     completedBookings: List<Booking>,
+    isGlobalRushModeEnabled: Boolean = false,
     onOpenPinVerification: (Booking) -> Unit,
     onAcceptBooking: (String) -> Unit = {},
+    onAcceptBookingWithTime: (String, String) -> Unit = { id, _ -> onAcceptBooking(id) },
     onRejectBooking: (String) -> Unit = {},
     onNavigateToProfile: () -> Unit = {}
 ) {
+    var bookingForSlotAllocation by remember { mutableStateOf<Booking?>(null) }
+    val isLocalRushMode = Booking.isLocalRushMode(pendingBookings.size)
+    val isRushActive = Booking.isRushModeActive(isGlobalRushModeEnabled, pendingBookings.size)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -641,10 +652,14 @@ fun PartnerLiveQueueTabContent(
                             .background(if (pendingBookings.isNotEmpty()) AmberPrimary else GreenSuccess)
                     )
                     Text(
-                        text = "LIVE QUEUE (${pendingBookings.size} WAITING)",
+                        text = if (isRushActive) {
+                            "LIVE QUEUE (${pendingBookings.size} WAITING • RUSH ETA ON)"
+                        } else {
+                            "LIVE QUEUE (${pendingBookings.size} WAITING)"
+                        },
                         fontSize = 12.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = Color.White,
+                        color = if (isRushActive) AmberPrimary else Color.White,
                         letterSpacing = 0.5.sp
                     )
                 }
@@ -666,7 +681,13 @@ fun PartnerLiveQueueTabContent(
             items(pendingBookings, key = { it.id }) { booking ->
                 LiveQueueBookingCard(
                     booking = booking,
-                    onAcceptClick = { onAcceptBooking(booking.id) },
+                    onAcceptClick = {
+                        if (isRushActive) {
+                            bookingForSlotAllocation = booking
+                        } else {
+                            onAcceptBooking(booking.id)
+                        }
+                    },
                     onRejectClick = { onRejectBooking(booking.id) },
                     onVerifyPinClick = { onOpenPinVerification(booking) }
                 )
@@ -691,6 +712,28 @@ fun PartnerLiveQueueTabContent(
                 CompletedBookingCard(booking = booking)
             }
         }
+    }
+
+    bookingForSlotAllocation?.let { targetBooking ->
+        val acceptedAheadCount = pendingBookings.count {
+            it.id != targetBooking.id && (
+                it.status.equals("accepted", ignoreCase = true) ||
+                    it.status.equals("confirmed", ignoreCase = true) ||
+                    it.status.equals("in_progress", ignoreCase = true)
+            )
+        }
+        val defaultServiceMins = (salon?.waitingTimeMinutes?.takeIf { it in 10..60 }) ?: 20
+        PartnerEtaAllocationDialog(
+            booking = targetBooking,
+            activeBookingsAheadCount = acceptedAheadCount,
+            defaultServiceDurationMinutes = defaultServiceMins,
+            onDismiss = { bookingForSlotAllocation = null },
+            onConfirmAllocatedTime = { finalAllocatedTime ->
+                val bookingId = targetBooking.id
+                bookingForSlotAllocation = null
+                onAcceptBookingWithTime(bookingId, finalAllocatedTime)
+            }
+        )
     }
 }
 
@@ -1450,7 +1493,7 @@ fun LiveQueueBookingCard(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "⏱ ${booking.timeSlot}",
+                            text = "⏱ ${booking.allocatedTime.ifBlank { booking.timeSlot }}",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = AmberPrimary,
@@ -3723,6 +3766,7 @@ fun PartnerShopProfileTabContent(
         item {
             SupportFeedbackLegalSectionCard(
                 isHinglish = false,
+                isPartnerMode = true,
                 cardBackgroundColor = DarkCardSurface,
                 primaryTextColor = Color.White,
                 secondaryTextColor = Color(0xFF94A3B8),
@@ -4004,6 +4048,252 @@ fun PartnerEarningsWalletTabContent(
         } else {
             items(completedBookings, key = { it.id }) { booking ->
                 CompletedBookingCard(booking = booking)
+            }
+        }
+    }
+}
+
+/**
+ * Smart ETA & Dynamic Slot Allocation Confirmation Dialog for Salon Partners.
+ * Triggered when the Partner taps "Accept" on an incoming 'Pending' booking.
+ * Shows the system-calculated time based on active Live Queue and gives the Partner
+ * quick options to adjust it ("Give exactly this time", "+10 Mins", "+20 Mins", "+30 Mins")
+ * before confirming and writing `allocatedTime` to Firestore.
+ */
+@Composable
+fun PartnerEtaAllocationDialog(
+    booking: Booking,
+    activeBookingsAheadCount: Int,
+    defaultServiceDurationMinutes: Int = 20,
+    onDismiss: () -> Unit,
+    onConfirmAllocatedTime: (String) -> Unit
+) {
+    var selectedOffsetMins by remember { mutableStateOf(0) }
+    val systemWaitMins = Booking.calculateSystemWaitMinutes(
+        activeBookingsCount = activeBookingsAheadCount,
+        defaultServiceDurationMinutes = defaultServiceDurationMinutes
+    )
+    val totalWaitMins = systemWaitMins + selectedOffsetMins
+    val calculatedClockTime = Booking.calculateFormattedEtaClockTime(
+        activeBookingsCount = activeBookingsAheadCount,
+        defaultServiceDurationMinutes = defaultServiceDurationMinutes,
+        extraOffsetMinutes = selectedOffsetMins
+    )
+    val finalFormattedSlot = if (totalWaitMins <= 0) {
+        "$calculatedClockTime (Reach Now)"
+    } else {
+        "$calculatedClockTime (~$totalWaitMins mins)"
+    }
+
+    val quickOffsets = listOf(
+        0 to "Exact Time",
+        10 to "+10 Mins",
+        20 to "+20 Mins",
+        30 to "+30 Mins"
+    )
+
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("partner_eta_allocation_dialog"),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+            border = androidx.compose.foundation.BorderStroke(1.5.dp, AmberPrimary)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(AmberPrimary.copy(alpha = 0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Schedule,
+                                contentDescription = "Smart ETA Allocation",
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = "ALLOCATE ARRIVAL TIME",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = AmberPrimary,
+                                letterSpacing = 0.8.sp
+                            )
+                            Text(
+                                text = booking.customerName,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Color.White
+                            )
+                        }
+                    }
+
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Cancel",
+                            tint = Color(0xFF94A3B8)
+                        )
+                    }
+                }
+
+                // System Calculated ETA Summary Box
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "SYSTEM CALCULATED ETA (${activeBookingsAheadCount} active in queue)",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF94A3B8),
+                            letterSpacing = 0.5.sp
+                        )
+                        Text(
+                            text = finalFormattedSlot,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            color = GreenSuccess,
+                            modifier = Modifier.testTag("partner_eta_dialog_preview_time")
+                        )
+                        Text(
+                            text = "Service: ${booking.service} (₹${booking.servicePrice}) • Requested: ${booking.timeSlot}",
+                            fontSize = 11.sp,
+                            color = Color(0xFFCBD5E1)
+                        )
+                    }
+                }
+
+                Text(
+                    text = "Adjust Customer Arrival Time (Festival Rush Control):",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+
+                // Quick Offset Option Buttons ("Give exactly this time", "+10 Mins", "+20 Mins", "+30 Mins")
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    quickOffsets.forEach { (offsetMins, label) ->
+                        val isSelected = selectedOffsetMins == offsetMins
+                        val optionTimePreview = Booking.calculateFormattedEtaClockTime(
+                            activeBookingsCount = activeBookingsAheadCount,
+                            defaultServiceDurationMinutes = defaultServiceDurationMinutes,
+                            extraOffsetMinutes = offsetMins
+                        )
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selectedOffsetMins = offsetMins }
+                                .testTag("partner_eta_option_$offsetMins"),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) Color(0xFF064E3B) else Color(0xFF1E293B)
+                            ),
+                            border = androidx.compose.foundation.BorderStroke(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) GreenSuccess else Color(0xFF334155)
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isSelected) Icons.Default.CheckCircle else Icons.Default.Schedule,
+                                        contentDescription = null,
+                                        tint = if (isSelected) GreenSuccess else AmberPrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = label,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                }
+                                Text(
+                                    text = optionTimePreview,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (isSelected) Color(0xFFA7F3D0) else AmberPrimary
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("partner_eta_cancel_btn"),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = "Cancel",
+                            color = Color(0xFFCBD5E1),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Button(
+                        onClick = { onConfirmAllocatedTime(finalFormattedSlot) },
+                        modifier = Modifier
+                            .weight(1.4f)
+                            .height(48.dp)
+                            .testTag("partner_eta_confirm_btn"),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = GreenSuccess,
+                            contentColor = Color.White
+                        )
+                    ) {
+                        Text(
+                            text = "Confirm & Send Time",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    }
+                }
             }
         }
     }

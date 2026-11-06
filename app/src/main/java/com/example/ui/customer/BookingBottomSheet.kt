@@ -62,6 +62,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.model.Booking
 import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.model.UserProfile
@@ -77,6 +78,8 @@ fun BookingBottomSheet(
     service: SalonService,
     userProfile: UserProfile,
     selectedSlot: String,
+    activeLiveQueueCount: Int = 0,
+    isGlobalRushModeEnabled: Boolean = false,
     hasActiveBooking: Boolean = false,
     isSuspended: Boolean = false,
     onServiceChanged: (SalonService) -> Unit = {},
@@ -104,8 +107,49 @@ fun BookingBottomSheet(
     val isValidTenDigitPhone = cleanPhoneDigits.length == 10 &&
         cleanPhoneDigits.firstOrNull() in listOf('6', '7', '8', '9')
 
-    val isBusy = salon.isBusy
-    val availableSlots = if (isBusy) {
+    val serviceDurationMins = if (service.duration > 0) {
+        service.duration
+    } else if (service.durationMinutes > 0) {
+        service.durationMinutes
+    } else {
+        20
+    }
+    val isLocalRushMode = remember(activeLiveQueueCount) {
+        Booking.isLocalRushMode(activeLiveQueueCount)
+    }
+    val isRushActive = remember(isGlobalRushModeEnabled, isLocalRushMode) {
+        isGlobalRushModeEnabled || isLocalRushMode
+    }
+    val systemWaitMins = remember(activeLiveQueueCount, serviceDurationMins) {
+        Booking.calculateSystemWaitMinutes(activeLiveQueueCount, serviceDurationMins)
+    }
+    val systemEtaTime = remember(activeLiveQueueCount, serviceDurationMins) {
+        Booking.calculateFormattedEtaClockTime(activeLiveQueueCount, serviceDurationMins)
+    }
+    val isExceedingClosingTime = remember(salon.closingTime, activeLiveQueueCount, serviceDurationMins) {
+        Booking.isEtaExceedingClosingTime(
+            closingTimeStr = salon.closingTime.ifBlank { "9:00 PM" },
+            activeBookingsCount = activeLiveQueueCount,
+            defaultServiceDurationMinutes = serviceDurationMins
+        )
+    }
+    val dynamicEtaSlot = if (activeLiveQueueCount > 0) {
+        "Live ETA: $systemEtaTime (~${systemWaitMins}m)"
+    } else {
+        "Live ETA: $systemEtaTime (⚡ Instant)"
+    }
+
+    val isBusy = salon.isBusy || isRushActive
+    val availableSlots = if (isRushActive) {
+        listOf(
+            dynamicEtaSlot,
+            "Waitlist: Next in Line (~${systemWaitMins.coerceAtLeast(20)}m)",
+            "11:30 AM",
+            "12:15 PM",
+            "02:00 PM",
+            "04:30 PM"
+        )
+    } else if (salon.isBusy) {
         listOf(
             "Waitlist: Next in Line (~20m)",
             "11:30 AM",
@@ -267,9 +311,52 @@ fun BookingBottomSheet(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
+                // Dynamic Rush Mode (Festival or Local Crowd >= 3) System ETA Banner inside Booking Sheet
+                if (isRushActive) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("booking_sheet_system_eta_card"),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF451A03)),
+                    shape = RoundedCornerShape(12.dp),
+                    border = CardDefaults.outlinedCardBorder().copy(
+                        brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "⏱ LIVE SYSTEM ETA: $systemEtaTime",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF7DD3FC)
+                        )
+                        Text(
+                            text = if (activeLiveQueueCount > 0) {
+                                "Based on $activeLiveQueueCount active booking(s) × ${serviceDurationMins}m (~${systemWaitMins} mins). Partner will confirm your exact arrival time in My Bookings."
+                            } else {
+                                "0 active bookings in queue. Partner will confirm your exact arrival time ($systemEtaTime) so you don't wait at the shop."
+                            },
+                            fontSize = 11.sp,
+                            color = Color(0xFFCBD5E1)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                }
+
                 // Time Slots Grid
                 Text(
-                    text = "AVAILABLE TODAY",
+                    text = if (isRushActive) {
+                        "AVAILABLE TODAY (ADVANCE RUSH ETA SLOTS)"
+                    } else {
+                        "AVAILABLE TODAY (INSTANT BOOKING SLOTS)"
+                    },
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF94A3B8),
@@ -583,8 +670,42 @@ fun BookingBottomSheet(
                     Spacer(modifier = Modifier.height(10.dp))
                 }
 
+                // Edge Case Protection — Closing Time Exceeded Banner
+                if (isExceedingClosingTime) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF450A0A))
+                            .border(1.dp, RedAlert, RoundedCornerShape(10.dp))
+                            .padding(12.dp)
+                            .testTag("closing_time_exceeded_banner"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = RedAlert,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = "Booking Blocked: Newly calculated ETA ($systemEtaTime) exceeds official closing time (${salon.closingTime.ifBlank { "9:00 PM" }}).",
+                            color = Color(0xFFFECACA),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            lineHeight = 16.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+
                 // Confirm / Book Button (Flexible minHeight = 52.dp so second line is never clipped)
-                val isButtonEnabled = !hasActiveBooking && !isSuspended && customerName.trim().length >= 2 && isValidTenDigitPhone
+                val isButtonEnabled = !hasActiveBooking &&
+                    !isSuspended &&
+                    !isExceedingClosingTime &&
+                    customerName.trim().length >= 2 &&
+                    isValidTenDigitPhone
 
                 Button(
                     onClick = {
@@ -609,6 +730,7 @@ fun BookingBottomSheet(
                     Text(
                         text = when {
                             isSuspended -> "Account Suspended"
+                            isExceedingClosingTime -> "Closed • ETA Exceeds ${salon.closingTime.ifBlank { "9:00 PM" }}"
                             hasActiveBooking -> "Booking Limit Reached (1 Active)"
                             isBusy -> "Join Waitlist & Get 4-Digit PIN"
                             else -> "Confirm Slot & Get 4-Digit PIN"

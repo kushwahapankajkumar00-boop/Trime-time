@@ -145,14 +145,6 @@ fun ProfileScreen(
     val isSuperAdmin = (currentUser?.email == "kushwahapankajkumar00@gmail.com") ||
         (firebaseCurrentUserEmail == "kushwahapankajkumar00@gmail.com")
 
-    val isUserLocationLocked = userProfile?.let {
-        it.isLocationLocked && !it.unlockRequestStatus.equals("approved", ignoreCase = true)
-    } ?: true
-    var localUnlockRequestSent by remember(userProfile?.unlockRequestStatus) {
-        mutableStateOf(userProfile?.unlockRequestStatus.equals("pending", ignoreCase = true))
-    }
-    val isUnlockPending = localUnlockRequestSent || userProfile?.unlockRequestStatus.equals("pending", ignoreCase = true)
-
     val isHinglish = appPreferences.language == AppLanguage.HINDI_HINGLISH
     val bgColor = MaterialTheme.colorScheme.background
     val cardColor = MaterialTheme.colorScheme.surfaceVariant
@@ -336,78 +328,6 @@ fun ProfileScreen(
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 13.sp
                         )
-                    }
-
-                    // Location Lock & Unlock Request Section on Profile Card
-                    if (isUserLocationLocked) {
-                        if (isUnlockPending) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(Color(0xFF064E3B).copy(alpha = 0.5f))
-                                    .border(1.dp, GreenSuccess, RoundedCornerShape(10.dp))
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                                    .testTag("profile_unlock_request_sent_banner")
-                            ) {
-                                Text(
-                                    text = "✓ Request Sent to Admin (Status: pending)",
-                                    color = GreenSuccess,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
-                            }
-                        }
-
-                        Button(
-                            onClick = {
-                                localUnlockRequestSent = true
-                                onRequestLocationUnlock()
-                                android.widget.Toast.makeText(
-                                    context,
-                                    "Request Sent to Admin",
-                                    android.widget.Toast.LENGTH_SHORT
-                                ).show()
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 44.dp)
-                                .testTag("profile_request_location_unlock_btn"),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isUnlockPending) Color(0xFF1E293B) else AmberPrimary,
-                                contentColor = if (isUnlockPending) AmberPrimary else Color.Black
-                            ),
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.LocationOn,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (isUnlockPending) "Request Sent to Admin" else "Request Location Unlock",
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 12.sp
-                            )
-                        }
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF064E3B).copy(alpha = 0.4f))
-                                .border(1.dp, GreenSuccess.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
-                                .padding(horizontal = 12.dp, vertical = 8.dp)
-                                .testTag("profile_location_unlocked_banner")
-                        ) {
-                            Text(
-                                text = "🔓 Location Unlocked by Admin — You can edit your location in Edit Profile.",
-                                color = GreenSuccess,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
                     }
 
                     val user = userProfile
@@ -1056,17 +976,6 @@ fun ProfileScreen(
             initialName = userProfile?.name ?: "",
             initialPhone = initialPhone,
             initialCity = userProfile?.defaultCity?.ifBlank { appPreferences.defaultCity } ?: appPreferences.defaultCity,
-            isLocationLocked = isUserLocationLocked,
-            isUnlockPending = isUnlockPending,
-            onRequestLocationUnlock = {
-                localUnlockRequestSent = true
-                onRequestLocationUnlock()
-                android.widget.Toast.makeText(
-                    context,
-                    "Request Sent to Admin",
-                    android.widget.Toast.LENGTH_SHORT
-                ).show()
-            },
             onDismiss = { showEditPersonalDialog = false },
             onSave = { updatedName, updatedPhone, updatedCity ->
                 showEditPersonalDialog = false
@@ -1256,9 +1165,6 @@ private fun EditPersonalProfileDialog(
     initialName: String,
     initialPhone: String,
     initialCity: String,
-    isLocationLocked: Boolean = true,
-    isUnlockPending: Boolean = false,
-    onRequestLocationUnlock: () -> Unit = {},
     onDismiss: () -> Unit,
     onSave: (name: String, phone: String, city: String) -> Unit
 ) {
@@ -1331,15 +1237,11 @@ private fun EditPersonalProfileDialog(
                 OutlinedTextField(
                     value = city,
                     onValueChange = {
-                        if (!isLocationLocked) {
-                            city = it
-                            errorText = null
-                        }
+                        city = it
+                        errorText = null
                     },
-                    enabled = !isLocationLocked,
-                    readOnly = isLocationLocked,
                     label = {
-                        Text(if (isLocationLocked) "Default City / Location (Locked)" else "Default City / Location")
+                        Text("Default City / Location")
                     },
                     leadingIcon = { Icon(Icons.Default.LocationOn, contentDescription = null, tint = AmberPrimary) },
                     singleLine = true,
@@ -1348,34 +1250,6 @@ private fun EditPersonalProfileDialog(
                         .fillMaxWidth()
                         .testTag("edit_profile_city_input")
                 )
-
-                if (isLocationLocked) {
-                    if (isUnlockPending) {
-                        Text(
-                            text = "✓ Request Sent to Admin (pending approval)",
-                            color = GreenSuccess,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Button(
-                        onClick = onRequestLocationUnlock,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isUnlockPending) Color(0xFF0F172A) else AmberPrimary,
-                            contentColor = if (isUnlockPending) AmberPrimary else Color.Black
-                        ),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("dialog_request_location_unlock_btn")
-                    ) {
-                        Text(
-                            text = if (isUnlockPending) "Request Sent to Admin" else "Request Location Unlock",
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 12.sp
-                        )
-                    }
-                }
 
                 if (!errorText.isNullOrBlank()) {
                     Text(
@@ -1392,7 +1266,7 @@ private fun EditPersonalProfileDialog(
                 onClick = {
                     val cleanName = name.trim()
                     val cleanPhone = phone.filter { it.isDigit() }
-                    val cleanCity = if (isLocationLocked) initialCity else city.trim().ifBlank { "Current Location" }
+                    val cleanCity = city.trim().ifBlank { "Current Location" }
                     when {
                         cleanName.length < 2 -> errorText = "Please enter your full name."
                         cleanPhone.length != 10 -> errorText = "Please enter a valid 10-digit phone number."

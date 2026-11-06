@@ -70,11 +70,21 @@ data class UserProfile(
     val services: List<SalonService> = emptyList(),
     val createdAt: Long = System.currentTimeMillis()
 ) {
-    val effectiveCancellationStrikes: Int
-        get() = maxOf(cancellationCount, cancellationStrikes)
+    val isWhitelistedAdminOrDev: Boolean
+        get() = isAdmin ||
+            role.trim().equals("admin", ignoreCase = true) ||
+            role.trim().equals("superadmin", ignoreCase = true) ||
+            email.trim().equals("kushwahapankajkumar00@gmail.com", ignoreCase = true)
 
+    val effectiveCancellationStrikes: Int
+        get() = if (isWhitelistedAdminOrDev) 0 else maxOf(cancellationCount, cancellationStrikes)
+
+    /**
+     * Admin (`role: "admin"` / `"superadmin"` / `isAdmin == true`) and Developer accounts are completely immune
+     * to suspension. Automatic 3-strike suspension is also disabled globally so queue testing is never blocked.
+     */
     val isEffectivelyBlocked: Boolean
-        get() = isBlocked || isSuspended || effectiveCancellationStrikes >= 3
+        get() = if (isWhitelistedAdminOrDev) false else isBlocked
 
     fun toMap(): Map<String, Any?> = buildMap {
         val resolvedPhone = phoneNumber.ifBlank { phone }
@@ -85,7 +95,7 @@ data class UserProfile(
         put("phoneNumber", resolvedPhone)
         put("isPhoneVerified", isPhoneVerified)
         put("role", role)
-        if (isAdmin) {
+        if (isAdmin || isWhitelistedAdminOrDev) {
             put("isAdmin", true)
         }
         put("salonId", salonId)
@@ -100,7 +110,7 @@ data class UserProfile(
         put("cancellationCount", effectiveCancellationStrikes)
         put("cancellationStrikes", effectiveCancellationStrikes)
         put("isSuspended", isEffectivelyBlocked)
-        put("isBlocked", isBlocked)
+        put("isBlocked", if (isWhitelistedAdminOrDev) false else isBlocked)
         put("isLocationLocked", isLocationLocked)
         put("unlockRequestStatus", unlockRequestStatus)
         put("favoriteSalons", favoriteSalons)

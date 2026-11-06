@@ -77,6 +77,18 @@ class MyBookingsViewModel : ViewModel() {
         }
         authStateListener = listener
         auth.addAuthStateListener(listener)
+
+        // Periodically check for 'Pending' bookings that exceed the 5-minute Partner response timeout
+        viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(15_000L)
+                if (cachedFirestoreBookings.any { it.isPendingTimedOut() } ||
+                    cachedLocalBookings.any { it.isPendingTimedOut() }
+                ) {
+                    applyCategorizedBookings(cachedFirestoreBookings)
+                }
+            }
+        }
     }
 
     /**
@@ -212,11 +224,33 @@ class MyBookingsViewModel : ViewModel() {
         }
         for (b in cachedLocalBookings) {
             val key = b.resolvedBookingId.ifBlank { "${b.salonName}_${b.createdAt}" }
-            if (!mergedById.containsKey(key)) {
+            val existing = mergedById[key]
+            if (existing == null) {
                 mergedById[key] = b
+            } else if (b.allocatedTime.isNotBlank() && existing.allocatedTime.isBlank()) {
+                mergedById[key] = existing.copy(
+                    allocatedTime = b.allocatedTime,
+                    time = b.allocatedTime,
+                    timeSlot = b.allocatedTime,
+                    status = b.status
+                )
             }
         }
-        val bookings = mergedById.values.sortedByDescending { it.createdAt }
+        val nowMillis = System.currentTimeMillis()
+        val bookings = mergedById.values.map { booking ->
+            if (booking.isPendingTimedOut(nowMillis)) {
+                try {
+                    FirebaseFirestore.getInstance()
+                        .collection("bookings")
+                        .document(booking.resolvedBookingId)
+                        .set(mapOf("status" to "cancelled"), SetOptions.merge())
+                } catch (_: Exception) {
+                }
+                booking.copy(status = "cancelled")
+            } else {
+                booking
+            }
+        }.sortedByDescending { it.createdAt }
 
         val upcoming = bookings.filter { booking ->
             val normalized = booking.normalizedStatus
@@ -263,7 +297,9 @@ class MyBookingsViewModel : ViewModel() {
             ?: doc.getString("bookingDate")?.trim()?.takeIf { it.isNotBlank() }
             ?: "Today"
 
-        val docTime = doc.getString("time")?.trim()?.takeIf { it.isNotBlank() }
+        val docAllocatedTime = doc.getString("allocatedTime")?.trim().orEmpty()
+        val docTime = docAllocatedTime.takeIf { it.isNotBlank() }
+            ?: doc.getString("time")?.trim()?.takeIf { it.isNotBlank() }
             ?: doc.getString("timeSlot")?.trim().orEmpty()
 
         val rawStatus = doc.getString("status")?.trim() ?: "Pending"
@@ -284,6 +320,7 @@ class MyBookingsViewModel : ViewModel() {
             salonName = docSalonName,
             date = docDate,
             time = docTime,
+            allocatedTime = docAllocatedTime,
             status = canonicalStatus,
             id = docBookingId,
             customerId = docUserId,

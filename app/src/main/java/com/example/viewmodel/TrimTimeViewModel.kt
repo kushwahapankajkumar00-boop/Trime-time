@@ -71,6 +71,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val authError: StateFlow<String?> = repository.authError
     val showPartnerOnboarding: StateFlow<Boolean> = repository.showPartnerOnboarding
     val appPreferences: StateFlow<AppPreferences> = repository.appPreferences
+    val isGlobalRushModeEnabled: StateFlow<Boolean> = repository.isGlobalRushModeEnabled
 
     // Live Customer GPS Coordinates & Reverse-Geocoded Location Display
     val userLatitude: StateFlow<Double> = repository.userLatitude
@@ -90,8 +91,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     val showAdminDashboard: StateFlow<Boolean> = _showAdminDashboard.asStateFlow()
 
     val isSuperAdmin: StateFlow<Boolean> = currentUserProfile.combine(allUsers) { profile, _ ->
-        profile?.isAdmin == true ||
-            profile?.email?.equals("kushwahapankajkumar00@gmail.com", ignoreCase = true) == true
+        profile?.isWhitelistedAdminOrDev == true
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     // Whether the currently logged-in user already owns a registered salon in Firestore
@@ -318,12 +318,9 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     fun setServiceToBook(service: SalonService?) {
         if (service != null) {
             val profile = currentUserProfile.value
-            if (profile != null && profile.isEffectivelyBlocked) {
-                _userMessage.value = if (profile.isBlocked) {
-                    "Account Blocked: Your account has been blocked by Admin and cannot make new bookings."
-                } else {
-                    "Security Lockout: Your account is suspended due to 3 cancellation strikes."
-                }
+            val isImmuneAdmin = profile?.isWhitelistedAdminOrDev == true
+            if (profile != null && !isImmuneAdmin && profile.isEffectivelyBlocked) {
+                _userMessage.value = "Account Blocked: Your account has been blocked by Admin and cannot make new bookings."
                 return
             }
             val currentUid = profile?.id?.trim().orEmpty()
@@ -332,9 +329,32 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 _userMessage.value = "This salon is currently suspended or unavailable for bookings."
                 return
             }
-            if (currentUid.isNotBlank() && salon != null && (salon.ownerId == currentUid || salon.partnerId == currentUid)) {
+            if (!isImmuneAdmin && currentUid.isNotBlank() && salon != null && (salon.ownerId == currentUid || salon.partnerId == currentUid)) {
                 _userMessage.value = "This is your own registered salon. Manage it in Partner Mode."
                 return
+            }
+            if (salon != null) {
+                val activeQueueCount = allBookings.value.count {
+                    (it.salonId == salon.id || (salon.partnerId.isNotBlank() && it.partnerId == salon.partnerId)) &&
+                        SecurityValidator.isBookingActiveStatus(it.status)
+                }
+                val isRushActive = Booking.isRushModeActive(isGlobalRushModeEnabled.value, activeQueueCount)
+                val durationMins = if (service.duration > 0) service.duration else if (service.durationMinutes > 0) service.durationMinutes else 20
+                if (isRushActive) {
+                    val waitMins = Booking.calculateSystemWaitMinutes(activeQueueCount, durationMins)
+                    val etaTime = Booking.calculateFormattedEtaClockTime(activeQueueCount, durationMins)
+                    _selectedTimeSlot.value = if (activeQueueCount > 0) {
+                        "Live ETA: $etaTime (~${waitMins}m)"
+                    } else {
+                        "Live ETA: $etaTime (⚡ Instant)"
+                    }
+                } else {
+                    _selectedTimeSlot.value = if (salon.isBusy) {
+                        "Waitlist: Next in Line (~20m)"
+                    } else {
+                        "In 15 mins (⚡ Instant)"
+                    }
+                }
             }
         }
         _serviceToBook.value = service
@@ -363,20 +383,17 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
-    // Rule 2: One Active Booking Rule (strictly scoped to currentUser.uid; status in PENDING, ACCEPTED, IN_PROGRESS)
+    // Consecutive bookings enabled for Dynamic Rush Mode queue testing (3+ active bookings)
     val hasActivePendingBooking: StateFlow<Boolean> = combine(
         customerBookings,
         currentUserProfile
-    ) { bookings, profile ->
-        val currentUid = profile?.id?.trim().orEmpty()
-        currentUid.isNotBlank() && bookings.any { booking ->
-            booking.customerId == currentUid && SecurityValidator.isBookingActiveStatus(booking.status)
-        }
+    ) { _, _ ->
+        false
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
-    // Rule 3: Admin Block & 3-Strike Anti-Spam Rule (isBlocked || isSuspended || cancellationStrikes >= 3 = blocked)
+    // Rule 3: Admin Block & Anti-Spam Whitelist (Admin/SuperAdmin/Developer immune; automatic 3-strike suspension disabled)
     val isUserSuspended: StateFlow<Boolean> = currentUserProfile.combine(customerBookings) { profile, _ ->
-        profile?.isEffectivelyBlocked == true
+        if (profile?.isWhitelistedAdminOrDev == true) false else profile?.isEffectivelyBlocked == true
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     fun confirmBooking(customerName: String, customerPhone: String) {
@@ -387,27 +404,19 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        // Rule 3 Auto-Block / Admin-Block check
-        if (profile != null && profile.isEffectivelyBlocked) {
-            _userMessage.value = if (profile.isBlocked) {
-                "Account Blocked: Your account has been blocked by Admin and cannot make new bookings."
-            } else {
-                "Security Lockout: Your account is blocked from new bookings due to 3 cancellation strikes."
-            }
+        val isImmuneAdmin = profile?.isWhitelistedAdminOrDev == true
+
+        // Rule 3 Admin-Block check (Whitelisted Admin/SuperAdmin immune; auto-suspension disabled)
+        if (profile != null && !isImmuneAdmin && profile.isEffectivelyBlocked) {
+            _userMessage.value = "Account Blocked: Your account has been blocked by Admin and cannot make new bookings."
             return
         }
 
         val salon = _selectedSalon.value ?: return
 
-        // Rule 4: Prevent Self-Booking (Owner Booking Their Own Salon)
-        if (custId.isNotBlank() && (salon.ownerId == custId || salon.partnerId == custId)) {
+        // Rule 4: Prevent Self-Booking unless whitelisted Admin/Developer testing queue
+        if (!isImmuneAdmin && custId.isNotBlank() && (salon.ownerId == custId || salon.partnerId == custId)) {
             _userMessage.value = "This is your own registered salon. Manage it in Partner Mode."
-            return
-        }
-
-        // Rule 2 One Active Booking check (PENDING, ACCEPTED, IN_PROGRESS)
-        if (hasActivePendingBooking.value) {
-            _userMessage.value = "You already have an active booking (Pending/Accepted/In Progress). Please complete or cancel it first."
             return
         }
 
@@ -1045,9 +1054,10 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         _partnerBookingFilter.value = filter
     }
 
-    fun acceptBooking(bookingId: String) {
-        if (repository.acceptBooking(bookingId)) {
-            _userMessage.value = "Booking ACCEPTED! Customer notified in real time."
+    fun acceptBooking(bookingId: String, allocatedTime: String = "") {
+        if (repository.acceptBooking(bookingId, allocatedTime)) {
+            val timeSuffix = if (allocatedTime.isNotBlank()) " for $allocatedTime" else ""
+            _userMessage.value = "Booking ACCEPTED$timeSuffix! Customer notified in real time."
         }
     }
 
@@ -1154,13 +1164,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     fun cancelBooking(bookingId: String) {
         val success = repository.cancelBooking(bookingId)
         if (success) {
-            val profile = currentUserProfile.value
-            val strikes = profile?.effectiveCancellationStrikes ?: 0
-            if (strikes >= 3 || profile?.isSuspended == true) {
-                _userMessage.value = "Security Lockout: Your account has been suspended for 3 cancellation strikes."
-            } else {
-                _userMessage.value = "Booking cancelled. (Cancellation $strikes/3 strikes)"
-            }
+            _userMessage.value = "Booking cancelled."
         }
     }
 
@@ -1753,6 +1757,22 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 }
             }
         }
+    }
+
+    fun setGlobalRushModeEnabled(enabled: Boolean) {
+        repository.setGlobalRushModeEnabled(
+            enabled = enabled,
+            onSuccess = {
+                _userMessage.value = if (enabled) {
+                    "🎉 Global Festival / Rush Mode ENABLED in app_settings!"
+                } else {
+                    "Global Festival / Rush Mode disabled (Auto Local Rush >= 3 active)."
+                }
+            },
+            onError = { err ->
+                _userMessage.value = err
+            }
+        )
     }
 
     fun clearUserMessage() {

@@ -96,6 +96,7 @@ fun TrimTimeApp(
     val customerBookings by viewModel.customerBookings.collectAsState()
     val latestCompletedBooking by viewModel.latestCompletedBooking.collectAsState()
     val appPreferences by viewModel.appPreferences.collectAsState()
+    val isGlobalRushModeEnabled by viewModel.isGlobalRushModeEnabled.collectAsState()
     val hasRegisteredPartnerSalon by viewModel.hasRegisteredPartnerSalon.collectAsState()
     val showPartnerOnboarding by viewModel.showPartnerOnboarding.collectAsState()
 
@@ -228,6 +229,10 @@ fun TrimTimeApp(
                                 },
                                 onApproveLocationUnlock = { userId, salonId ->
                                     viewModel.approveLocationUnlock(userId, salonId)
+                                },
+                                isGlobalRushModeEnabled = isGlobalRushModeEnabled,
+                                onToggleGlobalRushMode = { enabled ->
+                                    viewModel.setGlobalRushModeEnabled(enabled)
                                 }
                             )
                         }
@@ -314,9 +319,15 @@ fun TrimTimeApp(
                                             val isActiveSalonFav = activeSalon.id in favoriteSalonIds ||
                                                 (activeSalon.partnerId.isNotBlank() && activeSalon.partnerId in favoriteSalonIds) ||
                                                 (activeSalon.ownerId.isNotBlank() && activeSalon.ownerId in favoriteSalonIds)
+                                            val activeSalonQueueCount = allBookings.count {
+                                                (it.salonId == activeSalon.id || (activeSalon.partnerId.isNotBlank() && it.partnerId == activeSalon.partnerId)) &&
+                                                    com.example.util.SecurityValidator.isBookingActiveStatus(it.status)
+                                            }
                                             SalonDetailScreen(
                                                 salon = activeSalon,
-                                                currentUserId = currentCustomerUid,
+                                                currentUserId = if (isSuperAdmin || currentUserProfile?.isWhitelistedAdminOrDev == true) "" else currentCustomerUid,
+                                                activeLiveQueueCount = activeSalonQueueCount,
+                                                isGlobalRushModeEnabled = isGlobalRushModeEnabled,
                                                 hasActiveBooking = hasActivePendingBooking,
                                                 isSuspended = isUserSuspended,
                                                 isFavorite = isActiveSalonFav,
@@ -506,7 +517,11 @@ fun TrimTimeApp(
                                         activeFilter = partnerBookingFilter,
                                         onFilterChange = { viewModel.setPartnerBookingFilter(it) },
                                         onOpenPinVerification = { viewModel.openPinVerificationDialog(it) },
+                                        isGlobalRushModeEnabled = isGlobalRushModeEnabled,
                                         onAcceptBooking = { viewModel.acceptBooking(it) },
+                                        onAcceptBookingWithTime = { bookingId, allocatedTime ->
+                                            viewModel.acceptBooking(bookingId, allocatedTime)
+                                        },
                                         onRejectBooking = { viewModel.rejectBooking(it) },
                                         onToggleSalonOpen = { viewModel.toggleSalonOpenStatus(it) },
                                         onSetSalonOpen = { id, isOpen -> viewModel.setSalonOpenStatus(id, isOpen) },
@@ -559,11 +574,17 @@ fun TrimTimeApp(
     // Customer Booking Bottom Sheet
     if (serviceToBook != null && selectedSalon != null) {
         val liveBookingSalon = allSalons.find { it.id == selectedSalon?.id } ?: selectedSalon!!
+        val liveBookingSalonQueueCount = allBookings.count {
+            (it.salonId == liveBookingSalon.id || (liveBookingSalon.partnerId.isNotBlank() && it.partnerId == liveBookingSalon.partnerId)) &&
+                com.example.util.SecurityValidator.isBookingActiveStatus(it.status)
+        }
         BookingBottomSheet(
             salon = liveBookingSalon,
             service = serviceToBook!!,
             userProfile = currentUserProfile ?: com.example.model.UserProfile(name = "Customer", phone = "", phoneNumber = ""),
             selectedSlot = selectedTimeSlot,
+            activeLiveQueueCount = liveBookingSalonQueueCount,
+            isGlobalRushModeEnabled = isGlobalRushModeEnabled,
             hasActiveBooking = hasActivePendingBooking,
             isSuspended = isUserSuspended,
             onServiceChanged = { updatedService ->

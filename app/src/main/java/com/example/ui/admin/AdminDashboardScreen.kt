@@ -85,7 +85,9 @@ fun AdminDashboardScreen(
     onUpdateSalonStatus: (partnerId: String, status: String) -> Unit = { _, _ -> },
     onUpdateUserBlockStatus: (userId: String, isBlocked: Boolean) -> Unit,
     onResolveSupportTicket: (ticketId: String, isResolved: Boolean) -> Unit,
-    onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit = { _, _ -> }
+    onApproveLocationUnlock: (userId: String, salonId: String?) -> Unit = { _, _ -> },
+    isGlobalRushModeEnabled: Boolean = false,
+    onToggleGlobalRushMode: (Boolean) -> Unit = {}
 ) {
     BackHandler { onBack() }
 
@@ -372,6 +374,83 @@ fun AdminDashboardScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            // Super Admin Global Festival / Rush Mode Control Card (`app_settings` Firestore sync)
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .testTag("admin_global_rush_mode_card"),
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isGlobalRushModeEnabled) Color(0xFF451A03) else Color(0xFF1E293B)
+                ),
+                border = BorderStroke(
+                    width = 1.5.dp,
+                    color = if (isGlobalRushModeEnabled) TrimTimeGold else Color(0xFF334155)
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(
+                                    if (isGlobalRushModeEnabled) TrimTimeGold.copy(alpha = 0.22f)
+                                    else Color(0xFF334155)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.HolidayVillage,
+                                contentDescription = "Global Festival / Rush Mode",
+                                tint = if (isGlobalRushModeEnabled) TrimTimeGold else Color(0xFF94A3B8),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Global Festival / Rush Mode",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (isGlobalRushModeEnabled) Color(0xFFFDE68A) else Color.White
+                            )
+                            Text(
+                                text = if (isGlobalRushModeEnabled) {
+                                    "ACTIVE (All Salons in Advance Smart ETA Mode • Synced to app_settings)"
+                                } else {
+                                    "OFF (Auto Local Rush activates per salon when Live Queue >= 3)"
+                                },
+                                fontSize = 11.sp,
+                                color = if (isGlobalRushModeEnabled) TrimTimeGold else Color(0xFF94A3B8)
+                            )
+                        }
+                    }
+
+                    Switch(
+                        checked = isGlobalRushModeEnabled,
+                        onCheckedChange = { enabled -> onToggleGlobalRushMode(enabled) },
+                        modifier = Modifier.testTag("admin_global_rush_mode_switch"),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color(0xFF1E1402),
+                            checkedTrackColor = TrimTimeGold,
+                            uncheckedThumbColor = Color(0xFF94A3B8),
+                            uncheckedTrackColor = Color(0xFF0F172A)
+                        )
+                    )
+                }
+            }
+
             // Search Filter Bar
             OutlinedTextField(
                 value = searchQuery,

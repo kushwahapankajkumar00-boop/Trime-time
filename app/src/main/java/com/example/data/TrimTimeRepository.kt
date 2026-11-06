@@ -33,6 +33,7 @@ import com.example.model.UserRole
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthException
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.OAuthProvider
@@ -87,6 +88,8 @@ class TrimTimeRepository private constructor(context: Context) {
     private var usersListener: ListenerRegistration? = null
     private var defaultUsersListener: ListenerRegistration? = null
     private var feedbackListener: ListenerRegistration? = null
+    private var appSettingsListener: ListenerRegistration? = null
+    private var defaultAppSettingsListener: ListenerRegistration? = null
 
     private var namedDbUsers: List<UserProfile> = emptyList()
     private var defaultDbUsers: List<UserProfile> = emptyList()
@@ -147,6 +150,12 @@ class TrimTimeRepository private constructor(context: Context) {
     private val _appPreferences = MutableStateFlow(loadSavedPreferences())
     val appPreferences: StateFlow<AppPreferences> = _appPreferences.asStateFlow()
 
+    // Central Global Festival / Rush Mode state synced with Firestore `app_settings/global_config`
+    private val _isGlobalRushModeEnabled = MutableStateFlow(
+        settingsPrefs.getBoolean("pref_global_rush_mode", false)
+    )
+    val isGlobalRushModeEnabled: StateFlow<Boolean> = _isGlobalRushModeEnabled.asStateFlow()
+
     // Live Customer GPS Coordinates & Reverse-Geocoded Location Display
     private val _userLatitude = MutableStateFlow(
         settingsPrefs.getString("pref_user_lat", null)?.toDoubleOrNull()?.takeIf { it != 0.0 } ?: 26.3359
@@ -169,6 +178,64 @@ class TrimTimeRepository private constructor(context: Context) {
 
     init {
         initFirebase(context)
+        startPendingBookingTimeoutWatcher()
+    }
+
+    /**
+     * Background watcher that periodically checks for 'Pending' bookings where the Partner
+     * has not responded within 5 minutes (`Booking.PENDING_TIMEOUT_MS`) and auto-cancels them.
+     */
+    private fun startPendingBookingTimeoutWatcher() {
+        scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(15_000L)
+                sweepExpiredPendingBookings()
+            }
+        }
+    }
+
+    /**
+     * Sweeps `_bookings` for any 'Pending' booking older than 5 minutes and auto-cancels it
+     * in memory and in Firestore without adding a customer cancellation strike.
+     */
+    fun sweepExpiredPendingBookings(nowMillis: Long = System.currentTimeMillis()) {
+        val expiredPending = _bookings.value.filter { it.isPendingTimedOut(nowMillis) }
+        if (expiredPending.isEmpty()) return
+
+        val expiredIds = expiredPending.map { it.id }.toSet()
+        _bookings.value = _bookings.value.map { b ->
+            if (b.id in expiredIds) b.copy(status = "cancelled") else b
+        }
+        _customerBookings.value = _customerBookings.value.map { b ->
+            if (b.id in expiredIds) b.copy(status = "cancelled") else b
+        }
+
+        val db = firestore ?: defaultFirestore ?: return
+        expiredPending.forEach { expired ->
+            val bookingRef = db.collection("bookings").document(expired.id)
+            db.runTransaction { transaction ->
+                val snap = transaction.get(bookingRef)
+                val currentStatus = snap.getString("status")?.trim().orEmpty()
+                if (snap.exists() && currentStatus.equals("pending", ignoreCase = true)) {
+                    transaction.update(
+                        bookingRef,
+                        mapOf(
+                            "status" to "cancelled",
+                            "allocatedTime" to "Auto-Cancelled (5m Partner Timeout)"
+                        )
+                    )
+                }
+                null
+            }.addOnSuccessListener {
+                Log.d(tag, "Auto-cancelled expired Pending booking (>5m): ${expired.id}")
+            }.addOnFailureListener { err ->
+                Log.w(tag, "Fallback auto-cancel for expired Pending booking ${expired.id}: ${err.message}")
+                bookingRef.set(
+                    mapOf("status" to "cancelled"),
+                    com.google.firebase.firestore.SetOptions.merge()
+                )
+            }
+        }
     }
 
     fun isDemoSalon(salonId: String): Boolean = salonId in seedSalonIds
@@ -751,12 +818,24 @@ class TrimTimeRepository private constructor(context: Context) {
                     return@addSnapshotListener
                 }
                 if (snapshot != null) {
+                    val nowMillis = System.currentTimeMillis()
                     val liveBookings = snapshot.documents.mapNotNull { doc ->
                         parseBookingDocument(doc)
                     }.filter { booking ->
                         booking.customerId.isNotBlank() &&
                             booking.customerId !in invalidSharedUserIds &&
                             booking.id != "past_demo_1"
+                    }.map { booking ->
+                        if (booking.isPendingTimedOut(nowMillis)) {
+                            // Auto-cancel 'Pending' booking in Firestore if Partner didn't respond within 5 mins
+                            db.collection("bookings").document(booking.id).set(
+                                mapOf("status" to "cancelled"),
+                                com.google.firebase.firestore.SetOptions.merge()
+                            )
+                            booking.copy(status = "cancelled")
+                        } else {
+                            booking
+                        }
                     }
                     val sortedAll = liveBookings.sortedByDescending { it.createdAt }
                     _bookings.value = sortedAll
@@ -819,6 +898,41 @@ class TrimTimeRepository private constructor(context: Context) {
                     _supportTickets.value = liveTickets
                 }
             }
+
+            // Live Real-Time Listener for Central `app_settings` collection (Global Festival / Rush Mode)
+            appSettingsListener?.remove()
+            appSettingsListener = db.collection("app_settings").addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    Log.w(tag, "Firestore app_settings listener error: ${error.message}")
+                    return@addSnapshotListener
+                }
+                if (snapshot != null && !snapshot.isEmpty) {
+                    val targetDoc = snapshot.documents.find { it.id == "global_config" || it.id == "rush_mode" }
+                        ?: snapshot.documents.firstOrNull { it.contains("isGlobalRushModeEnabled") }
+                        ?: snapshot.documents.firstOrNull()
+                    if (targetDoc != null && targetDoc.contains("isGlobalRushModeEnabled")) {
+                        val enabled = readBooleanField(targetDoc, "isGlobalRushModeEnabled", false)
+                        _isGlobalRushModeEnabled.value = enabled
+                        settingsPrefs.edit().putBoolean("pref_global_rush_mode", enabled).apply()
+                    }
+                }
+            }
+
+            defaultAppSettingsListener?.remove()
+            if (defDb != null && defDb != db) {
+                defaultAppSettingsListener = defDb.collection("app_settings").addSnapshotListener { snapshot, error ->
+                    if (error == null && snapshot != null && !snapshot.isEmpty) {
+                        val targetDoc = snapshot.documents.find { it.id == "global_config" || it.id == "rush_mode" }
+                            ?: snapshot.documents.firstOrNull { it.contains("isGlobalRushModeEnabled") }
+                            ?: snapshot.documents.firstOrNull()
+                        if (targetDoc != null && targetDoc.contains("isGlobalRushModeEnabled")) {
+                            val enabled = readBooleanField(targetDoc, "isGlobalRushModeEnabled", false)
+                            _isGlobalRushModeEnabled.value = enabled
+                            settingsPrefs.edit().putBoolean("pref_global_rush_mode", enabled).apply()
+                        }
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.e(tag, "Error setting up live listeners: ${e.message}")
         }
@@ -842,10 +956,14 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     private fun readIsAdminFromDoc(doc: com.google.firebase.firestore.DocumentSnapshot): Boolean {
+        val roleVal = doc.getString("role")?.trim().orEmpty()
+        val emailVal = doc.getString("email")?.trim().orEmpty()
         return readBooleanField(doc, "isAdmin", false) ||
             readBooleanField(doc, "admin", false) ||
             readBooleanField(doc, "is_admin", false) ||
-            doc.getString("role")?.trim()?.equals("admin", ignoreCase = true) == true
+            roleVal.equals("admin", ignoreCase = true) ||
+            roleVal.equals("superadmin", ignoreCase = true) ||
+            emailVal.equals("kushwahapankajkumar00@gmail.com", ignoreCase = true)
     }
 
     private fun isSameUserIdentity(a: UserProfile, b: UserProfile): Boolean {
@@ -930,9 +1048,9 @@ class TrimTimeRepository private constructor(context: Context) {
         val matchingDocs = (namedDbUsers + defaultDbUsers).filter { isSameUserIdentity(it, current) }
         if (matchingDocs.isNotEmpty()) {
             val exactDoc = matchingDocs.find { it.id == current.id } ?: matchingDocs.first()
-            val anyIsAdmin = current.isAdmin || matchingDocs.any { it.isAdmin }
-            val anyIsBlocked = exactDoc.isBlocked
-            val maxStrikes = maxOf(current.cancellationStrikes, exactDoc.cancellationStrikes)
+            val anyIsAdmin = current.isWhitelistedAdminOrDev || matchingDocs.any { it.isWhitelistedAdminOrDev }
+            val anyIsBlocked = if (anyIsAdmin) false else exactDoc.isBlocked
+            val maxStrikes = if (anyIsAdmin) 0 else maxOf(current.cancellationStrikes, exactDoc.cancellationStrikes)
             val resolvedStatus = exactDoc.unlockRequestStatus.ifBlank { current.unlockRequestStatus }.ifBlank { "none" }
             val resolvedLocked = if (resolvedStatus.equals("approved", ignoreCase = true) && !exactDoc.isLocationLocked) {
                 false
@@ -958,7 +1076,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 imageUrl = resolvedImgUrl,
                 isAdmin = anyIsAdmin,
                 isBlocked = anyIsBlocked,
-                isSuspended = exactDoc.isSuspended || anyIsBlocked,
+                isSuspended = anyIsBlocked,
                 cancellationCount = maxStrikes,
                 cancellationStrikes = maxStrikes,
                 isLocationLocked = resolvedLocked,
@@ -969,9 +1087,18 @@ class TrimTimeRepository private constructor(context: Context) {
             if (updated != current) {
                 _currentUserProfile.value = updated
             }
-            if (anyIsAdmin && exactDoc.id == current.id && !exactDoc.isAdmin) {
+            if (exactDoc.id == current.id && (exactDoc.isSuspended && !anyIsBlocked || (anyIsAdmin && !exactDoc.isAdmin))) {
                 firestore?.collection("users")?.document(current.id)
-                    ?.set(mapOf("isAdmin" to true), com.google.firebase.firestore.SetOptions.merge())
+                    ?.set(
+                        mapOf(
+                            "isAdmin" to anyIsAdmin,
+                            "isSuspended" to anyIsBlocked,
+                            "isBlocked" to anyIsBlocked,
+                            "cancellationStrikes" to maxStrikes,
+                            "cancellationCount" to maxStrikes
+                        ),
+                        com.google.firebase.firestore.SetOptions.merge()
+                    )
             }
         }
     }
@@ -981,17 +1108,17 @@ class TrimTimeRepository private constructor(context: Context) {
             val uid = doc.id.takeIf { it.isNotBlank() }
                 ?: doc.getString("id")?.takeIf { it.isNotBlank() }
                 ?: return null
-            val strikes = maxOf(
-                doc.getLong("cancellationStrikes")?.toInt() ?: 0,
-                doc.getLong("cancellationCount")?.toInt() ?: 0
-            )
-            val isBlockedFlag = readBooleanField(doc, "isBlocked", false)
-            val isSuspendedFlag = readBooleanField(doc, "isSuspended", strikes >= 3) || isBlockedFlag
             val phoneVal = doc.getString("phoneNumber")?.takeIf { it.isNotBlank() }
                 ?: doc.getString("phone")?.takeIf { it.isNotBlank() }
                 ?: ""
             val emailVal = doc.getString("email") ?: ""
             val isAdminFlag = readIsAdminFromDoc(doc)
+            val strikes = if (isAdminFlag) 0 else maxOf(
+                doc.getLong("cancellationStrikes")?.toInt() ?: 0,
+                doc.getLong("cancellationCount")?.toInt() ?: 0
+            )
+            val isBlockedFlag = if (isAdminFlag) false else readBooleanField(doc, "isBlocked", false)
+            val isSuspendedFlag = isBlockedFlag
             val unlockStatusVal = doc.getString("unlockRequestStatus")?.trim()?.lowercase()
                 ?.takeIf { it in setOf("none", "pending", "approved") } ?: "none"
             val isLocationLockedFlag = readBooleanField(
@@ -1119,7 +1246,9 @@ class TrimTimeRepository private constructor(context: Context) {
             val resolvedDate = doc.getString("date")?.takeIf { it.isNotBlank() }
                 ?: doc.getString("bookingDate")?.takeIf { it.isNotBlank() }
                 ?: "Today"
-            val resolvedTime = doc.getString("time")?.takeIf { it.isNotBlank() }
+            val docAllocatedTime = doc.getString("allocatedTime")?.trim().orEmpty()
+            val resolvedTime = docAllocatedTime.takeIf { it.isNotBlank() }
+                ?: doc.getString("time")?.takeIf { it.isNotBlank() }
                 ?: doc.getString("timeSlot").orEmpty()
             Booking(
                 bookingId = docId,
@@ -1128,6 +1257,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 salonName = doc.getString("salonName")?.trim() ?: "",
                 date = resolvedDate,
                 time = resolvedTime,
+                allocatedTime = docAllocatedTime,
                 status = doc.getString("status") ?: "Pending",
                 id = docId,
                 customerId = resolvedUser,
@@ -1856,7 +1986,6 @@ class TrimTimeRepository private constructor(context: Context) {
                         existingDoc.getLong("cancellationStrikes")?.toInt() ?: 0,
                         existingDoc.getLong("cancellationCount")?.toInt() ?: 0
                     )
-                    val existingIsSuspended = readBooleanField(existingDoc, "isSuspended", existingCancellationCount >= 3)
                     val verifiedSalon = _salons.value.find {
                         it.id !in seedSalonIds &&
                             (it.ownerId == uid || it.partnerId == uid) &&
@@ -1873,6 +2002,16 @@ class TrimTimeRepository private constructor(context: Context) {
                         phone = existingPhone,
                         directFlag = readIsAdminFromDoc(existingDoc)
                     )
+                    val rawRole = existingDoc.getString("role")?.trim()?.lowercase() ?: "customer"
+                    val effectiveRole = if (rawRole in setOf("admin", "superadmin", "partner", "customer")) rawRole else "customer"
+                    val safeCancellationCount = if (existingIsAdmin) 0 else existingCancellationCount
+                    val safeIsBlocked = if (existingIsAdmin) false else existingIsBlocked
+                    if (readBooleanField(existingDoc, "isSuspended", false) && !safeIsBlocked) {
+                        userDocRef.set(
+                            mapOf("isSuspended" to false, "cancellationStrikes" to 0, "cancellationCount" to 0),
+                            SetOptions.merge()
+                        )
+                    }
                     val existingCreatedAt = existingDoc.getLong("createdAt") ?: System.currentTimeMillis()
                     val existingUnlockStatus = existingDoc.getString("unlockRequestStatus")?.trim()?.lowercase()
                         ?.takeIf { it in setOf("none", "pending", "approved") } ?: "none"
@@ -1889,14 +2028,14 @@ class TrimTimeRepository private constructor(context: Context) {
                         phone = existingPhone,
                         phoneNumber = existingPhone,
                         isPhoneVerified = existingIsPhoneVerified,
-                        role = "customer",
+                        role = effectiveRole,
                         salonId = existingSalonId,
                         hasRegisteredSalon = existingHasSalon,
                         defaultCity = existingCity,
-                        cancellationCount = existingCancellationCount,
-                        cancellationStrikes = existingCancellationCount,
-                        isSuspended = existingIsSuspended || existingIsBlocked,
-                        isBlocked = existingIsBlocked,
+                        cancellationCount = safeCancellationCount,
+                        cancellationStrikes = safeCancellationCount,
+                        isSuspended = safeIsBlocked,
+                        isBlocked = safeIsBlocked,
                         isAdmin = existingIsAdmin,
                         isLocationLocked = existingLocationLocked,
                         unlockRequestStatus = existingUnlockStatus,
@@ -2788,6 +2927,8 @@ class TrimTimeRepository private constructor(context: Context) {
                         phone = existingPhoneVal,
                         directFlag = readIsAdminFromDoc(doc)
                     )
+                    val safeIsBlockedVal = if (existingIsAdminVal) false else existingIsBlockedVal
+                    val safeCancelCount = if (existingIsAdminVal) 0 else cancelCount
 
                     val existingUnlockStatusVal = doc.getString("unlockRequestStatus")?.trim()?.lowercase()
                         ?.takeIf { it in setOf("none", "pending", "approved") } ?: "none"
@@ -2805,7 +2946,14 @@ class TrimTimeRepository private constructor(context: Context) {
                     val existingFavRaw = doc.get("favoriteSalons") as? List<*> ?: emptyList<Any?>()
                     val existingFavSalons = existingFavRaw.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }.distinct()
 
-                    // Every user MUST default to Customer Mode upon Login / Session Restore
+                    if (suspended && !safeIsBlockedVal) {
+                        firestoreDb.collection("users").document(uid).set(
+                            mapOf("isSuspended" to false, "cancellationStrikes" to 0, "cancellationCount" to 0),
+                            com.google.firebase.firestore.SetOptions.merge()
+                        )
+                    }
+
+                    // Every user defaults to Customer UI mode upon Login / Session Restore, while preserving admin role immunity
                     val profile = UserProfile(
                         id = uid,
                         name = SecurityValidator.sanitizeName(doc.getString("name") ?: user?.displayName ?: "Customer"),
@@ -2813,14 +2961,16 @@ class TrimTimeRepository private constructor(context: Context) {
                         phone = existingPhoneVal,
                         phoneNumber = existingPhoneVal,
                         isPhoneVerified = existingPhoneVerifiedVal,
-                        role = "customer",
+                        role = doc.getString("role")?.takeIf {
+                            it.equals("admin", ignoreCase = true) || it.equals("superadmin", ignoreCase = true)
+                        } ?: "customer",
                         salonId = salonIdVal,
                         hasRegisteredSalon = hasRegisteredVal,
                         defaultCity = defaultCityVal,
-                        cancellationCount = cancelCount,
-                        cancellationStrikes = cancelCount,
-                        isSuspended = suspended || existingIsBlockedVal,
-                        isBlocked = existingIsBlockedVal,
+                        cancellationCount = safeCancelCount,
+                        cancellationStrikes = safeCancelCount,
+                        isSuspended = safeIsBlockedVal,
+                        isBlocked = safeIsBlockedVal,
                         isAdmin = existingIsAdminVal,
                         isLocationLocked = existingLocationLockedVal,
                         unlockRequestStatus = existingUnlockStatusVal,
@@ -2909,34 +3059,60 @@ class TrimTimeRepository private constructor(context: Context) {
             throw IllegalStateException("Please log in with your Mobile Number or Email before booking.")
         }
 
-        // Rule 3: Strictly enforce Admin Block & 3-Strike Anti-Spam Rule (isBlocked || isSuspended || cancellationStrikes >= 3)
-        if (currentProfile != null && currentProfile.isEffectivelyBlocked) {
-            val blockMsg = if (currentProfile.isBlocked) {
-                "Account Blocked: Your account has been blocked by TrimTime Admin and cannot make new bookings."
-            } else {
-                "Security Lockout: Your account is suspended due to 3 or more booking cancellations."
-            }
-            throw IllegalStateException(blockMsg)
+        // Whitelist Admin (`role: "admin"` / `"superadmin"`) & Developer accounts from suspension,
+        // and allow creating 3+ consecutive bookings to test Dynamic Rush Mode seamlessly.
+        if (currentProfile != null && !currentProfile.isWhitelistedAdminOrDev && currentProfile.isBlocked) {
+            throw IllegalStateException("Account Blocked: Your account has been blocked by TrimTime Admin and cannot make new bookings.")
         }
 
-        // Rule 4: Prevent Self-Booking (Owner Booking Their Own Salon) & Suspended/Rejected Salons
+        // Prevent booking Suspended/Rejected Salons
         val targetSalon = _salons.value.find { it.id == salonId }
         if (targetSalon != null && (targetSalon.isSuspended || targetSalon.approvalStatus.equals("REJECTED", ignoreCase = true))) {
             throw IllegalStateException("This salon is currently suspended or unavailable for bookings.")
         }
         if (targetSalon != null &&
+            currentProfile?.isWhitelistedAdminOrDev != true &&
             resolvedCustomerId.isNotBlank() &&
             (targetSalon.ownerId == resolvedCustomerId || targetSalon.partnerId == resolvedCustomerId)
         ) {
             throw IllegalStateException("This is your own registered salon. Manage it in Partner Mode.")
         }
 
-        // Rule 2: Strictly block Customer if they already have an active booking (status in ["PENDING", "ACCEPTED", "IN_PROGRESS"])
-        val hasActiveBooking = (_customerBookings.value + _bookings.value).any { b ->
-            b.customerId == resolvedCustomerId && SecurityValidator.isBookingActiveStatus(b.status)
+        sweepExpiredPendingBookings()
+
+        // Edge Case Protection — Closing Time Guard:
+        // Block the booking request if the newly calculated ETA exceeds the salon's official closing time.
+        val activeSalonQueueCount = _bookings.value.count { b ->
+            (b.salonId == salonId || (targetSalon != null && targetSalon.partnerId.isNotBlank() && b.partnerId == targetSalon.partnerId)) &&
+                !b.isPendingTimedOut() &&
+                SecurityValidator.isBookingActiveStatus(b.status)
         }
-        if (hasActiveBooking) {
-            throw IllegalStateException("You already have an active booking (Pending/Accepted/In-Progress). Please complete or cancel it first.")
+        val matchedService = targetSalon?.services?.find {
+            it.name.equals(service, ignoreCase = true) || it.serviceName.equals(service, ignoreCase = true)
+        }
+        val serviceDurationMins = when {
+            matchedService != null && matchedService.duration > 0 -> matchedService.duration
+            matchedService != null && matchedService.durationMinutes > 0 -> matchedService.durationMinutes
+            targetSalon != null && targetSalon.waitingTimeMinutes in 10..120 -> targetSalon.waitingTimeMinutes
+            else -> 20
+        }
+        val salonClosingTimeStr = targetSalon?.closingTime?.takeIf { it.isNotBlank() } ?: "9:00 PM"
+        val nowMillis = System.currentTimeMillis()
+        if (Booking.isEtaExceedingClosingTime(
+                closingTimeStr = salonClosingTimeStr,
+                activeBookingsCount = activeSalonQueueCount,
+                defaultServiceDurationMinutes = serviceDurationMins,
+                baseTimeMillis = nowMillis
+            )
+        ) {
+            val etaClockTime = Booking.calculateFormattedEtaClockTime(
+                activeBookingsCount = activeSalonQueueCount,
+                defaultServiceDurationMinutes = serviceDurationMins,
+                baseTimeMillis = nowMillis
+            )
+            throw IllegalStateException(
+                "Booking Blocked: Newly calculated ETA ($etaClockTime) exceeds ${targetSalon?.name ?: salonName}'s official closing time ($salonClosingTimeStr)."
+            )
         }
 
         // Validate customer phone & sanitize customer name
@@ -2974,7 +3150,7 @@ class TrimTimeRepository private constructor(context: Context) {
             .apply()
 
         val generatedPin = String.format("%04d", Random.nextInt(1000, 9999))
-        val newBookingId = "bk_" + System.currentTimeMillis().toString().takeLast(6) + "_" + Random.nextInt(10, 99)
+        val newBookingId = "bk_" + nowMillis.toString().takeLast(6) + "_" + Random.nextInt(10, 99)
 
         val cleanSalonId = salonId.trim()
         val cleanSalonName = SecurityValidator.sanitizeName(salonName, trimEdges = true)
@@ -2999,14 +3175,17 @@ class TrimTimeRepository private constructor(context: Context) {
             timeSlot = cleanTimeSlot,
             bookingDate = cleanBookingDate,
             pin = generatedPin,
-            createdAt = System.currentTimeMillis()
+            createdAt = nowMillis
         )
 
         // Add to local states immediately (strictly isolated for _customerBookings)
         _bookings.value = listOf(newBooking) + _bookings.value
         _customerBookings.value = listOf(newBooking) + _customerBookings.value.filter { it.customerId == resolvedCustomerId }
 
-        // Write directly to Firestore 'bookings' collection and persist phoneNumber in 'users/{uid}'
+        // Edge Case Protection — Concurrency via Firestore Transaction (`db.runTransaction`):
+        // Atomically reads `salons/{salonId}` LiveQueue sequence & `lastAllocatedEtaMillis` to prevent
+        // two concurrent customers from double-booking the exact same slot, verifies closing time,
+        // and commits both the salon queue state and the new booking document.
         firestore?.let { db ->
             try {
                 db.collection("users").document(resolvedCustomerId).set(
@@ -3018,15 +3197,82 @@ class TrimTimeRepository private constructor(context: Context) {
                     ),
                     com.google.firebase.firestore.SetOptions.merge()
                 )
-                db.collection("bookings").document(newBooking.id).set(newBooking.toMap())
-                    .addOnSuccessListener {
-                        Log.d(tag, "Live booking synced to Firestore: ${newBooking.id} for customerId: $resolvedCustomerId")
+
+                val salonRef = db.collection("salons").document(cleanSalonId)
+                val bookingRef = db.collection("bookings").document(newBooking.id)
+                val isRushActiveNow = Booking.isRushModeActive(_isGlobalRushModeEnabled.value, activeSalonQueueCount)
+
+                db.runTransaction { transaction ->
+                    val salonSnap = transaction.get(salonRef)
+                    val prevLastAllocatedMillis = salonSnap.getLong("lastAllocatedEtaMillis") ?: 0L
+                    val prevQueueSeq = salonSnap.getLong("liveQueueSequence") ?: 0L
+                    val dbClosingTimeStr = salonSnap.getString("closingTime")?.takeIf { it.isNotBlank() } ?: salonClosingTimeStr
+
+                    val baseCalculatedEtaMillis = Booking.calculateEtaArrivalMillis(
+                        activeBookingsCount = activeSalonQueueCount,
+                        defaultServiceDurationMinutes = serviceDurationMins,
+                        baseTimeMillis = nowMillis
+                    )
+                    // Prevent concurrent double-booking of the exact same ETA minute slot:
+                    val safeNextEtaMillis = if (prevLastAllocatedMillis >= baseCalculatedEtaMillis) {
+                        prevLastAllocatedMillis + (serviceDurationMins * 60_000L)
+                    } else {
+                        baseCalculatedEtaMillis
                     }
-                    .addOnFailureListener { e ->
-                        Log.e(tag, "Firestore booking error: ${e.message}")
+
+                    val closingMillis = Booking.parseSalonClosingTimeMillisToday(dbClosingTimeStr, nowMillis)
+                    if (closingMillis != null && safeNextEtaMillis > closingMillis) {
+                        throw com.google.firebase.firestore.FirebaseFirestoreException(
+                            "Estimated ETA exceeds salon closing time ($dbClosingTimeStr).",
+                            com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED
+                        )
                     }
+
+                    val txFormattedClock = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.US)
+                        .format(java.util.Date(safeNextEtaMillis))
+                    val txWaitMins = ((safeNextEtaMillis - nowMillis).coerceAtLeast(0L) / 60_000L).toInt()
+                    val txTimeSlot = if (isRushActiveNow) {
+                        if (txWaitMins > 0) "Live ETA: $txFormattedClock (~${txWaitMins}m)" else "Live ETA: $txFormattedClock (⚡ Instant)"
+                    } else {
+                        cleanTimeSlot
+                    }
+
+                    if (salonSnap.exists()) {
+                        transaction.update(
+                            salonRef,
+                            mapOf(
+                                "lastAllocatedEtaMillis" to safeNextEtaMillis,
+                                "liveQueueSequence" to (prevQueueSeq + 1L)
+                            )
+                        )
+                    }
+
+                    val txBooking = newBooking.copy(
+                        time = txTimeSlot,
+                        timeSlot = txTimeSlot
+                    )
+                    transaction.set(bookingRef, txBooking.toMap())
+                    txBooking
+                }.addOnSuccessListener { txBooking ->
+                    if (txBooking != null && txBooking.timeSlot != newBooking.timeSlot) {
+                        _bookings.value = _bookings.value.map { if (it.id == newBooking.id) txBooking else it }
+                        _customerBookings.value = _customerBookings.value.map { if (it.id == newBooking.id) txBooking else it }
+                    }
+                    Log.d(tag, "Transactional booking committed to Firestore: ${newBooking.id}")
+                }.addOnFailureListener { e ->
+                    Log.w(tag, "Transaction fallback for booking ${newBooking.id}: ${e.message}")
+                    if (e is com.google.firebase.firestore.FirebaseFirestoreException &&
+                        e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED
+                    ) {
+                        // Rolled back due to closing time exceeded inside concurrent transaction
+                        _bookings.value = _bookings.value.filterNot { it.id == newBooking.id }
+                        _customerBookings.value = _customerBookings.value.filterNot { it.id == newBooking.id }
+                    } else {
+                        db.collection("bookings").document(newBooking.id).set(newBooking.toMap())
+                    }
+                }
             } catch (e: Exception) {
-                Log.e(tag, "Exception writing booking: ${e.message}")
+                Log.e(tag, "Exception writing transactional booking: ${e.message}")
             }
         }
 
@@ -3034,22 +3280,125 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     /**
-     * Partner Action: Accept an incoming customer booking in real time in Firestore.
+     * Partner Action: Accept an incoming customer booking in real time in Firestore
+     * using a Firestore Transaction (`db.runTransaction`) to prevent double-booking the exact same slot
+     * and verify the booking has not timed out or been cancelled.
      */
-    fun acceptBooking(bookingId: String): Boolean {
+    fun acceptBooking(bookingId: String, allocatedTime: String = ""): Boolean {
+        sweepExpiredPendingBookings()
         val currentBookings = _bookings.value
         val booking = currentBookings.find { it.id == bookingId } ?: return false
-        val acceptedBooking = booking.copy(status = BookingStatus.ACCEPTED.name.lowercase())
+        if (booking.isPendingTimedOut()) {
+            return false
+        }
+        val finalAllocatedTime = allocatedTime.trim().ifBlank {
+            booking.allocatedTime.ifBlank { booking.resolvedTime }
+        }
+        val acceptedBooking = booking.copy(
+            status = BookingStatus.ACCEPTED.name.lowercase(),
+            allocatedTime = finalAllocatedTime,
+            time = finalAllocatedTime,
+            timeSlot = finalAllocatedTime
+        )
         _bookings.value = currentBookings.map { if (it.id == bookingId) acceptedBooking else it }
         _customerBookings.value = _customerBookings.value.map { if (it.id == bookingId) acceptedBooking else it }
 
-        firestore?.collection("bookings")?.document(bookingId)?.update("status", "accepted")
-            ?.addOnSuccessListener {
-                Log.d(tag, "Booking $bookingId accepted in Firestore.")
+        val updates = mapOf(
+            "status" to "accepted",
+            "allocatedTime" to finalAllocatedTime,
+            "time" to finalAllocatedTime,
+            "timeSlot" to finalAllocatedTime
+        )
+        val db = firestore
+        if (db != null) {
+            val bookingRef = db.collection("bookings").document(bookingId)
+            val salonRef = db.collection("salons").document(booking.salonId)
+            db.runTransaction { transaction ->
+                val bookingSnap = transaction.get(bookingRef)
+                val salonSnap = if (booking.salonId.isNotBlank()) transaction.get(salonRef) else null
+
+                if (bookingSnap.exists()) {
+                    val createdAtMs = bookingSnap.getLong("createdAt") ?: booking.createdAt
+                    val statusInDb = bookingSnap.getString("status")?.trim().orEmpty()
+                    if (statusInDb.equals("pending", ignoreCase = true) &&
+                        createdAtMs > 0L &&
+                        (System.currentTimeMillis() - createdAtMs) >= Booking.PENDING_TIMEOUT_MS
+                    ) {
+                        transaction.update(bookingRef, mapOf("status" to "cancelled"))
+                        throw com.google.firebase.firestore.FirebaseFirestoreException(
+                            "Booking expired after 5 minutes without response.",
+                            com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED
+                        )
+                    }
+                }
+
+                var nonOverlappingAllocatedTime = finalAllocatedTime
+                if (salonSnap != null && salonSnap.exists()) {
+                    val prevSeq = salonSnap.getLong("liveQueueSequence") ?: 0L
+                    val lastSlotStr = salonSnap.getString("lastAllocatedSlotString").orEmpty()
+                    if (lastSlotStr.isNotBlank() && lastSlotStr.equals(finalAllocatedTime, ignoreCase = true)) {
+                        // Prevent double-allocating the exact same time string to two concurrent bookings
+                        val bumpedClock = Booking.calculateFormattedEtaClockTime(
+                            activeBookingsCount = 1,
+                            defaultServiceDurationMinutes = 10
+                        )
+                        nonOverlappingAllocatedTime = "$bumpedClock (Adjusted Slot)"
+                    }
+                    transaction.update(
+                        salonRef,
+                        mapOf(
+                            "liveQueueSequence" to (prevSeq + 1L),
+                            "lastAllocatedSlotString" to nonOverlappingAllocatedTime,
+                            "lastAllocatedEtaMillis" to System.currentTimeMillis()
+                        )
+                    )
+                }
+
+                transaction.set(
+                    bookingRef,
+                    mapOf(
+                        "status" to "accepted",
+                        "allocatedTime" to nonOverlappingAllocatedTime,
+                        "time" to nonOverlappingAllocatedTime,
+                        "timeSlot" to nonOverlappingAllocatedTime
+                    ),
+                    com.google.firebase.firestore.SetOptions.merge()
+                )
+                nonOverlappingAllocatedTime
+            }.addOnSuccessListener { txAllocatedTime ->
+                if (!txAllocatedTime.isNullOrBlank() && txAllocatedTime != finalAllocatedTime) {
+                    _bookings.value = _bookings.value.map {
+                        if (it.id == bookingId) it.copy(
+                            allocatedTime = txAllocatedTime,
+                            time = txAllocatedTime,
+                            timeSlot = txAllocatedTime
+                        ) else it
+                    }
+                    _customerBookings.value = _customerBookings.value.map {
+                        if (it.id == bookingId) it.copy(
+                            allocatedTime = txAllocatedTime,
+                            time = txAllocatedTime,
+                            timeSlot = txAllocatedTime
+                        ) else it
+                    }
+                }
+                Log.d(tag, "Booking $bookingId accepted via Firestore Transaction with allocatedTime=$txAllocatedTime.")
+            }.addOnFailureListener { e ->
+                Log.w(tag, "Transaction fallback for acceptBooking $bookingId: ${e.message}")
+                if (e is com.google.firebase.firestore.FirebaseFirestoreException &&
+                    e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED
+                ) {
+                    _bookings.value = _bookings.value.map {
+                        if (it.id == bookingId) it.copy(status = "cancelled") else it
+                    }
+                    _customerBookings.value = _customerBookings.value.map {
+                        if (it.id == bookingId) it.copy(status = "cancelled") else it
+                    }
+                } else {
+                    bookingRef.set(updates, com.google.firebase.firestore.SetOptions.merge())
+                }
             }
-            ?.addOnFailureListener { e ->
-                Log.w(tag, "Failed to accept booking in Firestore: ${e.message}")
-            }
+        }
         return true
     }
 
@@ -3186,15 +3535,15 @@ class TrimTimeRepository private constructor(context: Context) {
 
         firestore?.collection("bookings")?.document(bookingId)?.update("status", "cancelled")
 
-        // Increment cancellationStrikes & cancellationCount on user profile
+        // Admin/SuperAdmin/Developer accounts are immune, and automatic 3-strike account suspension is disabled
         val currentProfile = _currentUserProfile.value
         if (currentProfile != null) {
-            val newStrikes = currentProfile.effectiveCancellationStrikes + 1
-            val isNowSuspended = newStrikes >= 3
+            val isImmune = currentProfile.isWhitelistedAdminOrDev
+            val newStrikes = if (isImmune) 0 else currentProfile.effectiveCancellationStrikes + 1
             val updatedProfile = currentProfile.copy(
                 cancellationCount = newStrikes,
                 cancellationStrikes = newStrikes,
-                isSuspended = isNowSuspended
+                isSuspended = false
             )
             _currentUserProfile.value = updatedProfile
 
@@ -3202,11 +3551,11 @@ class TrimTimeRepository private constructor(context: Context) {
                 mapOf(
                     "cancellationCount" to newStrikes,
                     "cancellationStrikes" to newStrikes,
-                    "isSuspended" to isNowSuspended
+                    "isSuspended" to false
                 ),
                 com.google.firebase.firestore.SetOptions.merge()
             )?.addOnSuccessListener {
-                Log.d(tag, "Incremented cancellationStrikes to $newStrikes for user ${currentProfile.id}. Suspended: $isNowSuspended")
+                Log.d(tag, "Booking cancelled for user ${currentProfile.id} (immune=$isImmune, auto-suspension disabled).")
             }
         }
 
@@ -4503,6 +4852,52 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
             }
         }
+    }
+
+    /**
+     * Super Admin Control: Toggles Global Festival / Rush Mode (`isGlobalRushModeEnabled`)
+     * and persists it in the central `app_settings/global_config` Firestore document.
+     */
+    fun setGlobalRushModeEnabled(
+        enabled: Boolean,
+        onSuccess: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        _isGlobalRushModeEnabled.value = enabled
+        settingsPrefs.edit().putBoolean("pref_global_rush_mode", enabled).apply()
+
+        val adminProfile = _currentUserProfile.value
+        val payload = mutableMapOf<String, Any?>(
+            "isGlobalRushModeEnabled" to enabled,
+            "updatedAt" to System.currentTimeMillis()
+        )
+        if (!adminProfile?.id.isNullOrBlank()) {
+            payload["adminActorId"] = adminProfile?.id
+        }
+
+        val db = firestore
+        val defDb = defaultFirestore
+        if (db == null && defDb == null) {
+            onSuccess()
+            return
+        }
+
+        if (defDb != null && defDb != db) {
+            defDb.collection("app_settings").document("global_config")
+                .set(payload, com.google.firebase.firestore.SetOptions.merge())
+        }
+
+        val primaryDb = db ?: defDb
+        primaryDb?.collection("app_settings")?.document("global_config")
+            ?.set(payload, com.google.firebase.firestore.SetOptions.merge())
+            ?.addOnSuccessListener {
+                Log.d(tag, "Global Festival / Rush Mode updated in app_settings: isGlobalRushModeEnabled=$enabled")
+                onSuccess()
+            }
+            ?.addOnFailureListener { err ->
+                Log.e(tag, "Failed to update Global Rush Mode in app_settings: ${err.message}", err)
+                onError(err.localizedMessage ?: "Failed to update Global Festival / Rush Mode.")
+            } ?: onSuccess()
     }
 
     companion object {
