@@ -1,9 +1,14 @@
 package com.example
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -36,9 +41,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.AppAuthState
 import com.example.model.UserRole
+import com.example.service.TrimTimeNotificationHelper
 import com.example.ui.auth.AuthDialog
 import com.example.ui.auth.AuthFullScreen
 import com.example.ui.auth.PhoneSetupScreen
@@ -68,6 +75,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         com.example.ui.components.initOsmDroidConfig(this)
+        TrimTimeNotificationHelper.ensureNotificationChannel(this)
         enableEdgeToEdge()
         setContent {
             val mainViewModel: TrimTimeViewModel = viewModel()
@@ -83,6 +91,7 @@ class MainActivity : ComponentActivity() {
 fun TrimTimeApp(
     viewModel: TrimTimeViewModel = viewModel()
 ) {
+    val appContext = LocalContext.current
     val authState by viewModel.authState.collectAsState()
     val currentUserProfile by viewModel.currentUserProfile.collectAsState()
     val isCloudSynced by viewModel.isCloudSynced.collectAsState()
@@ -155,12 +164,42 @@ fun TrimTimeApp(
             com.example.util.SecurityValidator.isBookingActiveStatus(it.status)
     }
 
+    // Retrieve FCM device token upon successful login and persist `fcmToken` to the user's Firestore profile
+    LaunchedEffect(currentCustomerUid, currentUserProfile?.salonId) {
+        if (currentCustomerUid.isNotBlank()) {
+            TrimTimeNotificationHelper.fetchAndSaveCurrentUserFcmToken(
+                context = appContext,
+                userId = currentCustomerUid,
+                salonId = currentUserProfile?.salonId
+            )
+        }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        TrimTimeNotificationHelper.ensureNotificationChannel(appContext)
+    }
+
     val favoriteSalonIds by viewModel.favoriteSalonIds.collectAsState()
     var showSplashScreen by rememberSaveable { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
         delay(1500L)
         showSplashScreen = false
+    }
+
+    // Request POST_NOTIFICATIONS permission on Android 13+ when reaching the Auth/Home screen
+    LaunchedEffect(showSplashScreen, authState) {
+        if (!showSplashScreen && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val isGranted = ContextCompat.checkSelfPermission(
+                appContext,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!isGranted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
     if (showSplashScreen) {

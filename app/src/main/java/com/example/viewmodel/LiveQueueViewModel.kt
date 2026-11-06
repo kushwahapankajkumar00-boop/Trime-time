@@ -1,11 +1,12 @@
 package com.example.viewmodel
 
 import android.content.Context
-import android.media.RingtoneManager
+import android.media.MediaPlayer
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import com.example.model.Booking
@@ -237,44 +238,57 @@ class LiveQueueViewModel : ViewModel() {
     }
 }
 
+private var activeAlertMediaPlayer: MediaPlayer? = null
+
 /**
- * Triggers a distinct vibration pattern (500ms ON, 200ms OFF, 500ms ON) and plays the
- * default notification sound so the Salon Partner immediately notices a new incoming booking.
+ * Triggers a distinct vibration pattern (0ms delay, 500ms ON, 200ms OFF, 500ms ON, 200ms OFF, 500ms ON)
+ * and plays the default notification sound via MediaPlayer so the Salon Partner immediately notices
+ * a new incoming booking.
  */
 fun triggerNewBookingSoundAndVibration(context: Context) {
-    // 1. Trigger distinct vibration pattern: 0ms delay, 500ms ON, 200ms OFF, 500ms ON
     try {
-        val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-            vibratorManager?.defaultVibrator
-        } else {
-            @Suppress("DEPRECATION")
-            context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        // 1. Robust Audio with MediaPlayer
+        try {
+            MediaPlayer.create(context, Settings.System.DEFAULT_NOTIFICATION_URI)?.apply {
+                activeAlertMediaPlayer = this
+                setOnCompletionListener { mp ->
+                    try {
+                        mp.release()
+                    } catch (_: Exception) {
+                    }
+                    if (activeAlertMediaPlayer === mp) {
+                        activeAlertMediaPlayer = null
+                    }
+                }
+                start()
+            }
+        } catch (e: Exception) {
+            Log.w("LiveQueueAlert", "Failed to play MediaPlayer notification sound: ${e.message}")
         }
 
-        if (vibrator?.hasVibrator() == true) {
-            val pattern = longArrayOf(0L, 500L, 200L, 500L)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val effect = VibrationEffect.createWaveform(pattern, -1)
-                vibrator.vibrate(effect)
+        // 2. Enforce Vibration with strong distinct waveform pattern
+        try {
+            val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vibratorManager?.defaultVibrator
+                    ?: (@Suppress("DEPRECATION") (context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator))
             } else {
                 @Suppress("DEPRECATION")
-                vibrator.vibrate(pattern, -1)
+                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
             }
-        }
-    } catch (e: Exception) {
-        Log.w("LiveQueueAlert", "Failed to vibrate for new booking: ${e.message}")
-    }
 
-    // 2. Play default notification ringtone sound
-    try {
-        val notificationUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-        if (notificationUri != null) {
-            val ringtone = RingtoneManager.getRingtone(context.applicationContext, notificationUri)
-            ringtone?.play()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator?.vibrate(
+                    VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500, 200, 500), -1)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator?.vibrate(longArrayOf(0, 500, 200, 500, 200, 500), -1)
+            }
+        } catch (e: Exception) {
+            Log.w("LiveQueueAlert", "Failed to vibrate for new booking: ${e.message}")
         }
     } catch (e: Exception) {
-        Log.w("LiveQueueAlert", "Failed to play notification sound for new booking: ${e.message}")
+        Log.w("LiveQueueAlert", "Alert error: ${e.message}")
     }
 }

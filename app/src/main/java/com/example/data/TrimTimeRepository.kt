@@ -30,9 +30,11 @@ import com.example.model.Salon
 import com.example.model.SalonService
 import com.example.model.UserProfile
 import com.example.model.UserRole
+import com.example.service.TrimTimeNotificationHelper
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthException
+import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
@@ -93,6 +95,9 @@ class TrimTimeRepository private constructor(context: Context) {
 
     private var namedDbUsers: List<UserProfile> = emptyList()
     private var defaultDbUsers: List<UserProfile> = emptyList()
+
+    private var hasLoadedInitialBookingsSnapshot = false
+    private val knownRealtimeBookingIds = mutableSetOf<String>()
 
     private val invalidSharedUserIds = setOf("dev_test_user_001", "dev_tester", "default_user", "guest")
     private val seedSalonIds = setOf("salon_blade_comb", "salon_urban_cuts", "salon_velvet_shears", "salon_express_trim")
@@ -752,7 +757,8 @@ class TrimTimeRepository private constructor(context: Context) {
                                     registrationFormSubmitted = isSeedSalon || isFormSubmittedFlag,
                                     isPhoneVerified = isSalonPhoneVerified,
                                     isLocationLocked = isSalonLocationLocked,
-                                    unlockRequestStatus = salonUnlockStatus
+                                    unlockRequestStatus = salonUnlockStatus,
+                                    fcmToken = doc.getString("fcmToken") ?: ""
                                 )
                             } catch (e: Exception) {
                                 Log.e(tag, "Error parsing salon doc ${doc.id}: ${e.message}")
@@ -812,6 +818,7 @@ class TrimTimeRepository private constructor(context: Context) {
 
             // Live Real-Time Listener for Bookings collection (used for Partner Salon Queue by salonId)
             bookingsListener?.remove()
+            hasLoadedInitialBookingsSnapshot = false
             bookingsListener = db.collection("bookings").addSnapshotListener { snapshot, error ->
                 if (error != null) {
                     Log.e(tag, "Firestore bookings listener error: ${error.message}")
@@ -819,6 +826,49 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
                 if (snapshot != null) {
                     val nowMillis = System.currentTimeMillis()
+                    if (!hasLoadedInitialBookingsSnapshot) {
+                        for (doc in snapshot.documents) {
+                            knownRealtimeBookingIds.add(doc.id)
+                            doc.getString("id")?.takeIf { it.isNotBlank() }?.let { knownRealtimeBookingIds.add(it) }
+                            doc.getString("bookingId")?.takeIf { it.isNotBlank() }?.let { knownRealtimeBookingIds.add(it) }
+                        }
+                        hasLoadedInitialBookingsSnapshot = true
+                    } else {
+                        val activeUid = _currentUserProfile.value?.id?.trim().orEmpty()
+                        val ownedSalonId = _currentUserProfile.value?.salonId?.trim().orEmpty()
+                            .ifBlank {
+                                _salons.value.find {
+                                    activeUid.isNotBlank() && (it.ownerId == activeUid || it.partnerId == activeUid)
+                                }?.id.orEmpty()
+                            }
+                        for (change in snapshot.documentChanges) {
+                            if (change.type == DocumentChange.Type.ADDED) {
+                                val addedBooking = parseBookingDocument(change.document)
+                                if (addedBooking != null &&
+                                    knownRealtimeBookingIds.add(addedBooking.id) &&
+                                    addedBooking.status.trim().equals("Pending", ignoreCase = true)
+                                ) {
+                                    val isForCurrentPartner = activeUid.isNotBlank() && (
+                                        addedBooking.partnerId == activeUid ||
+                                            addedBooking.salonId == "salon_$activeUid" ||
+                                            (ownedSalonId.isNotBlank() && addedBooking.salonId == ownedSalonId)
+                                        )
+                                    if (isForCurrentPartner) {
+                                        TrimTimeNotificationHelper.showIncomingBookingNotification(
+                                            context = appContext,
+                                            bookingId = addedBooking.id,
+                                            title = "🔔 New Booking at ${addedBooking.salonName.ifBlank { "Your Salon" }}!",
+                                            body = "${addedBooking.customerName} booked ${addedBooking.service} (₹${addedBooking.servicePrice} • ${addedBooking.timeSlot}). Tap to accept.",
+                                            customerName = addedBooking.customerName,
+                                            serviceName = addedBooking.service,
+                                            timeSlot = addedBooking.timeSlot
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     val liveBookings = snapshot.documents.mapNotNull { doc ->
                         parseBookingDocument(doc)
                     }.filter { booking ->
@@ -1195,6 +1245,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 imageUrl = imageUrl,
                 favoriteSalons = favSalonsList,
                 services = userParsedServices,
+                fcmToken = doc.getString("fcmToken") ?: "",
                 createdAt = doc.getLong("createdAt") ?: 0L
             )
         } catch (e: Exception) {
@@ -1291,6 +1342,19 @@ class TrimTimeRepository private constructor(context: Context) {
             _customerBookings.value = emptyList()
             _latestCompletedBooking.value = null
             return
+        }
+
+        // Retrieve the FCM device token upon login/session restore and save it to users/{uid} (fcmToken field)
+        TrimTimeNotificationHelper.fetchAndSaveCurrentUserFcmToken(
+            context = appContext,
+            userId = cleanUid,
+            salonId = _currentUserProfile.value?.salonId
+        ) { fetchedToken ->
+            _currentUserProfile.value?.let { curr ->
+                if (curr.id == cleanUid && curr.fcmToken != fetchedToken) {
+                    _currentUserProfile.value = curr.copy(fcmToken = fetchedToken)
+                }
+            }
         }
 
         // Attach real-time listener directly to users/{cleanUid} so isAdmin & block updates reflect immediately
@@ -3254,11 +3318,31 @@ class TrimTimeRepository private constructor(context: Context) {
                     transaction.set(bookingRef, txBooking.toMap())
                     txBooking
                 }.addOnSuccessListener { txBooking ->
+                    val confirmedBooking = txBooking ?: newBooking
                     if (txBooking != null && txBooking.timeSlot != newBooking.timeSlot) {
                         _bookings.value = _bookings.value.map { if (it.id == newBooking.id) txBooking else it }
                         _customerBookings.value = _customerBookings.value.map { if (it.id == newBooking.id) txBooking else it }
                     }
                     Log.d(tag, "Transactional booking committed to Firestore: ${newBooking.id}")
+                    // Dispatch high-priority FCM push notification to the Partner's saved fcmToken
+                    val resolvedPartnerId = targetSalon?.ownerId?.takeIf { it.isNotBlank() }
+                        ?: targetSalon?.partnerId?.takeIf { it.isNotBlank() }
+                        ?: cleanSalonId.removePrefix("salon_")
+                    val partnerFcmToken = _allUsers.value.find { it.id == resolvedPartnerId }?.fcmToken?.takeIf { it.isNotBlank() }
+                        ?: targetSalon?.fcmToken.orEmpty()
+                    TrimTimeNotificationHelper.sendHighPriorityBookingFcmToPartner(
+                        context = appContext,
+                        partnerId = resolvedPartnerId,
+                        salonId = cleanSalonId,
+                        salonName = salonName,
+                        bookingId = confirmedBooking.id,
+                        customerName = confirmedBooking.customerName,
+                        customerPhone = confirmedBooking.customerPhone,
+                        serviceName = confirmedBooking.service,
+                        servicePrice = confirmedBooking.servicePrice,
+                        timeSlot = confirmedBooking.timeSlot,
+                        knownPartnerFcmToken = partnerFcmToken
+                    )
                 }.addOnFailureListener { e ->
                     Log.w(tag, "Transaction fallback for booking ${newBooking.id}: ${e.message}")
                     if (e is com.google.firebase.firestore.FirebaseFirestoreException &&
@@ -3269,6 +3353,24 @@ class TrimTimeRepository private constructor(context: Context) {
                         _customerBookings.value = _customerBookings.value.filterNot { it.id == newBooking.id }
                     } else {
                         db.collection("bookings").document(newBooking.id).set(newBooking.toMap())
+                        val resolvedPartnerId = targetSalon?.ownerId?.takeIf { it.isNotBlank() }
+                            ?: targetSalon?.partnerId?.takeIf { it.isNotBlank() }
+                            ?: cleanSalonId.removePrefix("salon_")
+                        val partnerFcmToken = _allUsers.value.find { it.id == resolvedPartnerId }?.fcmToken?.takeIf { it.isNotBlank() }
+                            ?: targetSalon?.fcmToken.orEmpty()
+                        TrimTimeNotificationHelper.sendHighPriorityBookingFcmToPartner(
+                            context = appContext,
+                            partnerId = resolvedPartnerId,
+                            salonId = cleanSalonId,
+                            salonName = salonName,
+                            bookingId = newBooking.id,
+                            customerName = newBooking.customerName,
+                            customerPhone = newBooking.customerPhone,
+                            serviceName = newBooking.service,
+                            servicePrice = newBooking.servicePrice,
+                            timeSlot = newBooking.timeSlot,
+                            knownPartnerFcmToken = partnerFcmToken
+                        )
                     }
                 }
             } catch (e: Exception) {

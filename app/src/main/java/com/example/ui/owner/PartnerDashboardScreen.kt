@@ -1,7 +1,14 @@
 package com.example.ui.owner
 
 import android.Manifest
+import android.content.Context
+import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -195,7 +202,10 @@ fun PartnerDashboardScreen(
 
     // Filter bookings in real time strictly for this partner's salon (booking.salonId == currentSalon.id)
     val salonBookings = if (currentSalon != null) {
-        allBookings.filter { it.salonId == currentSalon.id }
+        allBookings.filter {
+            it.salonId == currentSalon.id ||
+                (currentSalon.partnerId.isNotBlank() && it.partnerId == currentSalon.partnerId)
+        }
     } else {
         emptyList()
     }
@@ -222,6 +232,9 @@ fun PartnerDashboardScreen(
     val liveQueueViewModel: LiveQueueViewModel = viewModel()
     val newIncomingBooking by liveQueueViewModel.newIncomingBooking.collectAsState()
 
+    // Active Tab in Partner Dashboard
+    var currentTab by remember { mutableStateOf(PartnerTab.LIVE_QUEUE) }
+
     // Attach real-time Firestore listener for the Partner's salon (ignores initial load & old bookings)
     LaunchedEffect(currentSalon?.id, partnerProfile?.id) {
         liveQueueViewModel.observeSalonLiveQueue(
@@ -238,10 +251,12 @@ fun PartnerDashboardScreen(
         )
     }
 
-    // React to a new incoming "Pending" booking with distinct vibration (500ms-200ms-500ms) & notification ringtone
+    // React to a new incoming "Pending" booking when on non-Live-Queue tabs or show Toast notification
     LaunchedEffect(newIncomingBooking?.id) {
         val incoming = newIncomingBooking ?: return@LaunchedEffect
-        triggerNewBookingSoundAndVibration(context)
+        if (currentTab != PartnerTab.LIVE_QUEUE) {
+            triggerNewBookingSoundAndVibration(context)
+        }
         Toast.makeText(
             context,
             "🔔 New Booking: ${incoming.customerName} (${incoming.service})",
@@ -249,9 +264,6 @@ fun PartnerDashboardScreen(
         ).show()
         liveQueueViewModel.consumeNewBookingAlert(incoming.id)
     }
-
-    // Active Tab in Partner Dashboard
-    var currentTab by remember { mutableStateOf(PartnerTab.LIVE_QUEUE) }
     var showSupportDialog by remember { mutableStateOf(false) }
     var showFeedbackDialog by remember { mutableStateOf(false) }
     var activeLegalTab by remember { mutableStateOf<LegalPolicyTab?>(null) }
@@ -562,6 +574,8 @@ fun PartnerDashboardTabs(
     }
 }
 
+private var activeLiveQueueMediaPlayer: MediaPlayer? = null
+
 /**
  * TAB 1: Live Queue (Includes Live Switch, Live Chairs & Waiting Time, Today's Summary & Incoming Customer Bookings)
  */
@@ -583,9 +597,74 @@ fun PartnerLiveQueueTabContent(
     onRejectBooking: (String) -> Unit = {},
     onNavigateToProfile: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     var bookingForSlotAllocation by remember { mutableStateOf<Booking?>(null) }
     val isLocalRushMode = Booking.isLocalRushMode(pendingBookings.size)
     val isRushActive = Booking.isRushModeActive(isGlobalRushModeEnabled, pendingBookings.size)
+
+    // Detect the latest 'Pending' booking in the Partner's Live Queue
+    val latestPendingBooking = remember(pendingBookings) {
+        pendingBookings
+            .filter { it.status.trim().equals("Pending", ignoreCase = true) }
+            .maxByOrNull { it.createdAt }
+            ?: pendingBookings.firstOrNull { it.status.trim().equals("Pending", ignoreCase = true) }
+    }
+
+    // Trigger real-time audio (MediaPlayer) and strong waveform vibration whenever a new 'Pending' booking appears
+    LaunchedEffect(latestPendingBooking) {
+        if (latestPendingBooking != null) {
+            try {
+                // 1. Robust Audio with MediaPlayer
+                try {
+                    MediaPlayer.create(
+                        context,
+                        Settings.System.DEFAULT_NOTIFICATION_URI
+                    )?.apply {
+                        activeLiveQueueMediaPlayer = this
+                        setOnCompletionListener { mp ->
+                            try {
+                                mp.release()
+                            } catch (_: Exception) {
+                            }
+                            if (activeLiveQueueMediaPlayer === mp) {
+                                activeLiveQueueMediaPlayer = null
+                            }
+                        }
+                        start()
+                    }
+                } catch (_: Exception) {
+                }
+
+                // 2. Enforce Vibration with strong distinct waveform pattern
+                try {
+                    val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        val vibratorManager =
+                            context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                        vibratorManager?.defaultVibrator
+                            ?: (@Suppress("DEPRECATION") (context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        vibrator?.vibrate(
+                            VibrationEffect.createWaveform(
+                                longArrayOf(0, 500, 200, 500, 200, 500),
+                                -1
+                            )
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        vibrator?.vibrate(longArrayOf(0, 500, 200, 500, 200, 500), -1)
+                    }
+                } catch (_: Exception) {
+                }
+            } catch (_: Exception) {
+                // Lifecycle-safe guard if device is muted or lacks audio/vibration hardware
+            }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier

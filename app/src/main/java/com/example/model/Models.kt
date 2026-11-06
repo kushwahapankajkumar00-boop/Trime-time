@@ -68,6 +68,7 @@ data class UserProfile(
     val unlockRequestStatus: String = "none", // "none", "pending", "approved"
     val favoriteSalons: List<String> = emptyList(),
     val services: List<SalonService> = emptyList(),
+    val fcmToken: String = "",
     val createdAt: Long = System.currentTimeMillis()
 ) {
     val isWhitelistedAdminOrDev: Boolean
@@ -116,6 +117,9 @@ data class UserProfile(
         put("favoriteSalons", favoriteSalons)
         if (services.isNotEmpty()) {
             put("services", services.map { it.toMap() })
+        }
+        if (fcmToken.isNotBlank()) {
+            put("fcmToken", fcmToken)
         }
         put("createdAt", createdAt)
     }
@@ -193,7 +197,8 @@ data class Salon(
     val registrationFormSubmitted: Boolean = false,
     val isPhoneVerified: Boolean = true,
     val isLocationLocked: Boolean = true,
-    val unlockRequestStatus: String = "none" // "none", "pending", "approved"
+    val unlockRequestStatus: String = "none", // "none", "pending", "approved"
+    val fcmToken: String = ""
 ) {
     val isBusy: Boolean
         get() = currentStatus.equals("BUSY", ignoreCase = true)
@@ -249,6 +254,7 @@ data class Salon(
         "isPhoneVerified" to isPhoneVerified,
         "isLocationLocked" to isLocationLocked,
         "unlockRequestStatus" to unlockRequestStatus,
+        "fcmToken" to fcmToken,
         "coordinates" to if (latitude != null && longitude != null) mapOf(
             "lat" to latitude,
             "lng" to longitude

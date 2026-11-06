@@ -13,6 +13,7 @@
         "salonId": { "type": "string" },
         "cancellationCount": { "type": "integer" },
         "isSuspended": { "type": "boolean" },
+        "fcmToken": { "type": "string" },
         "createdAt": { "type": "integer" }
       },
       "required": ["id", "name", "email", "role"]
@@ -31,7 +32,8 @@
         "estimatedWaitMinutes": { "type": "integer" },
         "isOpen": { "type": "boolean" },
         "openTime": { "type": "string" },
-        "closeTime": { "type": "string" }
+        "closeTime": { "type": "string" },
+        "fcmToken": { "type": "string" }
       },
       "required": ["id", "name"]
     },
@@ -67,12 +69,30 @@
         "adminActorId": { "type": "string" }
       },
       "required": ["isGlobalRushModeEnabled"]
+    },
+    "FcmNotification": {
+      "title": "FcmNotification",
+      "description": "High-priority FCM push notification payload targeting Partner fcmToken on new booking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "to": { "type": "string" },
+        "fcmToken": { "type": "string" },
+        "partnerId": { "type": "string" },
+        "salonId": { "type": "string" },
+        "bookingId": { "type": "string" },
+        "priority": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "createdAt": { "type": "integer" }
+      },
+      "required": ["bookingId", "priority"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "User profile collection storing role, phone, and cancellation strikes"
+      "description": "User profile collection storing role, phone, fcmToken, and cancellation strikes"
     },
     "/salons/{salonId}": {
       "schema": { "$ref": "#/entities/Salon" },
@@ -85,6 +105,10 @@
     "/app_settings/{settingId}": {
       "schema": { "$ref": "#/entities/AppSettings" },
       "description": "Central platform configuration including Global Festival / Rush Mode toggle"
+    },
+    "/fcm_notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/FcmNotification" },
+      "description": "High-priority FCM push notification queue for Partner booking alerts"
     }
   }
 }

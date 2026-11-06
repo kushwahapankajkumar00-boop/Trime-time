@@ -75,7 +75,7 @@ service cloud.firestore {
         request.resource.data.get('isAdmin', false) == false &&
         request.resource.data.get('isBlocked', false) == false;
       allow update: if isAdminUser() ||
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isLocationLocked', 'unlockRequestStatus', 'salonCategory', 'salonStatus', 'averageRating', 'totalRatings', 'isAcSalon', 'imageUrl'])) ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isLocationLocked', 'unlockRequestStatus', 'salonCategory', 'salonStatus', 'averageRating', 'totalRatings', 'isAcSalon', 'imageUrl', 'fcmToken', 'fcmUpdatedAt'])) ||
         (
           request.resource.data.size() > 0 &&
           request.resource.data.get('isAdmin', false) == resource.data.get('isAdmin', false) &&
@@ -94,7 +94,7 @@ service cloud.firestore {
       allow create: if request.resource.data.keys().hasAny(['name', 'ownerId']) &&
         request.resource.data.get('isSuspended', false) == false;
       allow update: if isAdminUser() ||
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isLocationLocked', 'unlockRequestStatus', 'salonCategory', 'salonStatus', 'adminCategoryTag', 'categoryTag', 'approvalStatus', 'isSuspended', 'isOpen', 'currentStatus', 'adminActorId', 'averageRating', 'totalRatings', 'rating', 'reviewCount', 'isAcSalon', 'imageUrl', 'photoBase64', 'lastAllocatedEtaMillis', 'liveQueueSequence', 'activeQueueCount', 'waitingTimeMinutes'])) ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isLocationLocked', 'unlockRequestStatus', 'salonCategory', 'salonStatus', 'adminCategoryTag', 'categoryTag', 'approvalStatus', 'isSuspended', 'isOpen', 'currentStatus', 'adminActorId', 'averageRating', 'totalRatings', 'rating', 'reviewCount', 'isAcSalon', 'imageUrl', 'photoBase64', 'lastAllocatedEtaMillis', 'liveQueueSequence', 'activeQueueCount', 'waitingTimeMinutes', 'fcmToken'])) ||
         (isSalonOwnerMatching() && isAdminSalonFieldsUnchanged());
       allow delete: if isAdminUser() ||
         (isAuthenticated() && request.auth.uid == resource.data.ownerId) ||
@@ -137,6 +137,15 @@ service cloud.firestore {
         (request.resource.data.keys().hasAny(['isGlobalRushModeEnabled']) &&
          request.resource.data.isGlobalRushModeEnabled is bool);
       allow delete: if isAdminUser();
+    }
+
+    // High-Priority FCM Notifications collection for Partner booking push alerts:
+    match /fcm_notifications/{notificationId} {
+      allow read: if true;
+      allow create: if request.resource.data.keys().hasAll(['bookingId', 'priority']) &&
+        request.resource.data.bookingId is string &&
+        request.resource.data.bookingId.size() > 0;
+      allow update, delete: if isAdminUser();
     }
   }
 }
