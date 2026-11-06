@@ -114,6 +114,7 @@ jobs:
           firebase-firestore = { group = "com.google.firebase", name = "firebase-firestore" }
           firebase-storage = { group = "com.google.firebase", name = "firebase-storage" }
           firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
+          firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
           androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
           androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
           googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
@@ -144,10 +145,7 @@ jobs:
             alias(libs.plugins.kotlin.android)
             alias(libs.plugins.kotlin.compose)
             alias(libs.plugins.secrets)
-          }
-
-          if (file("google-services.json").exists()) {
-            apply(plugin = "com.google.gms.google-services")
+            alias(libs.plugins.google.services)
           }
 
           android {
@@ -242,6 +240,7 @@ jobs:
             implementation(libs.firebase.firestore)
             implementation(libs.firebase.storage)
             implementation(libs.firebase.auth)
+            implementation(libs.firebase.messaging)
             implementation(libs.androidx.credentials)
             implementation(libs.androidx.credentials.play.services)
             implementation(libs.googleid)
