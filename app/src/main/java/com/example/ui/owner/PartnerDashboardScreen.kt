@@ -610,15 +610,15 @@ fun PartnerLiveQueueTabContent(
             ?: pendingBookings.firstOrNull { it.status.trim().equals("Pending", ignoreCase = true) }
     }
 
-    // Trigger real-time audio (MediaPlayer) and strong waveform vibration whenever a new 'Pending' booking appears
+    // Trigger real-time audio (MediaPlayer with R.raw.loud_alert) and strong waveform vibration whenever a new 'Pending' booking appears
     LaunchedEffect(latestPendingBooking) {
         if (latestPendingBooking != null) {
             try {
-                // 1. Robust Audio with MediaPlayer
+                // 1. Loud Custom Audio with MediaPlayer (R.raw.loud_alert)
                 try {
                     MediaPlayer.create(
                         context,
-                        Settings.System.DEFAULT_NOTIFICATION_URI
+                        com.example.R.raw.loud_alert
                     )?.apply {
                         activeLiveQueueMediaPlayer = this
                         setOnCompletionListener { mp ->

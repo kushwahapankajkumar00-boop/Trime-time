@@ -242,6 +242,17 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
     private val _showConfirmationDialog = MutableStateFlow(false)
     val showConfirmationDialog: StateFlow<Boolean> = _showConfirmationDialog.asStateFlow()
 
+    private val _showSalonClosedDialog = MutableStateFlow(false)
+    val showSalonClosedDialog: StateFlow<Boolean> = _showSalonClosedDialog.asStateFlow()
+
+    fun dismissSalonClosedDialog() {
+        _showSalonClosedDialog.value = false
+    }
+
+    fun triggerSalonClosedDialog() {
+        _showSalonClosedDialog.value = true
+    }
+
     // Auth Dialog state
     private val _authMode = MutableStateFlow(AuthMode.NONE)
     val authMode: StateFlow<AuthMode> = _authMode.asStateFlow()
@@ -324,7 +335,16 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 return
             }
             val currentUid = profile?.id?.trim().orEmpty()
-            val salon = _selectedSalon.value
+            val selected = _selectedSalon.value
+            val salon = if (selected != null) {
+                allSalons.value.find { it.id == selected.id } ?: selected
+            } else {
+                null
+            }
+            if (salon != null && (!salon.isOpen || salon.currentStatus.equals("CLOSED", ignoreCase = true))) {
+                _showSalonClosedDialog.value = true
+                return
+            }
             if (salon != null && (salon.isSuspended || salon.approvalStatus.equals("REJECTED", ignoreCase = true))) {
                 _userMessage.value = "This salon is currently suspended or unavailable for bookings."
                 return
@@ -412,7 +432,15 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             return
         }
 
-        val salon = _selectedSalon.value ?: return
+        val selected = _selectedSalon.value ?: return
+        val salon = allSalons.value.find { it.id == selected.id } ?: selected
+
+        // Strict Shop Closed Validation before processing ANY booking request
+        if (!salon.isOpen || salon.currentStatus.equals("CLOSED", ignoreCase = true)) {
+            _serviceToBook.value = null
+            _showSalonClosedDialog.value = true
+            return
+        }
 
         // Rule 4: Prevent Self-Booking unless whitelisted Admin/Developer testing queue
         if (!isImmuneAdmin && custId.isNotBlank() && (salon.ownerId == custId || salon.partnerId == custId)) {
@@ -433,14 +461,25 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 service = service.name,
                 servicePrice = service.price,
                 timeSlot = slot,
-                bookingDate = "Today"
+                bookingDate = "Today",
+                onSalonClosed = {
+                    _showConfirmationDialog.value = false
+                    _newlyConfirmedBooking.value = null
+                    _serviceToBook.value = null
+                    _showSalonClosedDialog.value = true
+                }
             )
 
             _serviceToBook.value = null
             _newlyConfirmedBooking.value = newBooking
             _showConfirmationDialog.value = true
         } catch (e: Exception) {
-            _userMessage.value = e.message
+            if (e.message == "This salon is currently closed.") {
+                _serviceToBook.value = null
+                _showSalonClosedDialog.value = true
+            } else {
+                _userMessage.value = e.message
+            }
         }
     }
 

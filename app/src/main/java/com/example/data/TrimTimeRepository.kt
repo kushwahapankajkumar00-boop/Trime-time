@@ -98,6 +98,7 @@ class TrimTimeRepository private constructor(context: Context) {
 
     private var hasLoadedInitialBookingsSnapshot = false
     private val knownRealtimeBookingIds = mutableSetOf<String>()
+    private val previousCustomerBookingStatus = mutableMapOf<String, Pair<String, String>>()
 
     private val invalidSharedUserIds = setOf("dev_test_user_001", "dev_tester", "default_user", "guest")
     private val seedSalonIds = setOf("salon_blade_comb", "salon_urban_cuts", "salon_velvet_shears", "salon_express_trim")
@@ -831,6 +832,10 @@ class TrimTimeRepository private constructor(context: Context) {
                             knownRealtimeBookingIds.add(doc.id)
                             doc.getString("id")?.takeIf { it.isNotBlank() }?.let { knownRealtimeBookingIds.add(it) }
                             doc.getString("bookingId")?.takeIf { it.isNotBlank() }?.let { knownRealtimeBookingIds.add(it) }
+                            parseBookingDocument(doc)?.let { existingBooking ->
+                                previousCustomerBookingStatus[existingBooking.id] =
+                                    Pair(existingBooking.status.trim().lowercase(), existingBooking.resolvedTime)
+                            }
                         }
                         hasLoadedInitialBookingsSnapshot = true
                     } else {
@@ -844,6 +849,10 @@ class TrimTimeRepository private constructor(context: Context) {
                         for (change in snapshot.documentChanges) {
                             if (change.type == DocumentChange.Type.ADDED) {
                                 val addedBooking = parseBookingDocument(change.document)
+                                if (addedBooking != null) {
+                                    previousCustomerBookingStatus[addedBooking.id] =
+                                        Pair(addedBooking.status.trim().lowercase(), addedBooking.resolvedTime)
+                                }
                                 if (addedBooking != null &&
                                     knownRealtimeBookingIds.add(addedBooking.id) &&
                                     addedBooking.status.trim().equals("Pending", ignoreCase = true)
@@ -863,6 +872,48 @@ class TrimTimeRepository private constructor(context: Context) {
                                             serviceName = addedBooking.service,
                                             timeSlot = addedBooking.timeSlot
                                         )
+                                    }
+                                }
+                            } else if (change.type == DocumentChange.Type.MODIFIED) {
+                                val modBooking = parseBookingDocument(change.document)
+                                if (modBooking != null) {
+                                    val prevPair = previousCustomerBookingStatus[modBooking.id]
+                                    val newStatusLower = modBooking.status.trim().lowercase()
+                                    val newTimeStr = modBooking.resolvedTime
+                                    previousCustomerBookingStatus[modBooking.id] = Pair(newStatusLower, newTimeStr)
+
+                                    if (activeUid.isNotBlank() && modBooking.customerId == activeUid && prevPair != null) {
+                                        val prevStatusLower = prevPair.first
+                                        val prevTimeStr = prevPair.second
+                                        val salonDisplay = modBooking.salonName.ifBlank { "TrimTime Salon" }
+                                        if (newStatusLower == "accepted" && (prevStatusLower != "accepted" || prevTimeStr != newTimeStr)) {
+                                            val isAdjusted = prevTimeStr.isNotBlank() && prevTimeStr != newTimeStr
+                                            val notifTitle = if (isAdjusted) {
+                                                "⏱️ Booking Accepted & ETA Updated at $salonDisplay"
+                                            } else {
+                                                "✅ Booking Confirmed at $salonDisplay!"
+                                            }
+                                            val notifBody = if (isAdjusted) {
+                                                "Your booking for ${modBooking.service} is confirmed! Updated ETA / Slot: $newTimeStr."
+                                            } else {
+                                                "Your booking for ${modBooking.service} at $salonDisplay is confirmed ($newTimeStr)."
+                                            }
+                                            TrimTimeNotificationHelper.showCustomerBookingStatusNotification(
+                                                context = appContext,
+                                                bookingId = modBooking.id,
+                                                eventKey = "${modBooking.id}_accepted_${newTimeStr}",
+                                                title = notifTitle,
+                                                body = notifBody
+                                            )
+                                        } else if (newStatusLower == "rejected" && prevStatusLower != "rejected") {
+                                            TrimTimeNotificationHelper.showCustomerBookingStatusNotification(
+                                                context = appContext,
+                                                bookingId = modBooking.id,
+                                                eventKey = "${modBooking.id}_rejected",
+                                                title = "❌ Booking Declined by $salonDisplay",
+                                                body = "Your booking for ${modBooking.service} at $salonDisplay was declined by the partner."
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -1320,6 +1371,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 timeSlot = resolvedTime,
                 bookingDate = resolvedDate,
                 pin = resolvedPin,
+                customerFcmToken = doc.getString("customerFcmToken")?.trim() ?: "",
                 createdAt = doc.getLong("createdAt") ?: 0L,
                 completedAt = doc.getLong("completedAt")
             )
@@ -3114,7 +3166,8 @@ class TrimTimeRepository private constructor(context: Context) {
         service: String,
         servicePrice: Int,
         timeSlot: String,
-        bookingDate: String
+        bookingDate: String,
+        onSalonClosed: () -> Unit = {}
     ): Booking {
         val currentProfile = _currentUserProfile.value
         val resolvedCustomerId = currentProfile?.id?.takeIf { it.isNotBlank() && it !in invalidSharedUserIds }
@@ -3129,8 +3182,13 @@ class TrimTimeRepository private constructor(context: Context) {
             throw IllegalStateException("Account Blocked: Your account has been blocked by TrimTime Admin and cannot make new bookings.")
         }
 
-        // Prevent booking Suspended/Rejected Salons
+        // Strict Shop Closed Validation & Suspended/Rejected Check:
+        // Before processing ANY booking request (normal or rush mode), verify the salon's operational status (`isOpen`).
         val targetSalon = _salons.value.find { it.id == salonId }
+        if (targetSalon != null && (!targetSalon.isOpen || targetSalon.currentStatus.equals("CLOSED", ignoreCase = true))) {
+            onSalonClosed()
+            throw IllegalStateException("This salon is currently closed.")
+        }
         if (targetSalon != null && (targetSalon.isSuspended || targetSalon.approvalStatus.equals("REJECTED", ignoreCase = true))) {
             throw IllegalStateException("This salon is currently suspended or unavailable for bookings.")
         }
@@ -3221,6 +3279,9 @@ class TrimTimeRepository private constructor(context: Context) {
         val cleanTimeSlot = SecurityValidator.sanitizeName(timeSlot, trimEdges = true)
         val cleanBookingDate = SecurityValidator.sanitizeName(bookingDate, trimEdges = true)
 
+        val resolvedCustomerFcmToken = currentProfile?.fcmToken?.takeIf { it.isNotBlank() }
+            ?: TrimTimeNotificationHelper.getCachedFcmToken(appContext)
+
         val newBooking = Booking(
             bookingId = newBookingId,
             userId = resolvedCustomerId,
@@ -3239,6 +3300,7 @@ class TrimTimeRepository private constructor(context: Context) {
             timeSlot = cleanTimeSlot,
             bookingDate = cleanBookingDate,
             pin = generatedPin,
+            customerFcmToken = resolvedCustomerFcmToken,
             createdAt = nowMillis
         )
 
@@ -3246,19 +3308,23 @@ class TrimTimeRepository private constructor(context: Context) {
         _bookings.value = listOf(newBooking) + _bookings.value
         _customerBookings.value = listOf(newBooking) + _customerBookings.value.filter { it.customerId == resolvedCustomerId }
 
-        // Edge Case Protection — Concurrency via Firestore Transaction (`db.runTransaction`):
-        // Atomically reads `salons/{salonId}` LiveQueue sequence & `lastAllocatedEtaMillis` to prevent
-        // two concurrent customers from double-booking the exact same slot, verifies closing time,
-        // and commits both the salon queue state and the new booking document.
+        // Edge Case Protection — Concurrency & Strict Shop Closed Validation via Firestore Transaction (`db.runTransaction`):
+        // Atomically reads `salons/{salonId}` (`isOpen`, `liveQueueSequence`, `lastAllocatedEtaMillis`) to block
+        // bookings if the salon is closed in Firestore, prevent double-booking the exact same slot, verify closing time,
+        // and commit both the salon queue state and the new booking document.
         firestore?.let { db ->
             try {
+                val userUpdateMap = buildMap<String, Any> {
+                    put("phoneNumber", tenDigitPhone)
+                    put("phone", tenDigitPhone)
+                    put("isPhoneVerified", true)
+                    put("name", resolvedCustomerName)
+                    if (resolvedCustomerFcmToken.isNotBlank()) {
+                        put("fcmToken", resolvedCustomerFcmToken)
+                    }
+                }
                 db.collection("users").document(resolvedCustomerId).set(
-                    mapOf(
-                        "phoneNumber" to tenDigitPhone,
-                        "phone" to tenDigitPhone,
-                        "isPhoneVerified" to true,
-                        "name" to resolvedCustomerName
-                    ),
+                    userUpdateMap,
                     com.google.firebase.firestore.SetOptions.merge()
                 )
 
@@ -3268,6 +3334,17 @@ class TrimTimeRepository private constructor(context: Context) {
 
                 db.runTransaction { transaction ->
                     val salonSnap = transaction.get(salonRef)
+                    if (salonSnap.exists()) {
+                        val isOpenInFirestore = salonSnap.getBoolean("isOpen") ?: true
+                        val statusInFirestore = salonSnap.getString("currentStatus")?.trim().orEmpty()
+                        if (!isOpenInFirestore || statusInFirestore.equals("CLOSED", ignoreCase = true)) {
+                            throw com.google.firebase.firestore.FirebaseFirestoreException(
+                                "This salon is currently closed.",
+                                com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED
+                            )
+                        }
+                    }
+
                     val prevLastAllocatedMillis = salonSnap.getLong("lastAllocatedEtaMillis") ?: 0L
                     val prevQueueSeq = salonSnap.getLong("liveQueueSequence") ?: 0L
                     val dbClosingTimeStr = salonSnap.getString("closingTime")?.takeIf { it.isNotBlank() } ?: salonClosingTimeStr
@@ -3348,9 +3425,12 @@ class TrimTimeRepository private constructor(context: Context) {
                     if (e is com.google.firebase.firestore.FirebaseFirestoreException &&
                         e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED
                     ) {
-                        // Rolled back due to closing time exceeded inside concurrent transaction
+                        // Rolled back due to salon being closed (`isOpen == false`) or closing time exceeded
                         _bookings.value = _bookings.value.filterNot { it.id == newBooking.id }
                         _customerBookings.value = _customerBookings.value.filterNot { it.id == newBooking.id }
+                        if (e.message?.contains("closed", ignoreCase = true) == true) {
+                            onSalonClosed()
+                        }
                     } else {
                         db.collection("bookings").document(newBooking.id).set(newBooking.toMap())
                         val resolvedPartnerId = targetSalon?.ownerId?.takeIf { it.isNotBlank() }
@@ -3468,6 +3548,7 @@ class TrimTimeRepository private constructor(context: Context) {
                 )
                 nonOverlappingAllocatedTime
             }.addOnSuccessListener { txAllocatedTime ->
+                val resolvedAllocated = txAllocatedTime?.takeIf { it.isNotBlank() } ?: finalAllocatedTime
                 if (!txAllocatedTime.isNullOrBlank() && txAllocatedTime != finalAllocatedTime) {
                     _bookings.value = _bookings.value.map {
                         if (it.id == bookingId) it.copy(
@@ -3484,7 +3565,24 @@ class TrimTimeRepository private constructor(context: Context) {
                         ) else it
                     }
                 }
-                Log.d(tag, "Booking $bookingId accepted via Firestore Transaction with allocatedTime=$txAllocatedTime.")
+                Log.d(tag, "Booking $bookingId accepted via Firestore Transaction with allocatedTime=$resolvedAllocated.")
+
+                // Send high-priority FCM push notification to the Customer's fcmToken
+                val isEtaAdjusted = allocatedTime.isNotBlank() &&
+                    !allocatedTime.trim().equals(booking.timeSlot.trim(), ignoreCase = true)
+                val customerFcmToken = _allUsers.value.find { it.id == booking.customerId }?.fcmToken?.takeIf { it.isNotBlank() }
+                    ?: booking.customerFcmToken
+                TrimTimeNotificationHelper.sendHighPriorityBookingStatusFcmToCustomer(
+                    context = appContext,
+                    customerId = booking.customerId,
+                    salonId = booking.salonId,
+                    salonName = booking.salonName,
+                    bookingId = booking.id,
+                    serviceName = booking.service,
+                    allocatedTime = resolvedAllocated,
+                    eventType = if (isEtaAdjusted) "ETA_ADJUSTED" else "BOOKING_ACCEPTED",
+                    knownCustomerFcmToken = customerFcmToken
+                )
             }.addOnFailureListener { e ->
                 Log.w(tag, "Transaction fallback for acceptBooking $bookingId: ${e.message}")
                 if (e is com.google.firebase.firestore.FirebaseFirestoreException &&
@@ -3498,6 +3596,21 @@ class TrimTimeRepository private constructor(context: Context) {
                     }
                 } else {
                     bookingRef.set(updates, com.google.firebase.firestore.SetOptions.merge())
+                    val isEtaAdjusted = allocatedTime.isNotBlank() &&
+                        !allocatedTime.trim().equals(booking.timeSlot.trim(), ignoreCase = true)
+                    val customerFcmToken = _allUsers.value.find { it.id == booking.customerId }?.fcmToken?.takeIf { it.isNotBlank() }
+                        ?: booking.customerFcmToken
+                    TrimTimeNotificationHelper.sendHighPriorityBookingStatusFcmToCustomer(
+                        context = appContext,
+                        customerId = booking.customerId,
+                        salonId = booking.salonId,
+                        salonName = booking.salonName,
+                        bookingId = booking.id,
+                        serviceName = booking.service,
+                        allocatedTime = finalAllocatedTime,
+                        eventType = if (isEtaAdjusted) "ETA_ADJUSTED" else "BOOKING_ACCEPTED",
+                        knownCustomerFcmToken = customerFcmToken
+                    )
                 }
             }
         }
@@ -3506,7 +3619,8 @@ class TrimTimeRepository private constructor(context: Context) {
 
     /**
      * Partner Action: Reject an incoming customer booking in real time in Firestore
-     * (Does NOT add a cancellation strike to the customer since the partner rejected it).
+     * (Does NOT add a cancellation strike to the customer since the partner rejected it),
+     * and dispatches a high-priority FCM push notification to the Customer's fcmToken.
      */
     fun rejectBooking(bookingId: String): Boolean {
         val currentBookings = _bookings.value
@@ -3514,6 +3628,20 @@ class TrimTimeRepository private constructor(context: Context) {
         val rejectedBooking = booking.copy(status = BookingStatus.REJECTED.name.lowercase())
         _bookings.value = currentBookings.map { if (it.id == bookingId) rejectedBooking else it }
         _customerBookings.value = _customerBookings.value.map { if (it.id == bookingId) rejectedBooking else it }
+
+        val customerFcmToken = _allUsers.value.find { it.id == booking.customerId }?.fcmToken?.takeIf { it.isNotBlank() }
+            ?: booking.customerFcmToken
+        TrimTimeNotificationHelper.sendHighPriorityBookingStatusFcmToCustomer(
+            context = appContext,
+            customerId = booking.customerId,
+            salonId = booking.salonId,
+            salonName = booking.salonName,
+            bookingId = booking.id,
+            serviceName = booking.service,
+            allocatedTime = booking.resolvedTime,
+            eventType = "BOOKING_DECLINED",
+            knownCustomerFcmToken = customerFcmToken
+        )
 
         firestore?.collection("bookings")?.document(bookingId)?.update("status", "rejected")
             ?.addOnSuccessListener {

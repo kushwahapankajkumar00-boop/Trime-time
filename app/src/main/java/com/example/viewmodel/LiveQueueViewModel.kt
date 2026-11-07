@@ -9,6 +9,7 @@ import android.os.VibratorManager
 import android.provider.Settings
 import android.util.Log
 import androidx.lifecycle.ViewModel
+import com.example.R
 import com.example.model.Booking
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
@@ -247,9 +248,9 @@ private var activeAlertMediaPlayer: MediaPlayer? = null
  */
 fun triggerNewBookingSoundAndVibration(context: Context) {
     try {
-        // 1. Robust Audio with MediaPlayer
+        // 1. Loud Custom Audio with MediaPlayer (R.raw.loud_alert)
         try {
-            MediaPlayer.create(context, Settings.System.DEFAULT_NOTIFICATION_URI)?.apply {
+            MediaPlayer.create(context, R.raw.loud_alert)?.apply {
                 activeAlertMediaPlayer = this
                 setOnCompletionListener { mp ->
                     try {
@@ -263,7 +264,7 @@ fun triggerNewBookingSoundAndVibration(context: Context) {
                 start()
             }
         } catch (e: Exception) {
-            Log.w("LiveQueueAlert", "Failed to play MediaPlayer notification sound: ${e.message}")
+            Log.w("LiveQueueAlert", "Failed to play MediaPlayer loud_alert sound: ${e.message}")
         }
 
         // 2. Enforce Vibration with strong distinct waveform pattern

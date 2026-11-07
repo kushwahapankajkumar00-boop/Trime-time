@@ -35,6 +35,7 @@ data class Booking(
     val timeSlot: String = time,
     val bookingDate: String = date,
     val pin: String = "",
+    val customerFcmToken: String = "",
     val createdAt: Long = System.currentTimeMillis(),
     val completedAt: Long? = null
 ) {
@@ -98,6 +99,7 @@ data class Booking(
             " customerName" to customerName,
             "customerName" to customerName,
             "customerPhone" to customerPhone,
+            "customerFcmToken" to customerFcmToken,
             "partnerId" to finalPartnerId,
             "salonId" to finalPartnerId,
             "salonName" to salonName,

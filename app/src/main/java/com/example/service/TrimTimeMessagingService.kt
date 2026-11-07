@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -37,9 +38,9 @@ import java.util.concurrent.Executors
 
 /**
  * Firebase Cloud Messaging (FCM) Service for TrimTime.
- * Handles incoming high-priority data messages in the background and foreground,
- * triggering a loud system notification with sound and strong waveform vibration
- * so the Salon Partner never misses an incoming booking when the app is closed or minimized.
+ * Handles incoming high-priority data messages in the background and foreground for both:
+ * 1. Salon Partners (new incoming booking alerts using the loud custom `R.raw.loud_alert` sound + strong vibration).
+ * 2. Customers (booking accepted, ETA adjusted, or booking declined notifications).
  */
 class TrimTimeMessagingService : FirebaseMessagingService() {
 
@@ -60,32 +61,56 @@ class TrimTimeMessagingService : FirebaseMessagingService() {
         Log.d(TAG, "Received FCM message from: ${remoteMessage.from}")
 
         val data = remoteMessage.data
+        val messageType = data["type"]?.trim()?.uppercase() ?: "NEW_BOOKING"
         val bookingId = data["bookingId"]
             ?: data["id"]
             ?: "booking_${System.currentTimeMillis()}"
         val customerName = data["customerName"] ?: "Customer"
         val serviceName = data["serviceName"] ?: data["service"] ?: "Salon Service"
         val servicePrice = data["servicePrice"] ?: ""
-        val timeSlot = data["timeSlot"] ?: "Instant Slot"
+        val timeSlot = data["timeSlot"] ?: data["allocatedTime"] ?: "Instant Slot"
         val salonName = data["salonName"] ?: "TrimTime Salon"
 
-        val notificationTitle = data["title"]
-            ?: remoteMessage.notification?.title
-            ?: "🔔 New Booking at $salonName!"
-        val priceSuffix = if (servicePrice.isNotBlank()) " • ₹$servicePrice" else ""
-        val notificationBody = data["body"]
-            ?: remoteMessage.notification?.body
-            ?: "$customerName booked $serviceName$priceSuffix ($timeSlot). Tap to accept in Live Queue."
+        if (messageType in setOf("BOOKING_ACCEPTED", "ETA_ADJUSTED", "BOOKING_DECLINED")) {
+            val defaultTitle = when (messageType) {
+                "BOOKING_DECLINED" -> "❌ Booking Declined by $salonName"
+                "ETA_ADJUSTED" -> "⏱️ Booking Accepted & ETA Updated at $salonName"
+                else -> "✅ Booking Confirmed at $salonName!"
+            }
+            val defaultBody = when (messageType) {
+                "BOOKING_DECLINED" -> "Your booking for $serviceName at $salonName was declined by the partner."
+                "ETA_ADJUSTED" -> "Your booking for $serviceName is confirmed! Updated arrival slot: $timeSlot."
+                else -> "Your booking for $serviceName is confirmed for $timeSlot."
+            }
+            val title = data["title"] ?: remoteMessage.notification?.title ?: defaultTitle
+            val body = data["body"] ?: remoteMessage.notification?.body ?: defaultBody
 
-        TrimTimeNotificationHelper.showIncomingBookingNotification(
-            context = applicationContext,
-            bookingId = bookingId,
-            title = notificationTitle,
-            body = notificationBody,
-            customerName = customerName,
-            serviceName = serviceName,
-            timeSlot = timeSlot
-        )
+            TrimTimeNotificationHelper.showCustomerBookingStatusNotification(
+                context = applicationContext,
+                bookingId = bookingId,
+                eventKey = "${bookingId}_${messageType}_${timeSlot}",
+                title = title,
+                body = body
+            )
+        } else {
+            val notificationTitle = data["title"]
+                ?: remoteMessage.notification?.title
+                ?: "🔔 New Booking at $salonName!"
+            val priceSuffix = if (servicePrice.isNotBlank()) " • ₹$servicePrice" else ""
+            val notificationBody = data["body"]
+                ?: remoteMessage.notification?.body
+                ?: "$customerName booked $serviceName$priceSuffix ($timeSlot). Tap to accept in Live Queue."
+
+            TrimTimeNotificationHelper.showIncomingBookingNotification(
+                context = applicationContext,
+                bookingId = bookingId,
+                title = notificationTitle,
+                body = notificationBody,
+                customerName = customerName,
+                serviceName = serviceName,
+                timeSlot = timeSlot
+            )
+        }
     }
 
     companion object {
@@ -94,25 +119,32 @@ class TrimTimeMessagingService : FirebaseMessagingService() {
 }
 
 /**
- * Helper managing FCM token retrieval/persistence, high-priority notification channel setup,
- * background system notification display with sound + waveform vibration, and FCM push dispatch.
+ * Helper managing FCM token retrieval/persistence for both Customers and Partners,
+ * high-priority notification channel setup, custom `R.raw.loud_alert` playback + waveform vibration,
+ * and high-priority FCM push dispatch for both Partner new-booking alerts and Customer status/ETA updates.
  */
 object TrimTimeNotificationHelper {
 
     private const val TAG = "TrimTimeNotification"
-    const val CHANNEL_ID = "trimtime_partner_booking_alerts"
+    const val CHANNEL_ID = "trimtime_partner_booking_alerts_v2"
+    const val CUSTOMER_CHANNEL_ID = "trimtime_customer_booking_updates"
     private const val CHANNEL_NAME = "Partner Incoming Booking Alerts"
-    private const val CHANNEL_DESC = "High-priority sound and vibration alerts for new customer bookings"
+    private const val CHANNEL_DESC = "Loud custom alarm and vibration alerts for new customer bookings"
+    private const val CUSTOMER_CHANNEL_NAME = "Customer Booking & ETA Updates"
+    private const val CUSTOMER_CHANNEL_DESC = "High-priority alerts when a Partner accepts, adjusts ETA, or declines your booking"
     private const val PREFS_NAME = "trimtime_fcm_prefs"
     private const val KEY_FCM_TOKEN = "fcm_token"
 
     private val notifiedBookingIds: MutableSet<String> =
         Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    private val notifiedCustomerEvents: MutableSet<String> =
+        Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val networkExecutor = Executors.newSingleThreadExecutor()
     private var activeMediaPlayer: MediaPlayer? = null
 
     /**
-     * Creates the high-importance notification channel on Android 8.0+ with sound and vibration enabled.
+     * Creates the high-importance notification channels on Android 8.0+ with the custom `R.raw.loud_alert`
+     * sound for Partners and high-priority alerts for Customers.
      */
     fun ensureNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -120,13 +152,13 @@ object TrimTimeNotificationHelper {
                 val notificationManager =
                     context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                         ?: return
-                val soundUri = Settings.System.DEFAULT_NOTIFICATION_URI
+                val loudAlertUri = Uri.parse("android.resource://${context.packageName}/${R.raw.loud_alert}")
                 val audioAttributes = AudioAttributes.Builder()
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setUsage(AudioAttributes.USAGE_ALARM)
                     .build()
 
-                val channel = NotificationChannel(
+                val partnerChannel = NotificationChannel(
                     CHANNEL_ID,
                     CHANNEL_NAME,
                     NotificationManager.IMPORTANCE_HIGH
@@ -134,14 +166,24 @@ object TrimTimeNotificationHelper {
                     description = CHANNEL_DESC
                     enableVibration(true)
                     vibrationPattern = longArrayOf(0, 500, 200, 500, 200, 500)
-                    if (soundUri != null) {
-                        setSound(soundUri, audioAttributes)
-                    }
+                    setSound(loudAlertUri, audioAttributes)
                     lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
                 }
-                notificationManager.createNotificationChannel(channel)
+                notificationManager.createNotificationChannel(partnerChannel)
+
+                val customerChannel = NotificationChannel(
+                    CUSTOMER_CHANNEL_ID,
+                    CUSTOMER_CHANNEL_NAME,
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = CUSTOMER_CHANNEL_DESC
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 350, 150, 350)
+                    lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                }
+                notificationManager.createNotificationChannel(customerChannel)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to create notification channel: ${e.message}")
+                Log.w(TAG, "Failed to create notification channels: ${e.message}")
             }
         }
     }
@@ -292,7 +334,7 @@ object TrimTimeNotificationHelper {
         val db = resolveFirestoreDb(context) ?: return
 
         val dispatchWithToken: (String) -> Unit = { partnerFcmToken ->
-            val notificationId = "fcm_${bookingId}_${System.currentTimeMillis()}"
+            val notificationId = "fcm_partner_${bookingId}_${System.currentTimeMillis()}"
             val title = "🔔 New Booking at $salonName!"
             val body = "$customerName booked $serviceName (₹$servicePrice • $timeSlot). Tap to accept."
             val dataPayload = mapOf(
@@ -313,6 +355,7 @@ object TrimTimeNotificationHelper {
                 "id" to notificationId,
                 "to" to partnerFcmToken,
                 "fcmToken" to partnerFcmToken,
+                "recipientRole" to "partner",
                 "partnerId" to partnerId,
                 "salonId" to salonId,
                 "bookingId" to bookingId,
@@ -324,19 +367,18 @@ object TrimTimeNotificationHelper {
                 "createdAt" to System.currentTimeMillis()
             )
 
-            // 1. Write high-priority FCM push document to Firestore `fcm_notifications` collection
             db.collection("fcm_notifications").document(notificationId)
                 .set(fcmQueueDoc)
                 .addOnFailureListener { e ->
-                    Log.w(TAG, "Failed to queue FCM notification doc: ${e.message}")
+                    Log.w(TAG, "Failed to queue Partner FCM notification doc: ${e.message}")
                 }
 
-            // 2. If a direct FCM server key is available in BuildConfig / resources, dispatch HTTP POST
             if (partnerFcmToken.isNotBlank()) {
                 dispatchDirectFcmHttpIfConfigured(
                     targetToken = partnerFcmToken,
                     title = title,
                     body = body,
+                    channelId = CHANNEL_ID,
                     dataPayload = dataPayload
                 )
             }
@@ -347,7 +389,6 @@ object TrimTimeNotificationHelper {
             return
         }
 
-        // Resolve Partner's saved fcmToken from Firestore `users/{partnerId}` (with fallback to `salons/{salonId}`)
         if (partnerId.isNotBlank()) {
             db.collection("users").document(partnerId).get()
                 .addOnSuccessListener { userDoc ->
@@ -382,10 +423,105 @@ object TrimTimeNotificationHelper {
         }
     }
 
+    /**
+     * Triggered when a Partner accepts, adjusts the ETA, or declines a booking:
+     * Resolves the Customer's saved `fcmToken` from their Firestore profile (`users/{customerId}`)
+     * and dispatches a high-priority FCM push notification to the Customer.
+     */
+    fun sendHighPriorityBookingStatusFcmToCustomer(
+        context: Context,
+        customerId: String,
+        salonId: String,
+        salonName: String,
+        bookingId: String,
+        serviceName: String,
+        allocatedTime: String,
+        eventType: String, // "BOOKING_ACCEPTED", "ETA_ADJUSTED", or "BOOKING_DECLINED"
+        knownCustomerFcmToken: String = ""
+    ) {
+        if (customerId.isBlank()) return
+        val db = resolveFirestoreDb(context) ?: return
+
+        val dispatchToCustomer: (String) -> Unit = { customerFcmToken ->
+            val notificationId = "fcm_customer_${bookingId}_${eventType.lowercase()}_${System.currentTimeMillis()}"
+            val cleanSalon = salonName.ifBlank { "TrimTime Salon" }
+            val cleanTime = allocatedTime.ifBlank { "Instant Slot" }
+            val title = when (eventType) {
+                "BOOKING_DECLINED" -> "❌ Booking Declined by $cleanSalon"
+                "ETA_ADJUSTED" -> "⏱️ Booking Accepted & ETA Updated at $cleanSalon"
+                else -> "✅ Booking Confirmed at $cleanSalon!"
+            }
+            val body = when (eventType) {
+                "BOOKING_DECLINED" -> "Your booking for $serviceName at $cleanSalon was declined by the partner."
+                "ETA_ADJUSTED" -> "Your booking for $serviceName is confirmed! Adjusted ETA / Slot: $cleanTime."
+                else -> "Your booking for $serviceName at $cleanSalon is confirmed ($cleanTime)."
+            }
+            val dataPayload = mapOf(
+                "type" to eventType,
+                "bookingId" to bookingId,
+                "customerId" to customerId,
+                "salonId" to salonId,
+                "salonName" to cleanSalon,
+                "serviceName" to serviceName,
+                "allocatedTime" to cleanTime,
+                "timeSlot" to cleanTime,
+                "title" to title,
+                "body" to body
+            )
+            val fcmQueueDoc = mapOf(
+                "id" to notificationId,
+                "to" to customerFcmToken,
+                "fcmToken" to customerFcmToken,
+                "recipientRole" to "customer",
+                "customerId" to customerId,
+                "salonId" to salonId,
+                "bookingId" to bookingId,
+                "eventType" to eventType,
+                "priority" to "high",
+                "title" to title,
+                "body" to body,
+                "data" to dataPayload,
+                "status" to "pending",
+                "createdAt" to System.currentTimeMillis()
+            )
+
+            db.collection("fcm_notifications").document(notificationId)
+                .set(fcmQueueDoc)
+                .addOnFailureListener { e ->
+                    Log.w(TAG, "Failed to queue Customer FCM notification doc: ${e.message}")
+                }
+
+            if (customerFcmToken.isNotBlank()) {
+                dispatchDirectFcmHttpIfConfigured(
+                    targetToken = customerFcmToken,
+                    title = title,
+                    body = body,
+                    channelId = CUSTOMER_CHANNEL_ID,
+                    dataPayload = dataPayload
+                )
+            }
+        }
+
+        if (knownCustomerFcmToken.isNotBlank()) {
+            dispatchToCustomer(knownCustomerFcmToken)
+            return
+        }
+
+        db.collection("users").document(customerId).get()
+            .addOnSuccessListener { userDoc ->
+                val customerToken = userDoc?.getString("fcmToken")?.trim().orEmpty()
+                dispatchToCustomer(customerToken)
+            }
+            .addOnFailureListener {
+                dispatchToCustomer("")
+            }
+    }
+
     private fun dispatchDirectFcmHttpIfConfigured(
         targetToken: String,
         title: String,
         body: String,
+        channelId: String,
         dataPayload: Map<String, String>
     ) {
         networkExecutor.execute {
@@ -410,11 +546,11 @@ object TrimTimeNotificationHelper {
                 val json = JSONObject().apply {
                     put("to", targetToken)
                     put("priority", "high")
-                    put("Notification", JSONObject().apply {
+                    put("notification", JSONObject().apply {
                         put("title", title)
                         put("body", body)
-                        put("sound", "default")
-                        put("android_channel_id", CHANNEL_ID)
+                        put("sound", "loud_alert")
+                        put("android_channel_id", channelId)
                     })
                     val dataJson = JSONObject()
                     dataPayload.forEach { (k, v) -> dataJson.put(k, v) }
@@ -434,7 +570,7 @@ object TrimTimeNotificationHelper {
     }
 
     /**
-     * Triggers a high-priority Android System Notification + MediaPlayer notification sound
+     * Triggers a high-priority Android System Notification + custom `R.raw.loud_alert` audio
      * + strong waveform vibration so the Partner is alerted even if the app is minimized or closed.
      */
     fun showIncomingBookingNotification(
@@ -452,10 +588,10 @@ object TrimTimeNotificationHelper {
 
         ensureNotificationChannel(context)
 
-        // 1. Trigger loud audio & strong distinct vibration (lifecycle-safe)
+        // 1. Trigger loud custom `R.raw.loud_alert` audio & strong distinct vibration (lifecycle-safe)
         try {
             try {
-                MediaPlayer.create(context, Settings.System.DEFAULT_NOTIFICATION_URI)?.apply {
+                MediaPlayer.create(context, R.raw.loud_alert)?.apply {
                     activeMediaPlayer = this
                     setOnCompletionListener { mp ->
                         try {
@@ -506,7 +642,7 @@ object TrimTimeNotificationHelper {
                     Manifest.permission.POST_NOTIFICATIONS
                 ) == PackageManager.PERMISSION_GRANTED
                 if (!hasPermission) {
-                    Log.w(TAG, "POST_NOTIFICATIONS permission not granted; sound/vibration still played.")
+                    Log.w(TAG, "POST_NOTIFICATIONS permission not granted; loud_alert sound/vibration still played.")
                     return
                 }
             }
@@ -528,6 +664,7 @@ object TrimTimeNotificationHelper {
                 pendingIntentFlags
             )
 
+            val loudAlertUri = Uri.parse("android.resource://${context.packageName}/${R.raw.loud_alert}")
             val notification = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setContentTitle(title)
@@ -535,8 +672,7 @@ object TrimTimeNotificationHelper {
                 .setStyle(NotificationCompat.BigTextStyle().bigText(body))
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
-                .setDefaults(NotificationCompat.DEFAULT_ALL)
-                .setSound(Settings.System.DEFAULT_NOTIFICATION_URI)
+                .setSound(loudAlertUri)
                 .setVibrate(longArrayOf(0, 500, 200, 500, 200, 500))
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
@@ -547,7 +683,73 @@ object TrimTimeNotificationHelper {
                 notification
             )
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to post system notification: ${e.message}")
+            Log.w(TAG, "Failed to post partner system notification: ${e.message}")
+        }
+    }
+
+    /**
+     * Posts a high-priority system notification for the Customer when the Partner accepts,
+     * adjusts the ETA, or declines their booking.
+     */
+    fun showCustomerBookingStatusNotification(
+        context: Context,
+        bookingId: String,
+        eventKey: String,
+        title: String,
+        body: String
+    ) {
+        if (eventKey.isNotBlank() && !notifiedCustomerEvents.add(eventKey)) {
+            return
+        }
+
+        ensureNotificationChannel(context)
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val hasPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!hasPermission) return
+            }
+
+            val launchIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("open_customer_bookings", true)
+                putExtra("booking_id", bookingId)
+            }
+            val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                eventKey.hashCode(),
+                launchIntent,
+                pendingIntentFlags
+            )
+
+            val notification = NotificationCompat.Builder(context, CUSTOMER_CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setSound(Settings.System.DEFAULT_NOTIFICATION_URI)
+                .setVibrate(longArrayOf(0, 350, 150, 350))
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
+            NotificationManagerCompat.from(context).notify(
+                eventKey.hashCode(),
+                notification
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to post customer status notification: ${e.message}")
         }
     }
 }

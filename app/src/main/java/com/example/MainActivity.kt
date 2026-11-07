@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -39,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -124,6 +127,7 @@ fun TrimTimeApp(
     val selectedTimeSlot by viewModel.selectedTimeSlot.collectAsState()
     val newlyConfirmedBooking by viewModel.newlyConfirmedBooking.collectAsState()
     val showConfirmationDialog by viewModel.showConfirmationDialog.collectAsState()
+    val showSalonClosedDialog by viewModel.showSalonClosedDialog.collectAsState()
 
     val authMode by viewModel.authMode.collectAsState()
     val isAuthLoading by viewModel.isLoading.collectAsState()
@@ -634,6 +638,31 @@ fun TrimTimeApp(
                 viewModel.confirmBooking(name, phone)
             },
             onDismiss = { viewModel.setServiceToBook(null) }
+        )
+    }
+
+    // Strict Shop Closed Error Dialog
+    if (showSalonClosedDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissSalonClosedDialog() },
+            title = {
+                Text(
+                    text = "Salon Closed",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "This salon is currently closed."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.dismissSalonClosedDialog() }
+                ) {
+                    Text("OK")
+                }
+            }
         )
     }
 
