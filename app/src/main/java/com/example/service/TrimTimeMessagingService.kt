@@ -127,7 +127,7 @@ object TrimTimeNotificationHelper {
 
     private const val TAG = "TrimTimeNotification"
     const val CHANNEL_ID = "trimtime_partner_booking_alerts_v2"
-    const val CUSTOMER_CHANNEL_ID = "trimtime_customer_booking_updates"
+    const val CUSTOMER_CHANNEL_ID = "trimtime_customer_booking_updates_v2"
     private const val CHANNEL_NAME = "Partner Incoming Booking Alerts"
     private const val CHANNEL_DESC = "Loud custom alarm and vibration alerts for new customer bookings"
     private const val CUSTOMER_CHANNEL_NAME = "Customer Booking & ETA Updates"
@@ -453,8 +453,8 @@ object TrimTimeNotificationHelper {
             }
             val body = when (eventType) {
                 "BOOKING_DECLINED" -> "Your booking for $serviceName at $cleanSalon was declined by the partner."
-                "ETA_ADJUSTED" -> "Your booking for $serviceName is confirmed! Adjusted ETA / Slot: $cleanTime."
-                else -> "Your booking for $serviceName at $cleanSalon is confirmed ($cleanTime)."
+                "ETA_ADJUSTED" -> "Reach Salon exactly at $cleanTime ($serviceName at $cleanSalon)."
+                else -> "Reach Salon exactly at $cleanTime ($serviceName at $cleanSalon)."
             }
             val dataPayload = mapOf(
                 "type" to eventType,
@@ -490,6 +490,20 @@ object TrimTimeNotificationHelper {
                 .addOnFailureListener { e ->
                     Log.w(TAG, "Failed to queue Customer FCM notification doc: ${e.message}")
                 }
+
+            val localDeviceToken = getCachedFcmToken(context)
+            val currentAuthUid = runCatching { FirebaseAuth.getInstance().currentUser?.uid.orEmpty() }.getOrDefault("")
+            if ((customerFcmToken.isNotBlank() && customerFcmToken == localDeviceToken) ||
+                (currentAuthUid.isNotBlank() && currentAuthUid == customerId)
+            ) {
+                showCustomerBookingStatusNotification(
+                    context = context,
+                    bookingId = bookingId,
+                    eventKey = "${bookingId}_${eventType}_${cleanTime}",
+                    title = title,
+                    body = body
+                )
+            }
 
             if (customerFcmToken.isNotBlank()) {
                 dispatchDirectFcmHttpIfConfigured(
@@ -704,6 +718,48 @@ object TrimTimeNotificationHelper {
 
         ensureNotificationChannel(context)
 
+        // Trigger audible notification & vibration safely so the Customer hears it immediately
+        try {
+            try {
+                MediaPlayer.create(context, Settings.System.DEFAULT_NOTIFICATION_URI)?.apply {
+                    setOnCompletionListener { mp ->
+                        try {
+                            mp.release()
+                        } catch (_: Exception) {
+                        }
+                    }
+                    start()
+                }
+            } catch (_: Exception) {
+            }
+
+            try {
+                val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vibratorManager =
+                        context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                    vibratorManager?.defaultVibrator
+                        ?: (@Suppress("DEPRECATION") (context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator))
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator?.vibrate(
+                        VibrationEffect.createWaveform(
+                            longArrayOf(0, 400, 150, 400),
+                            -1
+                        )
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(longArrayOf(0, 400, 150, 400), -1)
+                }
+            } catch (_: Exception) {
+            }
+        } catch (_: Exception) {
+        }
+
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val hasPermission = ContextCompat.checkSelfPermission(
@@ -735,11 +791,11 @@ object TrimTimeNotificationHelper {
                 .setContentTitle(title)
                 .setContentText(body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
                 .setSound(Settings.System.DEFAULT_NOTIFICATION_URI)
-                .setVibrate(longArrayOf(0, 350, 150, 350))
+                .setVibrate(longArrayOf(0, 400, 150, 400))
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
                 .build()

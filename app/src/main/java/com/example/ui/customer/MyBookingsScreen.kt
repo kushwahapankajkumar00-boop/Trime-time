@@ -452,11 +452,9 @@ fun MyBookingsScreen(
 }
 
 /**
- * Individual Booking Card displaying:
- * - Salon Name
- * - Date & Time
- * - Prominent Colored Status Marker (Yellow/Orange for Pending, Green for Confirmed/Completed, Red for Cancelled)
- * - Service details & 4-digit PIN (when active/upcoming)
+ * Simple Digital Ticket Booking Card for 'My Bookings':
+ * Prominently displays: "Reach Salon exactly at [Final Allocated Time]"
+ * along with Salon Name, Service & Price, Status Badge, and 4-Digit Verification PIN.
  */
 @Composable
 fun BookingCard(
@@ -474,9 +472,9 @@ fun BookingCard(
     }
 
     val statusBgColor = when (canonicalStatus.lowercase()) {
-        "pending" -> Color(0xFF451A03).copy(alpha = 0.75f)
-        "confirmed", "completed" -> Color(0xFF064E3B).copy(alpha = 0.75f)
-        "cancelled" -> Color(0xFF450A0A).copy(alpha = 0.75f)
+        "pending" -> Color(0xFF451A03).copy(alpha = 0.85f)
+        "confirmed", "completed" -> Color(0xFF064E3B).copy(alpha = 0.85f)
+        "cancelled" -> Color(0xFF450A0A).copy(alpha = 0.85f)
         else -> Color(0xFF1E293B)
     }
 
@@ -488,40 +486,42 @@ fun BookingCard(
     }
 
     val displayDate = booking.resolvedDate.ifBlank { "Today" }
-    val displayTime = booking.resolvedTime.ifBlank { "Instant Slot" }
+    val finalAllocatedTime = booking.cleanAllocatedClockTime
     val isUpcoming = canonicalStatus.equals("Pending", ignoreCase = true) ||
         canonicalStatus.equals("Confirmed", ignoreCase = true)
+    val isConfirmed = canonicalStatus.equals("Confirmed", ignoreCase = true)
     val isCompleted = canonicalStatus.equals("Completed", ignoreCase = true)
 
     Card(
         modifier = modifier
             .fillMaxWidth()
             .testTag("booking_card_${booking.resolvedBookingId}"),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
-        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.45f)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+        border = BorderStroke(
+            width = if (isConfirmed) 1.5.dp else 1.dp,
+            color = statusColor.copy(alpha = if (isConfirmed) 0.75f else 0.45f)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(IntrinsicSize.Min)
+        Column(
+            modifier = Modifier.fillMaxWidth()
         ) {
-            // Prominent Colored Status Left Accent Bar
+            // Digital Ticket Top Colored Accent Strip
             Box(
                 modifier = Modifier
-                    .width(6.dp)
-                    .fillMaxHeight()
+                    .fillMaxWidth()
+                    .height(6.dp)
                     .background(statusColor)
             )
 
             Column(
                 modifier = Modifier
-                    .weight(1f)
+                    .fillMaxWidth()
                     .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Header Row: Salon Name + Prominent Colored Status Badge Marker
+                // Ticket Header: Salon Name, Service, and Status Pill
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -534,58 +534,54 @@ fun BookingCard(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
+                                .size(42.dp)
+                                .clip(RoundedCornerShape(12.dp))
                                 .background(Color(0xFF1E293B))
-                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp)),
+                                .border(1.dp, Color(0xFF334155), RoundedCornerShape(12.dp)),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Storefront,
                                 contentDescription = null,
                                 tint = AmberPrimary,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(22.dp)
                             )
                         }
 
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
+                                text = "DIGITAL SALON PASS",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = AmberPrimary,
+                                letterSpacing = 1.sp
+                            )
+                            Text(
                                 text = booking.salonName.ifBlank { "TrimTime Salon" },
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 16.sp
+                                    fontSize = 17.sp
                                 ),
                                 color = Color.White,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                             if (booking.service.isNotBlank()) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.ContentCut,
-                                        contentDescription = null,
-                                        tint = Color(0xFF94A3B8),
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                    Text(
-                                        text = "${booking.service} • ₹${booking.servicePrice}",
-                                        fontSize = 12.sp,
-                                        color = Color(0xFFCBD5E1),
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
+                                Text(
+                                    text = "${booking.service} • ₹${booking.servicePrice} ($displayDate)",
+                                    fontSize = 12.sp,
+                                    color = Color(0xFFCBD5E1),
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    // Prominent Colored Status Marker Chip
+                    // Status Chip
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(20.dp))
@@ -596,12 +592,6 @@ fun BookingCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(statusColor)
-                        )
                         Icon(
                             imageVector = statusIcon,
                             contentDescription = canonicalStatus,
@@ -617,105 +607,85 @@ fun BookingCard(
                     }
                 }
 
-                HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
-
-                // Date & Time Row
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                // Digital Ticket Hero Banner: "Reach Salon exactly at [Final Allocated Time]"
+                if (isUpcoming) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(
+                                if (isConfirmed) Color(0xFF064E3B).copy(alpha = 0.75f)
+                                else Color(0xFF451A03).copy(alpha = 0.65f)
+                            )
+                            .border(
+                                width = 1.5.dp,
+                                color = if (isConfirmed) GreenSuccess else AmberPrimary,
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .padding(horizontal = 16.dp, vertical = 14.dp)
+                            .testTag("booking_allocated_time_banner_${booking.resolvedBookingId}"),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.CalendarMonth,
-                            contentDescription = "Booking Date",
-                            tint = AmberPrimary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = displayDate,
-                            color = Color.White,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AccessTime,
+                                    contentDescription = "Final Allocated Time",
+                                    tint = if (isConfirmed) GreenSuccess else AmberPrimary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = "Reach Salon exactly at $finalAllocatedTime",
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Black,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                            Text(
+                                text = if (isConfirmed) {
+                                    "Confirmed by Salon • Zero waiting at the shop"
+                                } else {
+                                    "Awaiting Salon Partner confirmation"
+                                },
+                                color = if (isConfirmed) Color(0xFFA7F3D0) else Color(0xFFFDE68A),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                textAlign = TextAlign.Center
+                            )
+                        }
                     }
-
+                } else {
+                    HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.AccessTime,
-                            contentDescription = "Booking Time",
-                            tint = Color(0xFF38BDF8),
-                            modifier = Modifier.size(16.dp)
+                        Text(
+                            text = "Date: $displayDate",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
                         )
                         Text(
-                            text = booking.allocatedTime.ifBlank { displayTime },
-                            color = Color(0xFF38BDF8),
-                            fontSize = 13.sp,
+                            text = "Slot: $finalAllocatedTime",
+                            color = Color.White,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
                 }
 
-                // Dynamic Partner-Allocated Arrival Time Banner (eliminates physical waiting time)
-                if (isUpcoming) {
-                    val exactArrivalTime = booking.allocatedTime.ifBlank { displayTime }
-                    val isConfirmedByPartner = canonicalStatus.equals("Confirmed", ignoreCase = true)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(
-                                if (isConfirmedByPartner) Color(0xFF064E3B).copy(alpha = 0.55f)
-                                else Color(0xFF172554).copy(alpha = 0.65f)
-                            )
-                            .border(
-                                1.dp,
-                                if (isConfirmedByPartner) GreenSuccess.copy(alpha = 0.65f) else Color(0xFF38BDF8).copy(alpha = 0.55f),
-                                RoundedCornerShape(10.dp)
-                            )
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                            .testTag("booking_allocated_time_banner_${booking.resolvedBookingId}"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AccessTime,
-                            contentDescription = "Allocated Shop Arrival Time",
-                            tint = if (isConfirmedByPartner) GreenSuccess else Color(0xFF38BDF8),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = if (isConfirmedByPartner) {
-                                    "✓ Partner Allocated Arrival Time: $exactArrivalTime"
-                                } else {
-                                    "⏱ Estimated Arrival Time (ETA): $exactArrivalTime"
-                                },
-                                color = if (isConfirmedByPartner) Color(0xFFA7F3D0) else Color(0xFF7DD3FC),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                            Text(
-                                text = if (isConfirmedByPartner) {
-                                    "Reach the shop at $exactArrivalTime — zero physical waiting time!"
-                                } else {
-                                    "Waiting for salon partner to confirm your exact arrival slot."
-                                },
-                                color = Color(0xFFCBD5E1),
-                                fontSize = 11.sp
-                            )
-                        }
-                    }
-                }
-
-                // 4-Digit Verification PIN & Cancel Action for Upcoming Bookings
+                // Perforated Ticket Stub Footer: 4-Digit PIN & Cancel Action
                 if (isUpcoming && (booking.pin.isNotBlank() || onCancelBooking != null)) {
+                    HorizontalDivider(color = Color(0xFF1E293B), thickness = 1.dp)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -724,10 +694,10 @@ fun BookingCard(
                         if (booking.pin.isNotBlank()) {
                             Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(10.dp))
                                     .background(Color(0xFF0F172A))
-                                    .border(1.dp, AmberPrimary.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
-                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    .border(1.dp, AmberPrimary.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 12.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
@@ -735,12 +705,12 @@ fun BookingCard(
                                     imageVector = Icons.Default.Lock,
                                     contentDescription = "Service PIN",
                                     tint = AmberPrimary,
-                                    modifier = Modifier.size(13.dp)
+                                    modifier = Modifier.size(14.dp)
                                 )
                                 Text(
                                     text = "PIN: ${booking.pin}",
                                     color = AmberPrimary,
-                                    fontSize = 12.sp,
+                                    fontSize = 13.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     fontFamily = FontFamily.Monospace
                                 )
@@ -752,7 +722,7 @@ fun BookingCard(
                         if (onCancelBooking != null) {
                             OutlinedButton(
                                 onClick = onCancelBooking,
-                                shape = RoundedCornerShape(8.dp),
+                                shape = RoundedCornerShape(10.dp),
                                 border = BorderStroke(1.dp, RedAlert.copy(alpha = 0.7f)),
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                                 modifier = Modifier

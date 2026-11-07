@@ -341,12 +341,12 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
             } else {
                 null
             }
-            if (salon != null && (!salon.isOpen || salon.currentStatus.equals("CLOSED", ignoreCase = true))) {
-                _showSalonClosedDialog.value = true
-                return
-            }
-            if (salon != null && (salon.isSuspended || salon.approvalStatus.equals("REJECTED", ignoreCase = true))) {
-                _userMessage.value = "This salon is currently suspended or unavailable for bookings."
+            if (salon != null && !salon.isAcceptingBookings) {
+                if (!salon.isOpen || salon.currentStatus.equals("CLOSED", ignoreCase = true)) {
+                    _showSalonClosedDialog.value = true
+                } else {
+                    _userMessage.value = "This salon is currently suspended or unavailable for bookings."
+                }
                 return
             }
             if (!isImmuneAdmin && currentUid.isNotBlank() && salon != null && (salon.ownerId == currentUid || salon.partnerId == currentUid)) {
@@ -354,25 +354,41 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 return
             }
             if (salon != null) {
-                val activeQueueCount = allBookings.value.count {
-                    (it.salonId == salon.id || (salon.partnerId.isNotBlank() && it.partnerId == salon.partnerId)) &&
-                        SecurityValidator.isBookingActiveStatus(it.status)
-                }
+                val activeQueueCount = Booking.countActiveInQueueToday(
+                    bookings = allBookings.value,
+                    salonId = salon.id,
+                    partnerId = salon.partnerId,
+                    ownerId = salon.ownerId
+                )
                 val isRushActive = Booking.isRushModeActive(isGlobalRushModeEnabled.value, activeQueueCount)
                 val durationMins = if (service.duration > 0) service.duration else if (service.durationMinutes > 0) service.durationMinutes else 20
-                if (isRushActive) {
-                    val waitMins = Booking.calculateSystemWaitMinutes(activeQueueCount, durationMins)
-                    val etaTime = Booking.calculateFormattedEtaClockTime(activeQueueCount, durationMins)
-                    _selectedTimeSlot.value = if (activeQueueCount > 0) {
-                        "Live ETA: $etaTime (~${waitMins}m)"
-                    } else {
-                        "Live ETA: $etaTime (⚡ Instant)"
-                    }
+                val etaTime = Booking.calculateFormattedEtaClockTime(activeQueueCount, durationMins)
+                val closingStr = salon.closingTime.ifBlank { "9:00 PM" }
+                if (Booking.isEtaExceedingClosingTime(
+                        closingTimeStr = closingStr,
+                        activeBookingsCount = activeQueueCount,
+                        defaultServiceDurationMinutes = durationMins
+                    )
+                ) {
+                    _userMessage.value = "Booking Blocked: Calculated ETA ($etaTime) exceeds ${salon.name}'s official closing time ($closingStr)."
+                    return
+                }
+                if (isRushActive || activeQueueCount > 0) {
+                    _selectedTimeSlot.value = etaTime
                 } else {
-                    _selectedTimeSlot.value = if (salon.isBusy) {
-                        "Waitlist: Next in Line (~20m)"
-                    } else {
-                        "In 15 mins (⚡ Instant)"
+                    _selectedTimeSlot.value = Booking.calculateFormattedEtaClockTime(0, 15)
+                }
+
+                // Strict real-time Firestore verification on salon open status
+                viewModelScope.launch {
+                    val isOpenNow = repository.fetchRealtimeSalonOpenStatus(
+                        salonId = salon.id,
+                        partnerId = salon.partnerId,
+                        ownerId = salon.ownerId
+                    )
+                    if (!isOpenNow) {
+                        _serviceToBook.value = null
+                        _showSalonClosedDialog.value = true
                     }
                 }
             }
@@ -436,7 +452,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         val salon = allSalons.value.find { it.id == selected.id } ?: selected
 
         // Strict Shop Closed Validation before processing ANY booking request
-        if (!salon.isOpen || salon.currentStatus.equals("CLOSED", ignoreCase = true)) {
+        if (!salon.isAcceptingBookings) {
             _serviceToBook.value = null
             _showSalonClosedDialog.value = true
             return
@@ -451,34 +467,50 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         val service = _serviceToBook.value ?: return
         val slot = _selectedTimeSlot.value
 
-        try {
-            val newBooking = repository.createBooking(
-                customerId = custId,
-                customerName = customerName.ifBlank { profile?.name ?: "Customer" },
-                customerPhone = customerPhone.ifBlank { profile?.phone ?: "" },
+        viewModelScope.launch {
+            // Final real-time Firestore verification of salon `isOpen` before creating booking
+            val isOpenInFirestore = repository.fetchRealtimeSalonOpenStatus(
                 salonId = salon.id,
-                salonName = salon.name,
-                service = service.name,
-                servicePrice = service.price,
-                timeSlot = slot,
-                bookingDate = "Today",
-                onSalonClosed = {
-                    _showConfirmationDialog.value = false
-                    _newlyConfirmedBooking.value = null
-                    _serviceToBook.value = null
-                    _showSalonClosedDialog.value = true
-                }
+                partnerId = salon.partnerId,
+                ownerId = salon.ownerId
             )
-
-            _serviceToBook.value = null
-            _newlyConfirmedBooking.value = newBooking
-            _showConfirmationDialog.value = true
-        } catch (e: Exception) {
-            if (e.message == "This salon is currently closed.") {
+            if (!isOpenInFirestore) {
+                _showConfirmationDialog.value = false
+                _newlyConfirmedBooking.value = null
                 _serviceToBook.value = null
                 _showSalonClosedDialog.value = true
-            } else {
-                _userMessage.value = e.message
+                return@launch
+            }
+
+            try {
+                val newBooking = repository.createBooking(
+                    customerId = custId,
+                    customerName = customerName.ifBlank { profile?.name ?: "Customer" },
+                    customerPhone = customerPhone.ifBlank { profile?.phone ?: "" },
+                    salonId = salon.id,
+                    salonName = salon.name,
+                    service = service.name,
+                    servicePrice = service.price,
+                    timeSlot = slot,
+                    bookingDate = "Today",
+                    onSalonClosed = {
+                        _showConfirmationDialog.value = false
+                        _newlyConfirmedBooking.value = null
+                        _serviceToBook.value = null
+                        _showSalonClosedDialog.value = true
+                    }
+                )
+
+                _serviceToBook.value = null
+                _newlyConfirmedBooking.value = newBooking
+                _showConfirmationDialog.value = true
+            } catch (e: Exception) {
+                if (e.message == "This salon is currently closed.") {
+                    _serviceToBook.value = null
+                    _showSalonClosedDialog.value = true
+                } else {
+                    _userMessage.value = e.message
+                }
             }
         }
     }

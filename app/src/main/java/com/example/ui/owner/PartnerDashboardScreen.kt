@@ -200,11 +200,20 @@ fun PartnerDashboardScreen(
         }
         ?: salons.find { it.id == selectedSalonId && it.isRegistrationCompleted }
 
-    // Filter bookings in real time strictly for this partner's salon (booking.salonId == currentSalon.id)
+    // Filter bookings in real time strictly for this partner's salon
     val salonBookings = if (currentSalon != null) {
-        allBookings.filter {
-            it.salonId == currentSalon.id ||
-                (currentSalon.partnerId.isNotBlank() && it.partnerId == currentSalon.partnerId)
+        val candidateSalonIds = setOf(
+            currentSalon.id.trim(),
+            currentSalon.partnerId.trim(),
+            currentSalon.ownerId.trim(),
+            if (currentSalon.partnerId.isNotBlank()) "salon_${currentSalon.partnerId.trim()}" else "",
+            if (currentSalon.ownerId.isNotBlank()) "salon_${currentSalon.ownerId.trim()}" else "",
+            currentSalon.id.trim().removePrefix("salon_")
+        ).filter { it.isNotBlank() }
+        allBookings.filter { b ->
+            b.salonId.trim() in candidateSalonIds ||
+                b.partnerId.trim() in candidateSalonIds ||
+                (currentSalon.name.isNotBlank() && b.salonName.trim().equals(currentSalon.name.trim(), ignoreCase = true))
         }
     } else {
         emptyList()
@@ -412,7 +421,7 @@ fun PartnerTopBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -467,17 +476,13 @@ fun PartnerTopBar(
             ) {
                 IconButton(
                     onClick = onOpenSupportCenter,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF1E293B))
-                        .testTag("partner_topbar_support_btn")
+                    modifier = Modifier.testTag("partner_topbar_support_btn")
                 ) {
                     Icon(
                         imageVector = Icons.Default.SupportAgent,
                         contentDescription = "Partner Help & Support",
                         tint = Color(0xFF38BDF8),
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
 
@@ -506,7 +511,8 @@ fun PartnerTopBar(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = AmberPrimary,
-                        maxLines = 1
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
@@ -602,25 +608,34 @@ fun PartnerLiveQueueTabContent(
     val isLocalRushMode = Booking.isLocalRushMode(pendingBookings.size)
     val isRushActive = Booking.isRushModeActive(isGlobalRushModeEnabled, pendingBookings.size)
 
-    // Detect the latest 'Pending' booking in the Partner's Live Queue
-    val latestPendingBooking = remember(pendingBookings) {
-        pendingBookings
-            .filter { it.status.trim().equals("Pending", ignoreCase = true) }
-            .maxByOrNull { it.createdAt }
-            ?: pendingBookings.firstOrNull { it.status.trim().equals("Pending", ignoreCase = true) }
+    // Detect the latest 'Pending' booking and count of 'Pending' bookings in the Partner's Live Queue
+    val pendingOnlyList = remember(pendingBookings) {
+        pendingBookings.filter { it.status.trim().equals("Pending", ignoreCase = true) }
+    }
+    val latestPendingBooking = remember(pendingOnlyList) {
+        pendingOnlyList.maxByOrNull { it.createdAt } ?: pendingOnlyList.firstOrNull()
     }
 
-    // Trigger real-time audio (MediaPlayer with R.raw.loud_alert) and strong waveform vibration whenever a new 'Pending' booking appears
-    LaunchedEffect(latestPendingBooking) {
+    // Trigger real-time loud custom audio (MediaPlayer with R.raw.loud_alert) and strong waveform vibration whenever a new 'Pending' booking appears
+    LaunchedEffect(latestPendingBooking?.id, pendingOnlyList.size) {
         if (latestPendingBooking != null) {
             try {
                 // 1. Loud Custom Audio with MediaPlayer (R.raw.loud_alert)
                 try {
+                    activeLiveQueueMediaPlayer?.let { prev ->
+                        try {
+                            if (prev.isPlaying) prev.stop()
+                            prev.release()
+                        } catch (_: Exception) {
+                        }
+                    }
+                    activeLiveQueueMediaPlayer = null
                     MediaPlayer.create(
                         context,
                         com.example.R.raw.loud_alert
                     )?.apply {
                         activeLiveQueueMediaPlayer = this
+                        setVolume(1.0f, 1.0f)
                         setOnCompletionListener { mp ->
                             try {
                                 mp.release()
@@ -721,6 +736,9 @@ fun PartnerLiveQueueTabContent(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
@@ -739,14 +757,19 @@ fun PartnerLiveQueueTabContent(
                         fontSize = 12.sp,
                         fontWeight = FontWeight.ExtraBold,
                         color = if (isRushActive) AmberPrimary else Color.White,
-                        letterSpacing = 0.5.sp
+                        letterSpacing = 0.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
                 Text(
                     text = "${completedBookings.size} Finished",
                     fontSize = 11.sp,
-                    color = Color(0xFF94A3B8)
+                    color = Color(0xFF94A3B8),
+                    maxLines = 1,
+                    softWrap = false,
+                    textAlign = TextAlign.End
                 )
             }
         }
@@ -794,17 +817,35 @@ fun PartnerLiveQueueTabContent(
     }
 
     bookingForSlotAllocation?.let { targetBooking ->
-        val acceptedAheadCount = pendingBookings.count {
-            it.id != targetBooking.id && (
-                it.status.equals("accepted", ignoreCase = true) ||
-                    it.status.equals("confirmed", ignoreCase = true) ||
-                    it.status.equals("in_progress", ignoreCase = true)
-            )
+        val evaluatedId = targetBooking.resolvedBookingId.ifBlank { targetBooking.id }
+        val directQueueCount = pendingBookings.count { b ->
+            val bId = b.resolvedBookingId.ifBlank { b.id }
+            bId != evaluatedId &&
+                b.id != targetBooking.id &&
+                Booking.isStatusPendingOrAccepted(b.status)
         }
-        val defaultServiceMins = (salon?.waitingTimeMinutes?.takeIf { it in 10..60 }) ?: 20
+        val countedToday = Booking.countActiveInQueueToday(
+            bookings = pendingBookings,
+            salonId = salon?.id.orEmpty().ifBlank { targetBooking.salonId },
+            partnerId = salon?.partnerId.orEmpty().ifBlank { targetBooking.partnerId },
+            ownerId = salon?.ownerId.orEmpty(),
+            salonName = salon?.name.orEmpty().ifBlank { targetBooking.salonName },
+            excludeBookingId = evaluatedId
+        )
+        val activeInQueue = maxOf(directQueueCount, countedToday)
+        val matchedService = salon?.services?.find {
+            it.name.equals(targetBooking.service, ignoreCase = true) ||
+                it.serviceName.equals(targetBooking.service, ignoreCase = true)
+        }
+        val defaultServiceMins = when {
+            matchedService != null && matchedService.duration > 0 -> matchedService.duration
+            matchedService != null && matchedService.durationMinutes > 0 -> matchedService.durationMinutes
+            salon != null && salon.waitingTimeMinutes in 10..60 -> salon.waitingTimeMinutes
+            else -> 20
+        }
         PartnerEtaAllocationDialog(
             booking = targetBooking,
-            activeBookingsAheadCount = acceptedAheadCount,
+            activeBookingsAheadCount = activeInQueue,
             defaultServiceDurationMinutes = defaultServiceMins,
             onDismiss = { bookingForSlotAllocation = null },
             onConfirmAllocatedTime = { finalAllocatedTime ->
@@ -4147,21 +4188,83 @@ fun PartnerEtaAllocationDialog(
     onDismiss: () -> Unit,
     onConfirmAllocatedTime: (String) -> Unit
 ) {
+    val context = LocalContext.current
     var selectedOffsetMins by remember { mutableStateOf(0) }
+    var firestoreActiveInQueue by remember(booking.id, activeBookingsAheadCount) {
+        mutableStateOf(activeBookingsAheadCount)
+    }
+
+    // Live Firestore query on the active named database for today's bookings where status is IN ['Pending', 'Accepted']
+    // (excluding the exact booking currently being evaluated)
+    LaunchedEffect(booking.id, booking.salonId, activeBookingsAheadCount) {
+        firestoreActiveInQueue = maxOf(firestoreActiveInQueue, activeBookingsAheadCount)
+        try {
+            val targetSalonId = booking.salonId.ifBlank { booking.partnerId }.trim()
+            val targetPartnerId = booking.partnerId.ifBlank { booking.salonId }.trim()
+            val targetSalonName = booking.salonName.trim()
+            val evaluatedId = booking.resolvedBookingId.ifBlank { booking.id }.trim()
+            val candidateIds = setOf(
+                targetSalonId,
+                targetPartnerId,
+                if (targetPartnerId.isNotBlank()) "salon_$targetPartnerId" else "",
+                targetSalonId.removePrefix("salon_")
+            ).filter { it.isNotBlank() }
+
+            val app = com.google.firebase.FirebaseApp.getInstance()
+            val dbId = try {
+                context.getString(com.example.R.string.firestore_database_id)
+            } catch (_: Exception) {
+                "ai-studio-260b673c-6e6b-45c7-b680-335d42dc251f"
+            }
+            val db = if (dbId.isNotBlank() && dbId != "(default)") {
+                com.google.firebase.firestore.FirebaseFirestore.getInstance(app, dbId)
+            } else {
+                com.google.firebase.firestore.FirebaseFirestore.getInstance(app)
+            }
+
+            db.collection("bookings")
+                .get()
+                .addOnSuccessListener { snapshot ->
+                    val nowMs = System.currentTimeMillis()
+                    val count = snapshot.documents.count { doc ->
+                        val docId = (doc.getString("bookingId") ?: doc.getString("id") ?: doc.id).trim()
+                        val docSalonId = (doc.getString("salonId") ?: "").trim()
+                        val docPartnerId = (doc.getString("partnerId") ?: "").trim()
+                        val docSalonName = (doc.getString("salonName") ?: "").trim()
+                        val rawStatus = doc.getString("status")?.trim().orEmpty()
+                        val dateStr = (doc.getString("date") ?: doc.getString("bookingDate")).orEmpty().trim()
+                        val createdAtMs = (doc.get("createdAt") as? Number)?.toLong() ?: nowMs
+                        val isExcluded = docId == evaluatedId || doc.id == evaluatedId || doc.id == booking.id
+                        val matchesSalon = docSalonId in candidateIds ||
+                            docPartnerId in candidateIds ||
+                            (targetSalonName.isNotBlank() && docSalonName.equals(targetSalonName, ignoreCase = true))
+                        val isPendingOrAccepted = Booking.isStatusPendingOrAccepted(rawStatus)
+                        val isToday = dateStr.isBlank() ||
+                            dateStr.equals("Today", ignoreCase = true) ||
+                            Booking.isSameCalendarDay(createdAtMs, nowMs)
+                        !isExcluded && matchesSalon && isPendingOrAccepted && isToday
+                    }
+                    firestoreActiveInQueue = maxOf(activeBookingsAheadCount, count)
+                }
+        } catch (_: Exception) {
+        }
+    }
+
+    val activeInQueue = maxOf(activeBookingsAheadCount, firestoreActiveInQueue)
     val systemWaitMins = Booking.calculateSystemWaitMinutes(
-        activeBookingsCount = activeBookingsAheadCount,
+        activeBookingsCount = activeInQueue,
         defaultServiceDurationMinutes = defaultServiceDurationMinutes
     )
     val totalWaitMins = systemWaitMins + selectedOffsetMins
     val calculatedClockTime = Booking.calculateFormattedEtaClockTime(
-        activeBookingsCount = activeBookingsAheadCount,
+        activeBookingsCount = activeInQueue,
         defaultServiceDurationMinutes = defaultServiceDurationMinutes,
         extraOffsetMinutes = selectedOffsetMins
     )
-    val finalFormattedSlot = if (totalWaitMins <= 0) {
-        "$calculatedClockTime (Reach Now)"
-    } else {
+    val previewFormattedSlot = if (totalWaitMins > 0) {
         "$calculatedClockTime (~$totalWaitMins mins)"
+    } else {
+        calculatedClockTime
     }
 
     val quickOffsets = listOf(
@@ -4249,21 +4352,21 @@ fun PartnerEtaAllocationDialog(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = "SYSTEM CALCULATED ETA (${activeBookingsAheadCount} active in queue)",
+                            text = "SYSTEM CALCULATED ETA ($activeInQueue active in queue)",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.ExtraBold,
                             color = Color(0xFF94A3B8),
                             letterSpacing = 0.5.sp
                         )
                         Text(
-                            text = finalFormattedSlot,
+                            text = previewFormattedSlot,
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Black,
                             color = GreenSuccess,
                             modifier = Modifier.testTag("partner_eta_dialog_preview_time")
                         )
                         Text(
-                            text = "Service: ${booking.service} (₹${booking.servicePrice}) • Requested: ${booking.timeSlot}",
+                            text = "Service: ${booking.service} (₹${booking.servicePrice}) • Requested: ${booking.cleanAllocatedClockTime}",
                             fontSize = 11.sp,
                             color = Color(0xFFCBD5E1)
                         )
@@ -4277,12 +4380,12 @@ fun PartnerEtaAllocationDialog(
                     color = Color.White
                 )
 
-                // Quick Offset Option Buttons ("Give exactly this time", "+10 Mins", "+20 Mins", "+30 Mins")
+                // Quick Offset Option Buttons ("Exact Time", "+10 Mins", "+20 Mins", "+30 Mins")
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     quickOffsets.forEach { (offsetMins, label) ->
                         val isSelected = selectedOffsetMins == offsetMins
                         val optionTimePreview = Booking.calculateFormattedEtaClockTime(
-                            activeBookingsCount = activeBookingsAheadCount,
+                            activeBookingsCount = activeInQueue,
                             defaultServiceDurationMinutes = defaultServiceDurationMinutes,
                             extraOffsetMinutes = offsetMins
                         )
@@ -4355,7 +4458,7 @@ fun PartnerEtaAllocationDialog(
                     }
 
                     Button(
-                        onClick = { onConfirmAllocatedTime(finalFormattedSlot) },
+                        onClick = { onConfirmAllocatedTime(calculatedClockTime) },
                         modifier = Modifier
                             .weight(1.4f)
                             .height(48.dp)

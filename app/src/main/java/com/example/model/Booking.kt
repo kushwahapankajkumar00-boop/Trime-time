@@ -58,6 +58,13 @@ data class Booking(
         get() = allocatedTime.ifBlank { time }.ifBlank { timeSlot }
 
     /**
+     * Returns a clean, human-readable arrival time (e.g., "04:35 PM") without technical prefixes
+     * or raw queue suffixes like "Live ETA:", "(~40m)", "(Reach Now)", etc.
+     */
+    val cleanAllocatedClockTime: String
+        get() = formatCleanArrivalTime(allocatedTime.ifBlank { resolvedTime })
+
+    /**
      * Normalizes raw Firestore status strings into one of the four canonical display statuses:
      * "Pending", "Confirmed", "Completed", or "Cancelled".
      */
@@ -87,7 +94,8 @@ data class Booking(
     fun toMap(): Map<String, Any?> {
         val finalId = resolvedBookingId
         val finalUserId = resolvedUserId
-        val finalPartnerId = resolvedPartnerId
+        val finalPartnerId = partnerId.ifBlank { salonId }
+        val finalSalonId = salonId.ifBlank { partnerId }
         val finalDate = resolvedDate
         val finalTime = resolvedTime
         val finalAllocated = allocatedTime.ifBlank { finalTime }
@@ -101,7 +109,7 @@ data class Booking(
             "customerPhone" to customerPhone,
             "customerFcmToken" to customerFcmToken,
             "partnerId" to finalPartnerId,
-            "salonId" to finalPartnerId,
+            "salonId" to finalSalonId,
             "salonName" to salonName,
             "service" to service,
             "servicePrice" to servicePrice,
@@ -118,6 +126,16 @@ data class Booking(
         )
     }
 
+    enum class QueueTrafficLightStatus(
+        val emoji: String,
+        val label: String,
+        val badgeText: String
+    ) {
+        NO_WAIT("🟢", "No Wait", "🟢 No Wait"),
+        SLIGHT_WAIT("🟡", "Slight Wait", "🟡 Slight Wait"),
+        HIGH_RUSH("🔴", "High Rush", "🔴 High Rush")
+    }
+
     companion object {
         /**
          * Automatic Local Rush Detection threshold:
@@ -129,6 +147,136 @@ data class Booking(
          * 5-minute timeout (300,000 ms) for 'Pending' bookings if the Partner does not respond.
          */
         const val PENDING_TIMEOUT_MS = 5 * 60 * 1000L
+
+        private val CLOCK_TIME_REGEX = Regex("(\\d{1,2}:\\d{2}\\s*(?:AM|PM|am|pm))")
+
+        /**
+         * Traffic Light status badge mapping for Customer Salon Profile Screen:
+         * - 🟢 "No Wait" (Queue 0-1)
+         * - 🟡 "Slight Wait" (Queue 2-3)
+         * - 🔴 "High Rush" (Queue 4+)
+         */
+        fun getTrafficLightStatus(activeInQueue: Int): QueueTrafficLightStatus {
+            return when {
+                activeInQueue <= 1 -> QueueTrafficLightStatus.NO_WAIT
+                activeInQueue in 2..3 -> QueueTrafficLightStatus.SLIGHT_WAIT
+                else -> QueueTrafficLightStatus.HIGH_RUSH
+            }
+        }
+
+        /**
+         * Extracts a clean clock time (e.g. "04:35 PM") from any slot string,
+         * removing technical jargon like "Live ETA:", "(~40 mins)", "(Reach Now)", etc.
+         */
+        fun formatCleanArrivalTime(rawTime: String?): String {
+            val trimmed = rawTime?.trim().orEmpty()
+            if (trimmed.isBlank()) {
+                return calculateFormattedEtaClockTime(0, 15)
+            }
+            val match = CLOCK_TIME_REGEX.find(trimmed)
+            if (match != null) {
+                return match.groupValues[1].uppercase(java.util.Locale.US)
+            }
+            return trimmed
+                .removePrefix("Live ETA:")
+                .removePrefix("Waitlist:")
+                .replace("(Reach Now)", "", ignoreCase = true)
+                .replace("(⚡ Instant)", "", ignoreCase = true)
+                .replace(Regex("\\(~?\\d+\\s*(?:m|mins|minutes)\\)", RegexOption.IGNORE_CASE), "")
+                .trim()
+                .ifBlank { trimmed }
+        }
+
+        /**
+         * Returns true if the booking's status is in ['Pending', 'Accepted'] (case-insensitive,
+         * also matching 'Confirmed' and 'in_progress' which represent accepted bookings).
+         */
+        fun isStatusPendingOrAccepted(rawStatus: String?): Boolean {
+            val normalized = rawStatus?.trim()?.lowercase().orEmpty()
+            return normalized == "pending" ||
+                normalized == "accepted" ||
+                normalized == "confirmed" ||
+                normalized == "in_progress"
+        }
+
+        /**
+         * Returns true if two timestamps fall on the same local calendar day.
+         */
+        fun isSameCalendarDay(timestampMillis: Long, referenceMillis: Long = System.currentTimeMillis()): Boolean {
+            if (timestampMillis <= 0L) return true
+            val cal1 = java.util.Calendar.getInstance().apply { timeInMillis = timestampMillis }
+            val cal2 = java.util.Calendar.getInstance().apply { timeInMillis = referenceMillis }
+            return cal1.get(java.util.Calendar.YEAR) == cal2.get(java.util.Calendar.YEAR) &&
+                cal1.get(java.util.Calendar.DAY_OF_YEAR) == cal2.get(java.util.Calendar.DAY_OF_YEAR)
+        }
+
+        /**
+         * Returns true if a booking is for Today and has status IN ['Pending', 'Accepted'].
+         */
+        fun isActiveInQueueForToday(
+            booking: Booking,
+            excludeBookingId: String? = null,
+            referenceMillis: Long = System.currentTimeMillis()
+        ): Boolean {
+            if (!excludeBookingId.isNullOrBlank()) {
+                val target = excludeBookingId.trim()
+                if (booking.id.trim() == target ||
+                    booking.bookingId.trim() == target ||
+                    booking.resolvedBookingId.trim() == target
+                ) {
+                    return false
+                }
+            }
+            if (!isStatusPendingOrAccepted(booking.status)) return false
+            val dateStr = booking.resolvedDate.trim()
+            val isTodayLabel = dateStr.isBlank() || dateStr.equals("Today", ignoreCase = true)
+            val isCreatedToday = isSameCalendarDay(booking.createdAt, referenceMillis)
+            return isTodayLabel || isCreatedToday
+        }
+
+        /**
+         * Counts ALL bookings for today for a given salon where `status` is IN `['Pending', 'Accepted']`
+         * (excluding the exact booking currently being evaluated when `excludeBookingId` is provided).
+         */
+        fun countActiveInQueueToday(
+            bookings: List<Booking>,
+            salonId: String,
+            partnerId: String = "",
+            ownerId: String = "",
+            salonName: String = "",
+            excludeBookingId: String? = null,
+            referenceMillis: Long = System.currentTimeMillis()
+        ): Int {
+            val cleanSalonId = salonId.trim()
+            val cleanPartnerId = partnerId.trim()
+            val cleanOwnerId = ownerId.trim()
+            val cleanSalonName = salonName.trim()
+            val candidateIds = setOf(
+                cleanSalonId,
+                cleanPartnerId,
+                cleanOwnerId,
+                if (cleanPartnerId.isNotBlank()) "salon_$cleanPartnerId" else "",
+                if (cleanOwnerId.isNotBlank()) "salon_$cleanOwnerId" else "",
+                cleanSalonId.removePrefix("salon_")
+            ).filter { it.isNotBlank() }
+
+            return bookings
+                .filter { b ->
+                    val bSalonId = b.salonId.trim()
+                    val bPartnerId = b.partnerId.trim()
+                    val matchesId = candidateIds.isEmpty() ||
+                        bSalonId in candidateIds ||
+                        bPartnerId in candidateIds ||
+                        bSalonId.removePrefix("salon_") in candidateIds ||
+                        bPartnerId.removePrefix("salon_") in candidateIds
+                    val matchesName = cleanSalonName.isNotBlank() &&
+                        b.salonName.trim().equals(cleanSalonName, ignoreCase = true)
+                    (matchesId || matchesName) &&
+                        isActiveInQueueForToday(b, excludeBookingId = excludeBookingId, referenceMillis = referenceMillis)
+                }
+                .distinctBy { it.resolvedBookingId.ifBlank { "${it.customerId}_${it.createdAt}" } }
+                .size
+        }
 
         fun isLocalRushMode(activeBookingsCount: Int): Boolean {
             return activeBookingsCount >= LOCAL_RUSH_QUEUE_THRESHOLD
@@ -153,7 +301,8 @@ data class Booking(
 
         /**
          * Calculates the estimated wait time in minutes based on the Partner's current active Live Queue
-         * (`activeBookingsCount * defaultServiceDurationMinutes`).
+         * (`activeInQueue * defaultServiceDurationMinutes`), adding the default service duration for EVERY
+         * pending and accepted booking ahead in the queue.
          */
         fun calculateSystemWaitMinutes(
             activeBookingsCount: Int,
@@ -180,7 +329,7 @@ data class Booking(
 
         /**
          * Calculates the formatted clock arrival time (e.g., "04:35 PM") by adding the system queue wait
-         * (`activeBookingsCount * defaultServiceDurationMinutes`) plus any Partner manual override (`extraOffsetMinutes`).
+         * (`activeInQueue * defaultServiceDurationMinutes`) plus any Partner manual override (`extraOffsetMinutes`).
          */
         fun calculateFormattedEtaClockTime(
             activeBookingsCount: Int,

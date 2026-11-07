@@ -200,11 +200,18 @@ data class Salon(
     val unlockRequestStatus: String = "none", // "none", "pending", "approved"
     val fcmToken: String = ""
 ) {
+    val isAcceptingBookings: Boolean
+        get() = isOpen &&
+            !currentStatus.equals("CLOSED", ignoreCase = true) &&
+            !salonStatus.equals("closed", ignoreCase = true) &&
+            !isSuspended &&
+            !approvalStatus.equals("REJECTED", ignoreCase = true)
+
     val isBusy: Boolean
-        get() = currentStatus.equals("BUSY", ignoreCase = true)
+        get() = isOpen && currentStatus.equals("BUSY", ignoreCase = true)
 
     val isFree: Boolean
-        get() = !isBusy
+        get() = isOpen && !isBusy
 
     val resolvedPhotoData: String
         get() = imageUrl.ifBlank { photoBase64 }

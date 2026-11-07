@@ -110,7 +110,7 @@ fun PinDisplayDialog(
                 )
 
                 Text(
-                    text = "Time Slot: ${booking.timeSlot} • ₹${booking.servicePrice}",
+                    text = "Slot around ${booking.cleanAllocatedClockTime} • ₹${booking.servicePrice}",
                     style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
                     color = AmberPrimary,
                     textAlign = TextAlign.Center

@@ -54,6 +54,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.foundation.Image
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -107,7 +108,87 @@ fun SalonDetailScreen(
 ) {
     BackHandler { onBack() }
 
+    val context = LocalContext.current
     var showRatingDialog by remember { mutableStateOf(false) }
+
+    // Strict Real-Time Firestore check on the Salon document's `isOpen` & `currentStatus`
+    var liveFirestoreIsOpen by remember(salon.id, salon.isOpen, salon.currentStatus) {
+        mutableStateOf(salon.isAcceptingBookings)
+    }
+
+    DisposableEffect(salon.id, salon.ownerId, salon.partnerId) {
+        val listeners = mutableListOf<com.google.firebase.firestore.ListenerRegistration>()
+        try {
+            val dbId = try {
+                context.getString(com.example.R.string.firestore_database_id).trim()
+            } catch (_: Exception) {
+                ""
+            }
+            val namedDb = try {
+                if (dbId.isNotEmpty() && dbId != "(default)") {
+                    com.google.firebase.firestore.FirebaseFirestore.getInstance(
+                        com.google.firebase.FirebaseApp.getInstance(),
+                        dbId
+                    )
+                } else {
+                    com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                }
+            } catch (_: Exception) {
+                null
+            }
+            val defDb = try {
+                com.google.firebase.firestore.FirebaseFirestore.getInstance()
+            } catch (_: Exception) {
+                null
+            }
+            val dbs = listOfNotNull(namedDb, defDb).distinct()
+            val candidateDocIds = setOf(
+                salon.id.trim(),
+                salon.partnerId.trim(),
+                salon.ownerId.trim(),
+                if (salon.partnerId.isNotBlank()) "salon_${salon.partnerId.trim()}" else "",
+                if (salon.ownerId.isNotBlank()) "salon_${salon.ownerId.trim()}" else ""
+            ).filter { it.isNotBlank() }
+
+            val docStates = mutableMapOf<String, Boolean>()
+            dbs.forEach { db ->
+                candidateDocIds.forEach { docId ->
+                    val reg = db.collection("salons").document(docId)
+                        .addSnapshotListener { snap, err ->
+                            if (err == null && snap != null && snap.exists()) {
+                                val docOpen = snap.getBoolean("isOpen")
+                                    ?: snap.getString("isOpen")?.toBooleanStrictOrNull()
+                                    ?: snap.getBoolean("isShopOpen")
+                                    ?: true
+                                val docStatus = snap.getString("currentStatus")?.trim().orEmpty()
+                                val docSalonStatus = snap.getString("salonStatus")?.trim().orEmpty()
+                                val docSuspended = snap.getBoolean("isSuspended") ?: false
+                                val isDocAccepting = docOpen &&
+                                    !docStatus.equals("CLOSED", ignoreCase = true) &&
+                                    !docSalonStatus.equals("closed", ignoreCase = true) &&
+                                    !docSalonStatus.equals("suspended", ignoreCase = true) &&
+                                    !docSuspended
+                                docStates["${db.hashCode()}_$docId"] = isDocAccepting
+                                // If ANY matching document for this salon is marked closed in Firestore, enforce closed state immediately
+                                liveFirestoreIsOpen = docStates.values.all { it }
+                            }
+                        }
+                    listeners.add(reg)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        onDispose {
+            listeners.forEach {
+                try {
+                    it.remove()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    val isSalonOpen = liveFirestoreIsOpen && salon.isAcceptingBookings
 
     val defaultServiceDuration = remember(salon.services) {
         salon.services
@@ -123,8 +204,8 @@ fun SalonDetailScreen(
     val isRushActive = remember(isGlobalRushModeEnabled, isLocalRushMode) {
         isGlobalRushModeEnabled || isLocalRushMode
     }
-    val systemWaitMinutes = remember(activeLiveQueueCount, defaultServiceDuration) {
-        Booking.calculateSystemWaitMinutes(activeLiveQueueCount, defaultServiceDuration)
+    val trafficLightStatus = remember(activeLiveQueueCount) {
+        Booking.getTrafficLightStatus(activeLiveQueueCount)
     }
     val systemEtaClockTime = remember(activeLiveQueueCount, defaultServiceDuration) {
         Booking.calculateFormattedEtaClockTime(activeLiveQueueCount, defaultServiceDuration)
@@ -140,8 +221,9 @@ fun SalonDetailScreen(
     val isOwnSalon = currentUserId.isNotBlank() &&
         (salon.ownerId == currentUserId || salon.partnerId == currentUserId)
 
-    val isBookDisabled = isOwnSalon || hasActiveBooking || isSuspended || isExceedingClosingTime
+    val isBookDisabled = !isSalonOpen || isOwnSalon || hasActiveBooking || isSuspended || isExceedingClosingTime
     val disabledReason = when {
+        !isSalonOpen -> "Currently Closed - Not accepting new bookings"
         isOwnSalon -> "This is your own registered salon. Manage it in Partner Mode."
         isSuspended -> "Your account has been suspended for too many cancellations"
         isExceedingClosingTime -> "Booking Blocked: Newly calculated ETA ($systemEtaClockTime) exceeds official closing time (${salon.closingTime.ifBlank { "9:00 PM" }})."
@@ -186,13 +268,21 @@ fun SalonDetailScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = if (isRushActive) {
-                                "${salon.distance} away • Rush ETA: $systemEtaClockTime (~${systemWaitMinutes}m wait)"
+                            text = if (!isSalonOpen) {
+                                "${salon.distance} away • 🔴 Currently Closed - Not accepting new bookings"
                             } else {
-                                "${salon.distance} away • ${salon.location}"
+                                "${salon.distance} away • ${trafficLightStatus.badgeText}"
                             },
                             fontSize = 11.sp,
-                            color = if (isRushActive) AmberPrimary else Color(0xFF94A3B8),
+                            color = if (!isSalonOpen) {
+                                RedAlert
+                            } else {
+                                when (trafficLightStatus) {
+                                    Booking.QueueTrafficLightStatus.NO_WAIT -> GreenSuccess
+                                    Booking.QueueTrafficLightStatus.SLIGHT_WAIT -> AmberPrimary
+                                    Booking.QueueTrafficLightStatus.HIGH_RUSH -> RedAlert
+                                }
+                            },
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -251,8 +341,68 @@ fun SalonDetailScreen(
             item {
                 SalonHeaderBanner(
                     salon = salon,
+                    isSalonOpen = isSalonOpen,
+                    trafficLightStatus = trafficLightStatus,
                     onRateClick = { showRatingDialog = true }
                 )
+            }
+
+            // Prominent Red Warning Overlay / Banner when Salon is Closed (`isOpen == false`)
+            if (!isSalonOpen) {
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                            .testTag("salon_closed_warning_banner"),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF450A0A)),
+                        border = CardDefaults.outlinedCardBorder().copy(
+                            width = 1.5.dp,
+                            brush = androidx.compose.ui.graphics.SolidColor(RedAlert)
+                        ),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(RedAlert.copy(alpha = 0.2f))
+                                    .border(1.dp, RedAlert, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ErrorOutline,
+                                    contentDescription = "Salon Closed",
+                                    tint = RedAlert,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "Currently Closed - Not accepting new bookings",
+                                    color = Color(0xFFFECACA),
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                                Text(
+                                    text = "This salon has manually switched its shop status to Closed. Online bookings are disabled until the partner re-opens.",
+                                    color = Color(0xFFFCA5A5),
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             // Pay-at-salon banner
@@ -260,24 +410,42 @@ fun SalonDetailScreen(
                 PayAtSalonBanner()
             }
 
-            // Dynamic Rush Mode (Festival / Local Crowd >= 3) Smart ETA Banner
-            if (isRushActive) {
+            // Simple Traffic Light Live Status Banner (Only shown when shop is Open)
+            if (isSalonOpen) {
                 item {
-                    val rushReasonLabel = if (isGlobalRushModeEnabled) {
-                        "🎉 FESTIVAL RUSH MODE • SMART ETA: $systemEtaClockTime"
-                    } else {
-                        "🔥 HIGH CROWD RUSH (${activeLiveQueueCount} IN QUEUE) • ETA: $systemEtaClockTime"
+                    val (badgeBg, badgeBorder, badgeTextColor) = when (trafficLightStatus) {
+                        Booking.QueueTrafficLightStatus.NO_WAIT -> Triple(
+                            Color(0xFF064E3B),
+                            GreenSuccess,
+                            Color(0xFFA7F3D0)
+                        )
+                        Booking.QueueTrafficLightStatus.SLIGHT_WAIT -> Triple(
+                            Color(0xFF451A03),
+                            AmberPrimary,
+                            Color(0xFFFDE68A)
+                        )
+                        Booking.QueueTrafficLightStatus.HIGH_RUSH -> Triple(
+                            Color(0xFF450A0A),
+                            RedAlert,
+                            Color(0xFFFECACA)
+                        )
+                    }
+                    val friendlySubtitle = when (trafficLightStatus) {
+                        Booking.QueueTrafficLightStatus.NO_WAIT ->
+                            "Instant chair availability • Tap Book Now to reserve your slot."
+                        Booking.QueueTrafficLightStatus.SLIGHT_WAIT ->
+                            "Next available slot around $systemEtaClockTime • Book ahead to skip waiting at the shop."
+                        Booking.QueueTrafficLightStatus.HIGH_RUSH ->
+                            "High demand right now • Next slot around $systemEtaClockTime. Book ahead and reach directly at your confirmed time."
                     }
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp, vertical = 6.dp)
                             .testTag("salon_live_eta_banner"),
-                        colors = CardDefaults.cardColors(
-                            containerColor = Color(0xFF451A03)
-                        ),
+                        colors = CardDefaults.cardColors(containerColor = badgeBg.copy(alpha = 0.7f)),
                         border = CardDefaults.outlinedCardBorder().copy(
-                            brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
+                            brush = androidx.compose.ui.graphics.SolidColor(badgeBorder)
                         ),
                         shape = RoundedCornerShape(14.dp)
                     ) {
@@ -288,38 +456,43 @@ fun SalonDetailScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Row(
+                            Column(
                                 modifier = Modifier.weight(1f),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(38.dp)
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(AmberPrimary.copy(alpha = 0.22f)),
-                                    contentAlignment = Alignment.Center
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.AccessTime,
-                                        contentDescription = "Rush Mode Smart ETA",
-                                        tint = AmberPrimary,
-                                        modifier = Modifier.size(20.dp)
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(badgeBg)
+                                            .border(1.dp, badgeBorder, RoundedCornerShape(8.dp))
+                                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                                            .testTag("salon_traffic_light_badge")
+                                    ) {
+                                        Text(
+                                            text = trafficLightStatus.badgeText,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = badgeTextColor
+                                        )
+                                    }
+                                    if (activeLiveQueueCount > 0 || isRushActive) {
+                                        Text(
+                                            text = "Slot around $systemEtaClockTime",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
                                 }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = rushReasonLabel,
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = Color(0xFFFDE68A)
-                                    )
-                                    Text(
-                                        text = "Est. Wait: ~${systemWaitMinutes} mins ($activeLiveQueueCount active in queue). Partner will confirm your exact arrival time in My Bookings.",
-                                        fontSize = 11.sp,
-                                        color = Color(0xFFE2E8F0)
-                                    )
-                                }
+                                Text(
+                                    text = friendlySubtitle,
+                                    fontSize = 11.sp,
+                                    color = Color(0xFFE2E8F0)
+                                )
                             }
                         }
                     }
@@ -495,12 +668,13 @@ fun SalonDetailScreen(
             items(salon.services, key = { it.id }) { service ->
                 ServiceCatalogItem(
                     service = service,
+                    isSalonOpen = isSalonOpen,
                     isBusy = salon.isBusy,
                     isOwnSalon = isOwnSalon,
                     isBookDisabled = isBookDisabled,
                     disabledReason = disabledReason,
                     onBookClick = {
-                        if (isBookDisabled) {
+                        if (!isSalonOpen || isBookDisabled) {
                             onBookingBlocked(disabledReason)
                         } else {
                             onServiceSelected(service)
@@ -526,6 +700,8 @@ fun SalonDetailScreen(
 @Composable
 fun SalonHeaderBanner(
     salon: Salon,
+    isSalonOpen: Boolean = salon.isAcceptingBookings,
+    trafficLightStatus: Booking.QueueTrafficLightStatus = Booking.QueueTrafficLightStatus.NO_WAIT,
     onRateClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -551,10 +727,11 @@ fun SalonHeaderBanner(
         colors = CardDefaults.cardColors(containerColor = DarkCardSurface)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
+            // 1. Tall 250.dp Salon Profile Cover Photo — unobstructed center with bottom gradient scrim
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 148.dp)
+                    .height(250.dp)
                     .background(
                         Brush.linearGradient(
                             listOf(Color(0xFF1E1B4B), Color(0xFF451A03), Color(0xFF0F172A))
@@ -569,188 +746,83 @@ fun SalonHeaderBanner(
                             .build(),
                         contentDescription = "${salon.name} Cover Photo",
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier.matchParentSize()
+                        alignment = Alignment.Center,
+                        modifier = Modifier.fillMaxSize()
                     )
                 } else if (salonCoverBitmap != null) {
                     Image(
                         bitmap = salonCoverBitmap,
                         contentDescription = "${salon.name} Cover Photo",
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier.matchParentSize()
+                        alignment = Alignment.Center,
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
 
-                if (hasCustomPhoto) {
-                    // Balanced vertical gradient scrim so the salon cover photo is clearly visible while keeping text crisp
-                    Box(
-                        modifier = Modifier
-                            .matchParentSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    colorStops = arrayOf(
-                                        0.0f to Color.Black.copy(alpha = 0.25f),
-                                        0.50f to Color.Black.copy(alpha = 0.45f),
-                                        1.0f to Color(0xD9090D16)
-                                    )
+                // Bottom gradient overlay behind the salon name so text remains easily readable while keeping the photo unobstructed
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                colorStops = arrayOf(
+                                    0.0f to Color.Black.copy(alpha = 0.08f),
+                                    0.55f to Color.Transparent,
+                                    0.80f to Color(0xB3090D16),
+                                    1.0f to Color(0xF2090D16)
                                 )
                             )
-                    )
-                }
+                        )
+                )
 
+                // Bottom Edge of Image: Salon Name, Verified Badge, Tagline & Scissors Emblem
                 Row(
                     modifier = Modifier
+                        .align(Alignment.BottomStart)
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.Bottom
                 ) {
                     Column(
                         modifier = Modifier
                             .weight(1f)
-                            .padding(end = 10.dp)
+                            .padding(end = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            val ratingText = if (salon.totalRatings > 0) {
-                                String.format(java.util.Locale.US, "★ %.1f (%d ratings)", salon.effectiveRating, salon.totalRatings)
-                            } else if (salon.averageRating > 0.0) {
-                                String.format(java.util.Locale.US, "★ %.1f", salon.effectiveRating)
-                            } else if (salon.reviewCount > 0) {
-                                String.format(java.util.Locale.US, "★ %.1f (%d reviews)", salon.rating, salon.reviewCount)
-                            } else {
-                                "★ New"
-                            }
-
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(Color(0xFF064E3B))
-                                    .clickable { onRateClick() }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = ratingText,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                            }
-
-                            // AC / Non-AC Status Badge
-                            if (salon.isAcSalon) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .background(Color(0xFF0C4A6E))
-                                        .border(0.8.dp, Color(0xFF38BDF8), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                        .testTag("detail_ac_badge")
-                                ) {
-                                    Text(
-                                        text = "❄️ AC Salon",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF7DD3FC),
-                                        maxLines = 1
-                                    )
-                                }
-                            } else {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .background(Color(0xFF1E293B))
-                                        .border(0.8.dp, Color(0xFF475569), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                                        .testTag("detail_non_ac_badge")
-                                ) {
-                                    Text(
-                                        text = "Non-AC",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = Color(0xFF94A3B8),
-                                        maxLines = 1
-                                    )
-                                }
-                            }
-
-                            // Real-Time Barber Busy/Free Status Badge
-                            val isBusy = salon.isBusy
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(if (isBusy) Color(0xFF451A03) else Color(0xFF064E3B))
-                                    .border(1.dp, if (isBusy) Color(0xFFF97316) else GreenSuccess, RoundedCornerShape(4.dp))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    .testTag("salon_detail_status_badge")
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                                ) {
-                                    Text(
-                                        text = if (isBusy) "🔴" else "🟢",
-                                        fontSize = 9.sp,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                    Text(
-                                        text = if (isBusy) "Barber Busy (15-20m wait)" else "Available Now",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isBusy) Color(0xFFFDBA74) else GreenSuccess,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
-                                }
-                            }
-
-                        }
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        Box(
-                            modifier = Modifier.then(
-                                if (hasCustomPhoto) {
-                                    Modifier
-                                        .clip(RoundedCornerShape(10.dp))
-                                        .background(Color(0xB3090D16))
-                                        .padding(horizontal = 8.dp, vertical = 5.dp)
-                                } else {
-                                    Modifier
-                                }
+                            Text(
+                                text = salon.name,
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    shadow = highContrastShadow
+                                ),
+                                color = Color.White,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
                             )
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Text(
-                                    text = salon.name,
-                                    style = MaterialTheme.typography.titleLarge.copy(
-                                        fontWeight = FontWeight.ExtraBold,
-                                        shadow = highContrastShadow
-                                    ),
-                                    color = Color.White,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f, fill = false)
-                                )
-                                if (salon.isPhoneVerified) {
-                                    com.example.ui.components.VerifiedBlueTickIcon(size = 18.dp)
-                                }
+                            if (salon.isPhoneVerified) {
+                                com.example.ui.components.VerifiedBlueTickIcon(size = 18.dp)
                             }
+                        }
+                        if (salon.tagline.isNotBlank()) {
+                            Text(
+                                text = salon.tagline,
+                                fontSize = 12.sp,
+                                color = Color(0xFFE2E8F0),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
 
                     Box(
                         modifier = Modifier
-                            .size(54.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
                             .background(Color(0xD90F172A))
                             .border(1.dp, AmberPrimary.copy(alpha = 0.6f), CircleShape),
@@ -760,19 +832,169 @@ fun SalonHeaderBanner(
                             imageVector = Icons.Default.ContentCut,
                             contentDescription = "Salon",
                             tint = AmberPrimary,
-                            modifier = Modifier.size(28.dp)
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                 }
             }
 
-            val context = LocalContext.current
+            // 2. Repositioned Status Tags & Details cleanly below the image (unobstructed salon photo)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val ratingText = if (salon.totalRatings > 0) {
+                        String.format(java.util.Locale.US, "★ %.1f (%d ratings)", salon.effectiveRating, salon.totalRatings)
+                    } else if (salon.averageRating > 0.0) {
+                        String.format(java.util.Locale.US, "★ %.1f", salon.effectiveRating)
+                    } else if (salon.reviewCount > 0) {
+                        String.format(java.util.Locale.US, "★ %.1f (%d reviews)", salon.rating, salon.reviewCount)
+                    } else {
+                        "★ New"
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF064E3B))
+                            .clickable { onRateClick() }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = ratingText,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+
+                    // AC / Non-AC Status Badge
+                    if (salon.isAcSalon) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xFF0C4A6E))
+                                .border(0.8.dp, Color(0xFF38BDF8), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("detail_ac_badge")
+                        ) {
+                            Text(
+                                text = "❄️ AC Salon",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF7DD3FC),
+                                maxLines = 1
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xFF1E293B))
+                                .border(0.8.dp, Color(0xFF475569), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("detail_non_ac_badge")
+                        ) {
+                            Text(
+                                text = "Non-AC",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xFF94A3B8),
+                                maxLines = 1
+                            )
+                        }
+                    }
+
+                    // Status Badge: Prominent Red Closed Badge when !isSalonOpen, else Traffic Light Badge
+                    if (!isSalonOpen) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(0xFF450A0A))
+                                .border(1.dp, RedAlert, RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("salon_detail_status_badge")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "🔴",
+                                    fontSize = 9.sp,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                                Text(
+                                    text = "Currently Closed - Not accepting new bookings",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFFFECACA),
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    } else {
+                        // Simple Traffic Light Status Badge:
+                        // 🟢 "No Wait" (Queue 0-1), 🟡 "Slight Wait" (Queue 2-3), 🔴 "High Rush" (Queue 4+)
+                        val (statusBgColor, statusBorderColor, statusLabelColor) = when (trafficLightStatus) {
+                            Booking.QueueTrafficLightStatus.NO_WAIT -> Triple(
+                                Color(0xFF064E3B),
+                                GreenSuccess,
+                                GreenSuccess
+                            )
+                            Booking.QueueTrafficLightStatus.SLIGHT_WAIT -> Triple(
+                                Color(0xFF451A03),
+                                AmberPrimary,
+                                Color(0xFFFDE68A)
+                            )
+                            Booking.QueueTrafficLightStatus.HIGH_RUSH -> Triple(
+                                Color(0xFF450A0A),
+                                RedAlert,
+                                Color(0xFFFCA5A5)
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(statusBgColor)
+                                .border(1.dp, statusBorderColor, RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                .testTag("salon_detail_status_badge")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Text(
+                                    text = trafficLightStatus.emoji,
+                                    fontSize = 9.sp,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                                Text(
+                                    text = trafficLightStatus.label,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = statusLabelColor,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -960,6 +1182,7 @@ fun PayAtSalonBanner() {
 @Composable
 fun ServiceCatalogItem(
     service: SalonService,
+    isSalonOpen: Boolean = true,
     isBusy: Boolean = false,
     isOwnSalon: Boolean = false,
     isBookDisabled: Boolean = false,
@@ -1064,36 +1287,54 @@ fun ServiceCatalogItem(
             if (!isOwnSalon) {
                 Spacer(modifier = Modifier.width(12.dp))
 
-                // Booking Button: changes to "Join Waitlist" (Orange) if status is BUSY
-                Button(
-                    onClick = onBookClick,
-                    enabled = !isBookDisabled,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
-                        disabledContainerColor = Color(0xFF334155),
-                        contentColor = if (isBusy) Color.White else Color(0xFF1E1402),
-                        disabledContentColor = Color(0xFF94A3B8)
-                    ),
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                    modifier = Modifier.testTag("book_service_btn_${service.id}")
-                ) {
-                    Text(
-                        text = when {
-                            isBookDisabled -> "Disabled"
-                            isBusy -> "Join Waitlist"
-                            else -> "Pick Slot"
-                        },
-                        color = when {
-                            isBookDisabled -> Color(0xFF94A3B8)
-                            isBusy -> Color.White
-                            else -> Color(0xFF1E1402)
-                        },
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        softWrap = false
-                    )
+                if (!isSalonOpen) {
+                    // When isOpen is false, completely disable the 'Book Now' button and show 'Shop Closed'
+                    Button(
+                        onClick = {},
+                        enabled = false,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF450A0A),
+                            disabledContainerColor = Color(0xFF450A0A),
+                            contentColor = Color(0xFFFCA5A5),
+                            disabledContentColor = Color(0xFFFCA5A5)
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.testTag("book_service_btn_${service.id}")
+                    ) {
+                        Text(
+                            text = "Closed",
+                            color = Color(0xFFFCA5A5),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                } else {
+                    // Booking Button: "Book Now"
+                    Button(
+                        onClick = onBookClick,
+                        enabled = !isBookDisabled,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AmberPrimary,
+                            disabledContainerColor = Color(0xFF334155),
+                            contentColor = Color(0xFF1E1402),
+                            disabledContentColor = Color(0xFF94A3B8)
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                        modifier = Modifier.testTag("book_service_btn_${service.id}")
+                    ) {
+                        Text(
+                            text = if (isBookDisabled) "Unavailable" else "Book Now",
+                            color = if (isBookDisabled) Color(0xFF94A3B8) else Color(0xFF1E1402),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
             }
         }

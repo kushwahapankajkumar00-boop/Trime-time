@@ -66,6 +66,15 @@ service cloud.firestore {
         );
     }
 
+    // Backend Safety Rule: Reject any incoming booking creation if the target salon is set to closed (`isOpen == false` or `currentStatus == 'CLOSED'`)
+    function isTargetSalonOpen(salonId) {
+      return !exists(/databases/$(database)/documents/salons/$(salonId)) || (
+        get(/databases/$(database)/documents/salons/$(salonId)).data.get('isOpen', true) == true &&
+        get(/databases/$(database)/documents/salons/$(salonId)).data.get('currentStatus', 'FREE') != 'CLOSED' &&
+        get(/databases/$(database)/documents/salons/$(salonId)).data.get('isSuspended', false) == false
+      );
+    }
+
     // Users collection:
     // - Normal users cannot set `isAdmin == true` or `isBlocked` on creation or update
     // - Only users with `isAdmin == true` can block/unblock other users
@@ -102,12 +111,12 @@ service cloud.firestore {
     }
 
     // Bookings collection:
-    // - Validates required fields (customerId, salonId, servicePin) on creation
+    // - Validates required fields (customerId, salonId, servicePin) on creation AND rejects creation if the target salon is closed (`isOpen == false`)
     // - Allows status updates while preserving customerId & salonId immutability
     // - Bookings CANNOT be deleted by anyone (allow delete: if false) to preserve an immutable audit trail
     match /bookings/{bookingId} {
       allow read: if true;
-      allow create: if hasRequiredBookingCreateFields();
+      allow create: if hasRequiredBookingCreateFields() && isTargetSalonOpen(request.resource.data.salonId);
       allow update: if isAdminUser() || (
         !request.resource.data.keys().hasAll(['customerId', 'salonId']) ||
         (request.resource.data.customerId == resource.data.customerId &&

@@ -1,5 +1,6 @@
 package com.example.ui.customer
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -24,9 +25,10 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Payments
 import androidx.compose.material.icons.filled.Person
@@ -39,10 +41,13 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,6 +56,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
@@ -87,8 +93,86 @@ fun BookingBottomSheet(
     onConfirm: (name: String, phone: String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+
+    var liveFirestoreIsOpen by remember(salon.id, salon.isOpen, salon.currentStatus) {
+        mutableStateOf(salon.isAcceptingBookings)
+    }
+
+    DisposableEffect(salon.id, salon.ownerId, salon.partnerId) {
+        val listeners = mutableListOf<com.google.firebase.firestore.ListenerRegistration>()
+        try {
+            val dbId = try {
+                context.getString(com.example.R.string.firestore_database_id).trim()
+            } catch (_: Exception) {
+                ""
+            }
+            val namedDb = try {
+                if (dbId.isNotEmpty() && dbId != "(default)") {
+                    com.google.firebase.firestore.FirebaseFirestore.getInstance(
+                        com.google.firebase.FirebaseApp.getInstance(),
+                        dbId
+                    )
+                } else {
+                    com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                }
+            } catch (_: Exception) {
+                null
+            }
+            val defDb = try {
+                com.google.firebase.firestore.FirebaseFirestore.getInstance()
+            } catch (_: Exception) {
+                null
+            }
+            val dbs = listOfNotNull(namedDb, defDb).distinct()
+            val candidateDocIds = setOf(
+                salon.id.trim(),
+                salon.partnerId.trim(),
+                salon.ownerId.trim(),
+                if (salon.partnerId.isNotBlank()) "salon_${salon.partnerId.trim()}" else "",
+                if (salon.ownerId.isNotBlank()) "salon_${salon.ownerId.trim()}" else ""
+            ).filter { it.isNotBlank() }
+
+            val docStates = mutableMapOf<String, Boolean>()
+            dbs.forEach { db ->
+                candidateDocIds.forEach { docId ->
+                    val reg = db.collection("salons").document(docId)
+                        .addSnapshotListener { snap, err ->
+                            if (err == null && snap != null && snap.exists()) {
+                                val docOpen = snap.getBoolean("isOpen")
+                                    ?: snap.getString("isOpen")?.toBooleanStrictOrNull()
+                                    ?: snap.getBoolean("isShopOpen")
+                                    ?: true
+                                val docStatus = snap.getString("currentStatus")?.trim().orEmpty()
+                                val docSalonStatus = snap.getString("salonStatus")?.trim().orEmpty()
+                                val docSuspended = snap.getBoolean("isSuspended") ?: false
+                                val isDocAccepting = docOpen &&
+                                    !docStatus.equals("CLOSED", ignoreCase = true) &&
+                                    !docSalonStatus.equals("closed", ignoreCase = true) &&
+                                    !docSalonStatus.equals("suspended", ignoreCase = true) &&
+                                    !docSuspended
+                                docStates["${db.hashCode()}_$docId"] = isDocAccepting
+                                liveFirestoreIsOpen = docStates.values.all { it }
+                            }
+                        }
+                    listeners.add(reg)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        onDispose {
+            listeners.forEach {
+                try {
+                    it.remove()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    val isSalonOpen = liveFirestoreIsOpen && salon.isAcceptingBookings
 
     val initialTenDigitPhone = remember(userProfile.phone, userProfile.phoneNumber) {
         val raw = userProfile.phoneNumber.ifBlank { userProfile.phone }
@@ -101,11 +185,17 @@ fun BookingBottomSheet(
         if (ten.length == 10 && ten != "9876543210") ten else ""
     }
 
-    var customerName by remember(userProfile.name) { mutableStateOf(userProfile.name) }
+    var customerName by remember(userProfile.name) {
+        mutableStateOf(userProfile.name.ifBlank { "Customer" })
+    }
     var customerPhone by remember(initialTenDigitPhone) { mutableStateOf(initialTenDigitPhone) }
     val cleanPhoneDigits = customerPhone.filter { it.isDigit() }
     val isValidTenDigitPhone = cleanPhoneDigits.length == 10 &&
         cleanPhoneDigits.firstOrNull() in listOf('6', '7', '8', '9')
+
+    var isEditingContact by remember {
+        mutableStateOf(!isValidTenDigitPhone || customerName.trim().length < 2)
+    }
 
     val serviceDurationMins = if (service.duration > 0) {
         service.duration
@@ -120,12 +210,25 @@ fun BookingBottomSheet(
     val isRushActive = remember(isGlobalRushModeEnabled, isLocalRushMode) {
         isGlobalRushModeEnabled || isLocalRushMode
     }
-    val systemWaitMins = remember(activeLiveQueueCount, serviceDurationMins) {
-        Booking.calculateSystemWaitMinutes(activeLiveQueueCount, serviceDurationMins)
+    val hasQueueOrRush = activeLiveQueueCount > 0 || isRushActive
+    val calculatedEta = remember(activeLiveQueueCount, serviceDurationMins) {
+        if (activeLiveQueueCount > 0) {
+            Booking.calculateFormattedEtaClockTime(activeLiveQueueCount, serviceDurationMins)
+        } else {
+            Booking.calculateFormattedEtaClockTime(1, serviceDurationMins)
+        }
     }
-    val systemEtaTime = remember(activeLiveQueueCount, serviceDurationMins) {
-        Booking.calculateFormattedEtaClockTime(activeLiveQueueCount, serviceDurationMins)
+    val instantClockTime = remember {
+        Booking.calculateFormattedEtaClockTime(0, 15)
     }
+    val effectiveSlotTime = if (hasQueueOrRush) calculatedEta else instantClockTime
+
+    LaunchedEffect(effectiveSlotTime) {
+        if (selectedSlot != effectiveSlotTime) {
+            onSlotSelected(effectiveSlotTime)
+        }
+    }
+
     val isExceedingClosingTime = remember(salon.closingTime, activeLiveQueueCount, serviceDurationMins) {
         Booking.isEtaExceedingClosingTime(
             closingTimeStr = salon.closingTime.ifBlank { "9:00 PM" },
@@ -133,41 +236,8 @@ fun BookingBottomSheet(
             defaultServiceDurationMinutes = serviceDurationMins
         )
     }
-    val dynamicEtaSlot = if (activeLiveQueueCount > 0) {
-        "Live ETA: $systemEtaTime (~${systemWaitMins}m)"
-    } else {
-        "Live ETA: $systemEtaTime (⚡ Instant)"
-    }
 
-    val isBusy = salon.isBusy || isRushActive
-    val availableSlots = if (isRushActive) {
-        listOf(
-            dynamicEtaSlot,
-            "Waitlist: Next in Line (~${systemWaitMins.coerceAtLeast(20)}m)",
-            "11:30 AM",
-            "12:15 PM",
-            "02:00 PM",
-            "04:30 PM"
-        )
-    } else if (salon.isBusy) {
-        listOf(
-            "Waitlist: Next in Line (~20m)",
-            "11:30 AM",
-            "12:15 PM",
-            "02:00 PM",
-            "04:30 PM",
-            "06:00 PM"
-        )
-    } else {
-        listOf(
-            "In 15 mins (⚡ Instant)",
-            "11:30 AM",
-            "12:15 PM",
-            "02:00 PM",
-            "04:30 PM",
-            "06:00 PM"
-        )
-    }
+    val displayServiceName = service.serviceName.ifBlank { service.name }
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -175,440 +245,341 @@ fun BookingBottomSheet(
                 .fillMaxWidth()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(top = 24.dp, bottom = 16.dp, start = 8.dp, end = 8.dp)
+                .padding(horizontal = 8.dp, vertical = 16.dp)
                 .testTag("booking_sheet_modal"),
             shape = RoundedCornerShape(24.dp),
             colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            border = BorderStroke(
+                width = 1.5.dp,
+                color = if (hasQueueOrRush) AmberPrimary else GreenSuccess.copy(alpha = 0.65f)
+            ),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
-                    .padding(20.dp)
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Header with Close (safe top padding & status-bar-aware container)
+                // Dialog Top Row
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp),
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(end = 8.dp)
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text(
-                            text = "Select Service & Time Slot",
-                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
-                            color = Color.White,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        val displayServiceName = service.serviceName.ifBlank { service.name }
-                        val displayDuration = if (service.duration > 0) service.duration else service.durationMinutes
-                        Text(
-                            text = "${salon.name} • $displayServiceName (₹${service.price} • ${displayDuration}m)",
-                            fontSize = 12.sp,
-                            color = AmberPrimary,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .statusBarsPadding()
-                            .padding(top = 4.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        IconButton(
-                            onClick = onDismiss,
+                        Box(
                             modifier = Modifier
-                                .size(48.dp)
-                                .testTag("close_booking_sheet")
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (hasQueueOrRush) AmberPrimary.copy(alpha = 0.18f)
+                                    else GreenSuccess.copy(alpha = 0.18f)
+                                ),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(34.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF1E293B))
-                                    .border(1.dp, Color(0xFF334155), CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Close",
-                                    tint = Color(0xFFCBD5E1),
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // Dynamic Salon Custom Services Selector (fetched from salon's Firestore services list)
-                if (salon.services.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "SALON MENU SERVICES (${salon.services.size})",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF94A3B8),
-                        letterSpacing = 1.sp
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        salon.services.forEach { itemService ->
-                            val isSelectedService = itemService.id == service.id ||
-                                (itemService.id.isBlank() && itemService.name == service.name)
-                            val srvLabel = itemService.serviceName.ifBlank { itemService.name }
-                            val srvDuration = if (itemService.duration > 0) itemService.duration else itemService.durationMinutes
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(if (isSelectedService) Color(0xFF2E2210) else DarkCardSurface)
-                                    .border(
-                                        width = if (isSelectedService) 1.5.dp else 1.dp,
-                                        color = if (isSelectedService) AmberPrimary else Color(0xFF334155),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                    .clickable { onServiceChanged(itemService) }
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                                    .testTag("booking_sheet_service_${itemService.id}"),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = srvLabel,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isSelectedService) AmberPrimary else Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = "${srvDuration} mins • ${itemService.category}",
-                                        fontSize = 10.sp,
-                                        color = Color(0xFF94A3B8)
-                                    )
-                                }
-                                Text(
-                                    text = "₹${itemService.price}",
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = if (isSelectedService) AmberPrimary else GreenSuccess
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Dynamic Rush Mode (Festival or Local Crowd >= 3) System ETA Banner inside Booking Sheet
-                if (isRushActive) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("booking_sheet_system_eta_card"),
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF451A03)),
-                    shape = RoundedCornerShape(12.dp),
-                    border = CardDefaults.outlinedCardBorder().copy(
-                        brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
-                    )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            text = "⏱ LIVE SYSTEM ETA: $systemEtaTime",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            color = Color(0xFF7DD3FC)
-                        )
-                        Text(
-                            text = if (activeLiveQueueCount > 0) {
-                                "Based on $activeLiveQueueCount active booking(s) × ${serviceDurationMins}m (~${systemWaitMins} mins). Partner will confirm your exact arrival time in My Bookings."
-                            } else {
-                                "0 active bookings in queue. Partner will confirm your exact arrival time ($systemEtaTime) so you don't wait at the shop."
-                            },
-                            fontSize = 11.sp,
-                            color = Color(0xFFCBD5E1)
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-                }
-
-                // Time Slots Grid
-                Text(
-                    text = if (isRushActive) {
-                        "AVAILABLE TODAY (ADVANCE RUSH ETA SLOTS)"
-                    } else {
-                        "AVAILABLE TODAY (INSTANT BOOKING SLOTS)"
-                    },
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF94A3B8),
-                    letterSpacing = 1.sp
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    availableSlots.chunked(2).forEach { rowSlots ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            rowSlots.forEach { slot ->
-                                val isSelected = selectedSlot == slot
-                                val isInstant = slot.contains("Instant")
-
-                                val bgColor = if (isSelected) AmberPrimary else DarkCardSurface
-                                val textColor = if (isSelected) Color(0xFF1E1402) else Color.White
-                                val borderColor = if (isSelected) AmberPrimary else if (isInstant) Color(0xFFD97706) else Color(0xFF334155)
-
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .heightIn(min = 42.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(bgColor)
-                                        .border(1.5.dp, borderColor, RoundedCornerShape(12.dp))
-                                        .clickable { onSlotSelected(slot) }
-                                        .padding(vertical = 10.dp, horizontal = 8.dp)
-                                        .testTag("slot_option_$slot"),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        if (isInstant) {
-                                            Icon(
-                                                imageVector = Icons.Default.Bolt,
-                                                contentDescription = null,
-                                                tint = if (isSelected) Color(0xFF1E1402) else AmberPrimary,
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                        }
-                                        Text(
-                                            text = slot,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                            color = textColor,
-                                            maxLines = 1,
-                                            softWrap = false,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Customer Info inputs
-                Text(
-                    text = "YOUR CONTACT INFO (10-DIGIT MOBILE MANDATORY *)",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color(0xFF94A3B8),
-                    letterSpacing = 1.sp
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                OutlinedTextField(
-                    value = customerName,
-                    onValueChange = { customerName = it },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("customer_name_input"),
-                    leadingIcon = {
-                        Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = Color(0xFF94A3B8))
-                    },
-                    placeholder = { Text("Your Name *", color = Color(0xFF64748B)) },
-                    keyboardOptions = KeyboardOptions(
-                        imeAction = ImeAction.Done
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onDone = {
-                            keyboardController?.hide()
-                            focusManager.clearFocus()
-                        }
-                    ),
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = AmberPrimary,
-                        unfocusedBorderColor = Color(0xFF334155),
-                        focusedContainerColor = DarkCardSurface,
-                        unfocusedContainerColor = DarkCardSurface,
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(10.dp)
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                OutlinedTextField(
-                    value = customerPhone,
-                    onValueChange = { input ->
-                        val digits = input.filter { it.isDigit() }
-                        val normalized = if (digits.length > 10 && digits.startsWith("91")) {
-                            digits.drop(2).take(10)
-                        } else {
-                            digits.take(10)
-                        }
-                        val wasUnder10 = customerPhone.filter { it.isDigit() }.length < 10
-                        customerPhone = normalized
-                        if (normalized.length == 10 && wasUnder10) {
-                            keyboardController?.hide()
-                            focusManager.clearFocus()
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("customer_phone_input"),
-                    leadingIcon = {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(start = 12.dp, end = 4.dp)
-                        ) {
-                            Icon(imageVector = Icons.Default.Phone, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("+91", color = AmberPrimary, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
-                        }
-                    },
-                    trailingIcon = {
-                        if (isValidTenDigitPhone) {
                             Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = "Valid 10-digit mobile",
-                                tint = GreenSuccess,
-                                modifier = Modifier.size(18.dp)
+                                imageVector = if (hasQueueOrRush) Icons.Default.AccessTime else Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = if (hasQueueOrRush) AmberPrimary else GreenSuccess,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
-                    },
-                    placeholder = { Text("10-Digit Mobile Number *", color = Color(0xFF64748B)) },
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Number,
-                        imeAction = ImeAction.Done
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onDone = {
-                            keyboardController?.hide()
-                            focusManager.clearFocus()
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (hasQueueOrRush) "High Demand Alert" else "Confirm Booking",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 18.sp
+                                ),
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${salon.name} • $displayServiceName (₹${service.price})",
+                                fontSize = 12.sp,
+                                color = AmberPrimary,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
-                    ),
-                    isError = cleanPhoneDigits.isNotEmpty() && !isValidTenDigitPhone,
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = if (isValidTenDigitPhone) GreenSuccess else AmberPrimary,
-                        unfocusedBorderColor = if (isValidTenDigitPhone) GreenSuccess.copy(alpha = 0.6f) else Color(0xFF334155),
-                        errorBorderColor = RedAlert,
-                        focusedContainerColor = DarkCardSurface,
-                        unfocusedContainerColor = DarkCardSurface,
-                        errorContainerColor = DarkCardSurface,
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        errorTextColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(10.dp)
-                )
+                    }
 
-                val phoneHelperText = when {
-                    cleanPhoneDigits.isEmpty() -> "* Mandatory: Enter your 10-digit Indian mobile number"
-                    cleanPhoneDigits.first() !in listOf('6', '7', '8', '9') -> "Invalid number: Indian mobile numbers must start with 6, 7, 8, or 9"
-                    cleanPhoneDigits.length < 10 -> "Please enter all 10 digits (${cleanPhoneDigits.length}/10)"
-                    else -> "✓ 10-digit mobile verified & will be saved for future bookings"
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .testTag("close_booking_sheet")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = Color(0xFF94A3B8)
+                        )
+                    }
                 }
-                val phoneHelperColor = when {
-                    isValidTenDigitPhone -> GreenSuccess
-                    cleanPhoneDigits.isEmpty() -> Color(0xFF94A3B8)
-                    else -> RedAlert
+
+                // Core Prompt Message Card (Rush Mode / Queue vs Instant)
+                if (hasQueueOrRush) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("booking_sheet_system_eta_card"),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF451A03)),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, AmberPrimary)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "High Demand: You will get a slot around $calculatedEta. Confirm Booking?",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFFFDE68A),
+                                textAlign = TextAlign.Center,
+                                lineHeight = 21.sp,
+                                modifier = Modifier.testTag("high_demand_eta_alert_text")
+                            )
+                            Text(
+                                text = "We will notify you with your exact arrival time in My Bookings so you don't wait at the shop.",
+                                fontSize = 12.sp,
+                                color = Color(0xFFE2E8F0),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("booking_sheet_instant_card"),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF064E3B).copy(alpha = 0.55f)),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, GreenSuccess.copy(alpha = 0.7f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "🟢 No Wait • Instant Slot Ready",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Color(0xFFA7F3D0),
+                                textAlign = TextAlign.Center
+                            )
+                            Text(
+                                text = "Confirm your booking for $displayServiceName (₹${service.price}) around $instantClockTime?",
+                                fontSize = 12.sp,
+                                color = Color(0xFFE2E8F0),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
                 }
-                Text(
-                    text = phoneHelperText,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = phoneHelperColor,
-                    modifier = Modifier.padding(top = 4.dp, start = 4.dp)
-                )
 
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Price & Pay at Salon Guarantee
+                // Pay at Salon Policy Summary
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = Color(0xFF0F261D)),
-                    shape = RoundedCornerShape(10.dp),
-                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(Color(0xFF047857)))
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Color(0xFF047857))
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp),
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Row(
                             modifier = Modifier.weight(1f),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Payments,
                                 contentDescription = null,
                                 tint = GreenSuccess,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "Pay at Salon",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFFA7F3D0),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = "₹0 Due Online • Strictly Pay Counter",
-                                    fontSize = 10.sp,
-                                    color = Color(0xFFD1FAE5),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
+                            Text(
+                                text = "Pay at Salon (₹0 Advance)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFA7F3D0)
+                            )
                         }
-
                         Text(
                             text = "₹${service.price}",
-                            fontSize = 18.sp,
+                            fontSize = 16.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = GreenSuccess,
-                            softWrap = false,
-                            maxLines = 1,
-                            modifier = Modifier.padding(start = 12.dp)
+                            color = GreenSuccess
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                // Customer Contact Details (Compact if already verified, editable on tap or if missing)
+                if (!isEditingContact && isValidTenDigitPhone && customerName.trim().length >= 2) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(DarkCardSurface)
+                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+                            .clickable { isEditingContact = true }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Person,
+                                contentDescription = null,
+                                tint = AmberPrimary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = "${customerName.trim()} • +91 $cleanPhoneDigits",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "Edit Contact Info",
+                            tint = Color(0xFF94A3B8),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "YOUR CONTACT DETAILS",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF94A3B8),
+                            letterSpacing = 0.8.sp
+                        )
+
+                        OutlinedTextField(
+                            value = customerName,
+                            onValueChange = { customerName = it },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("customer_name_input"),
+                            leadingIcon = {
+                                Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = Color(0xFF94A3B8))
+                            },
+                            placeholder = { Text("Your Name *", color = Color(0xFF64748B)) },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(
+                                onDone = {
+                                    keyboardController?.hide()
+                                    focusManager.clearFocus()
+                                }
+                            ),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = AmberPrimary,
+                                unfocusedBorderColor = Color(0xFF334155),
+                                focusedContainerColor = DarkCardSurface,
+                                unfocusedContainerColor = DarkCardSurface,
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+
+                        OutlinedTextField(
+                            value = customerPhone,
+                            onValueChange = { input ->
+                                val digits = input.filter { it.isDigit() }
+                                val normalized = if (digits.length > 10 && digits.startsWith("91")) {
+                                    digits.drop(2).take(10)
+                                } else {
+                                    digits.take(10)
+                                }
+                                val wasUnder10 = customerPhone.filter { it.isDigit() }.length < 10
+                                customerPhone = normalized
+                                if (normalized.length == 10 && wasUnder10) {
+                                    keyboardController?.hide()
+                                    focusManager.clearFocus()
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("customer_phone_input"),
+                            leadingIcon = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(start = 12.dp, end = 4.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Phone, contentDescription = null, tint = Color(0xFF94A3B8), modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("+91", color = AmberPrimary, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                                }
+                            },
+                            trailingIcon = {
+                                if (isValidTenDigitPhone) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = "Valid 10-digit mobile",
+                                        tint = GreenSuccess,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            },
+                            placeholder = { Text("10-Digit Mobile Number *", color = Color(0xFF64748B)) },
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Number,
+                                imeAction = ImeAction.Done
+                            ),
+                            keyboardActions = KeyboardActions(
+                                onDone = {
+                                    keyboardController?.hide()
+                                    focusManager.clearFocus()
+                                }
+                            ),
+                            isError = cleanPhoneDigits.isNotEmpty() && !isValidTenDigitPhone,
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = if (isValidTenDigitPhone) GreenSuccess else AmberPrimary,
+                                unfocusedBorderColor = if (isValidTenDigitPhone) GreenSuccess.copy(alpha = 0.6f) else Color(0xFF334155),
+                                errorBorderColor = RedAlert,
+                                focusedContainerColor = DarkCardSurface,
+                                unfocusedContainerColor = DarkCardSurface,
+                                errorContainerColor = DarkCardSurface,
+                                focusedTextColor = Color.White,
+                                unfocusedTextColor = Color.White,
+                                errorTextColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(10.dp)
+                        )
+                    }
+                }
 
                 // Rule 3: Account Suspended Warning Banner
                 if (isSuspended) {
@@ -633,41 +604,37 @@ fun BookingBottomSheet(
                             text = "Your account has been suspended for too many cancellations",
                             color = RedAlert,
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            lineHeight = 16.sp
+                            fontWeight = FontWeight.Bold
                         )
                     }
-                    Spacer(modifier = Modifier.height(10.dp))
                 }
 
-                // Rule 2: One Active Booking Error Banner
-                if (hasActiveBooking && !isSuspended) {
+                // Salon Closed Real-Time Warning Banner
+                if (!isSalonOpen) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFF2E2210))
-                            .border(1.dp, AmberPrimary, RoundedCornerShape(10.dp))
+                            .background(Color(0xFF450A0A))
+                            .border(1.dp, RedAlert, RoundedCornerShape(10.dp))
                             .padding(12.dp)
-                            .testTag("active_booking_exists_banner"),
+                            .testTag("sheet_salon_closed_banner"),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Warning,
+                            imageVector = Icons.Default.ErrorOutline,
                             contentDescription = null,
-                            tint = AmberPrimary,
+                            tint = RedAlert,
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            text = "You already have an active booking. Please complete or cancel it first.",
-                            color = AmberPrimary,
+                            text = "Currently Closed - Not accepting new bookings",
+                            color = Color(0xFFFECACA),
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            lineHeight = 16.sp
+                            fontWeight = FontWeight.ExtraBold
                         )
                     }
-                    Spacer(modifier = Modifier.height(10.dp))
                 }
 
                 // Edge Case Protection — Closing Time Exceeded Banner
@@ -690,55 +657,78 @@ fun BookingBottomSheet(
                             modifier = Modifier.size(20.dp)
                         )
                         Text(
-                            text = "Booking Blocked: Newly calculated ETA ($systemEtaTime) exceeds official closing time (${salon.closingTime.ifBlank { "9:00 PM" }}).",
+                            text = "Booking Blocked: Newly calculated ETA ($calculatedEta) exceeds official closing time (${salon.closingTime.ifBlank { "9:00 PM" }}).",
                             color = Color(0xFFFECACA),
                             fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            lineHeight = 16.sp
+                            fontWeight = FontWeight.Bold
                         )
                     }
-                    Spacer(modifier = Modifier.height(10.dp))
                 }
 
-                // Confirm / Book Button (Flexible minHeight = 52.dp so second line is never clipped)
-                val isButtonEnabled = !hasActiveBooking &&
+                // Yes / No Confirmation Buttons
+                val isButtonEnabled = isSalonOpen &&
+                    !hasActiveBooking &&
                     !isSuspended &&
                     !isExceedingClosingTime &&
                     customerName.trim().length >= 2 &&
                     isValidTenDigitPhone
 
-                Button(
-                    onClick = {
-                        keyboardController?.hide()
-                        focusManager.clearFocus()
-                        onConfirm(customerName.trim(), cleanPhoneDigits)
-                    },
-                    enabled = isButtonEnabled,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 52.dp)
-                        .testTag("confirm_booking_button"),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isBusy) Color(0xFFEA580C) else AmberPrimary,
-                        disabledContainerColor = Color(0xFF334155),
-                        contentColor = if (isBusy) Color.White else Color(0xFF1E1402),
-                        disabledContentColor = Color(0xFF94A3B8)
-                    ),
-                    shape = RoundedCornerShape(12.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text(
-                        text = when {
-                            isSuspended -> "Account Suspended"
-                            isExceedingClosingTime -> "Closed • ETA Exceeds ${salon.closingTime.ifBlank { "9:00 PM" }}"
-                            hasActiveBooking -> "Booking Limit Reached (1 Active)"
-                            isBusy -> "Join Waitlist & Get 4-Digit PIN"
-                            else -> "Confirm Slot & Get 4-Digit PIN"
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 50.dp)
+                            .testTag("cancel_booking_dialog_button"),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Color(0xFF475569))
+                    ) {
+                        Text(
+                            text = if (hasQueueOrRush) "No" else "Cancel",
+                            color = Color(0xFFCBD5E1),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            if (!isSalonOpen) return@Button
+                            keyboardController?.hide()
+                            focusManager.clearFocus()
+                            onSlotSelected(effectiveSlotTime)
+                            onConfirm(customerName.trim(), cleanPhoneDigits)
                         },
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 14.sp,
-                        textAlign = TextAlign.Center
-                    )
+                        enabled = isButtonEnabled,
+                        modifier = Modifier
+                            .weight(1.4f)
+                            .heightIn(min = 50.dp)
+                            .testTag("confirm_booking_button"),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (hasQueueOrRush) AmberPrimary else GreenSuccess,
+                            disabledContainerColor = Color(0xFF334155),
+                            contentColor = Color(0xFF1E1402),
+                            disabledContentColor = Color(0xFF94A3B8)
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            text = when {
+                                !isSalonOpen -> "Currently Closed"
+                                isSuspended -> "Suspended"
+                                isExceedingClosingTime -> "Shop Closing"
+                                hasQueueOrRush -> "Yes, Confirm"
+                                else -> "Confirm Booking"
+                            },
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 14.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
             }
         }

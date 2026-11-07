@@ -362,10 +362,12 @@ fun TrimTimeApp(
                                             val isActiveSalonFav = activeSalon.id in favoriteSalonIds ||
                                                 (activeSalon.partnerId.isNotBlank() && activeSalon.partnerId in favoriteSalonIds) ||
                                                 (activeSalon.ownerId.isNotBlank() && activeSalon.ownerId in favoriteSalonIds)
-                                            val activeSalonQueueCount = allBookings.count {
-                                                (it.salonId == activeSalon.id || (activeSalon.partnerId.isNotBlank() && it.partnerId == activeSalon.partnerId)) &&
-                                                    com.example.util.SecurityValidator.isBookingActiveStatus(it.status)
-                                            }
+                                            val activeSalonQueueCount = com.example.model.Booking.countActiveInQueueToday(
+                                                bookings = allBookings,
+                                                salonId = activeSalon.id,
+                                                partnerId = activeSalon.partnerId,
+                                                ownerId = activeSalon.ownerId
+                                            )
                                             SalonDetailScreen(
                                                 salon = activeSalon,
                                                 currentUserId = if (isSuperAdmin || currentUserProfile?.isWhitelistedAdminOrDev == true) "" else currentCustomerUid,
@@ -617,10 +619,12 @@ fun TrimTimeApp(
     // Customer Booking Bottom Sheet
     if (serviceToBook != null && selectedSalon != null) {
         val liveBookingSalon = allSalons.find { it.id == selectedSalon?.id } ?: selectedSalon!!
-        val liveBookingSalonQueueCount = allBookings.count {
-            (it.salonId == liveBookingSalon.id || (liveBookingSalon.partnerId.isNotBlank() && it.partnerId == liveBookingSalon.partnerId)) &&
-                com.example.util.SecurityValidator.isBookingActiveStatus(it.status)
-        }
+        val liveBookingSalonQueueCount = com.example.model.Booking.countActiveInQueueToday(
+            bookings = allBookings,
+            salonId = liveBookingSalon.id,
+            partnerId = liveBookingSalon.partnerId,
+            ownerId = liveBookingSalon.ownerId
+        )
         BookingBottomSheet(
             salon = liveBookingSalon,
             service = serviceToBook!!,

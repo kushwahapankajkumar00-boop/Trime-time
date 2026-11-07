@@ -85,6 +85,7 @@ class TrimTimeRepository private constructor(context: Context) {
     private var salonsListener: ListenerRegistration? = null
     private var bookingsListener: ListenerRegistration? = null
     private var customerBookingsListener: ListenerRegistration? = null
+    private var customerFcmNotificationsListener: ListenerRegistration? = null
     private var userDocListener: ListenerRegistration? = null
     private var defaultUserDocListener: ListenerRegistration? = null
     private var usersListener: ListenerRegistration? = null
@@ -97,7 +98,10 @@ class TrimTimeRepository private constructor(context: Context) {
     private var defaultDbUsers: List<UserProfile> = emptyList()
 
     private var hasLoadedInitialBookingsSnapshot = false
+    private var hasLoadedInitialCustomerBookingsSnapshot = false
+    private var hasLoadedInitialCustomerFcmNotifications = false
     private val knownRealtimeBookingIds = mutableSetOf<String>()
+    private val knownCustomerFcmNotificationIds = mutableSetOf<String>()
     private val previousCustomerBookingStatus = mutableMapOf<String, Pair<String, String>>()
 
     private val invalidSharedUserIds = setOf("dev_test_user_001", "dev_tester", "default_user", "guest")
@@ -556,11 +560,14 @@ class TrimTimeRepository private constructor(context: Context) {
 
                                 val phone = doc.getString("phone") ?: ""
 
-                                val isOpen = doc.getBoolean("isOpen")
+                                val rawIsOpen = doc.getBoolean("isOpen")
                                     ?: doc.getString("isOpen")?.toBooleanStrictOrNull()
+                                    ?: doc.getBoolean("isShopOpen")
                                     ?: true
 
-                                val currentStatus = doc.getString("currentStatus") ?: "FREE"
+                                val currentStatus = doc.getString("currentStatus")
+                                    ?: if (rawIsOpen) "FREE" else "CLOSED"
+                                val isOpen = rawIsOpen && !currentStatus.equals("CLOSED", ignoreCase = true)
 
                                 val availableChairs = (doc.get("availableChairs") as? Number)?.toInt()
                                     ?: doc.getString("availableChairs")?.toIntOrNull()
@@ -665,8 +672,12 @@ class TrimTimeRepository private constructor(context: Context) {
                                 val ownerName = doc.getString("ownerName") ?: ""
                                 val pincode = doc.getString("pincode") ?: ""
                                 val shopCategory = doc.getString("shopCategory") ?: "Men's Salon"
-                                val openingTime = doc.getString("openingTime") ?: "9:00 AM"
-                                val closingTime = doc.getString("closingTime") ?: "9:00 PM"
+                                val openingTime = doc.getString("openingTime")?.takeIf { it.isNotBlank() }
+                                    ?: doc.getString("OpeningTime")?.takeIf { it.isNotBlank() }
+                                    ?: "9:00 AM"
+                                val closingTime = doc.getString("closingTime")?.takeIf { it.isNotBlank() }
+                                    ?: doc.getString("ClosingTime")?.takeIf { it.isNotBlank() }
+                                    ?: "9:00 PM"
                                 val isSeedSalon = resolvedDocId in seedSalonIds
                                 val isRegFlag = doc.getBoolean("isRegistrationCompleted") == true
                                 val isFormSubmittedFlag = doc.getBoolean("registrationFormSubmitted") == true
@@ -780,8 +791,19 @@ class TrimTimeRepository private constructor(context: Context) {
                         val validLiveSalons = liveSalons.filter {
                             (it.isRegistrationCompleted && it.registrationFormSubmitted) || it.id in seedSalonIds
                         }
+                        val mergedValidSalons = (validLiveSalons + missingSeeds)
+                            .groupBy { it.id }
+                            .map { (_, group) ->
+                                val primary = group.first()
+                                val anyClosed = group.any { !it.isAcceptingBookings }
+                                if (anyClosed) {
+                                    primary.copy(isOpen = false, currentStatus = "CLOSED")
+                                } else {
+                                    primary
+                                }
+                            }
                         val combinedSalons = recalculateAndSortSalons(
-                            (validLiveSalons + missingSeeds).distinctBy { it.id },
+                            mergedValidSalons,
                             _userLatitude.value,
                             _userLongitude.value
                         )
@@ -1345,6 +1367,8 @@ class TrimTimeRepository private constructor(context: Context) {
                 ?: doc.getString("customerId")?.trim().orEmpty()
             val resolvedPartner = doc.getString("partnerId")?.trim()?.takeIf { it.isNotBlank() }
                 ?: doc.getString("salonId")?.trim().orEmpty()
+            val resolvedSalonId = doc.getString("salonId")?.trim()?.takeIf { it.isNotBlank() }
+                ?: resolvedPartner
             val resolvedDate = doc.getString("date")?.takeIf { it.isNotBlank() }
                 ?: doc.getString("bookingDate")?.takeIf { it.isNotBlank() }
                 ?: "Today"
@@ -1352,6 +1376,8 @@ class TrimTimeRepository private constructor(context: Context) {
             val resolvedTime = docAllocatedTime.takeIf { it.isNotBlank() }
                 ?: doc.getString("time")?.takeIf { it.isNotBlank() }
                 ?: doc.getString("timeSlot").orEmpty()
+            val rawCreatedAt = (doc.get("createdAt") as? Number)?.toLong() ?: 0L
+            val rawCompletedAt = (doc.get("completedAt") as? Number)?.toLong()
             Booking(
                 bookingId = docId,
                 userId = resolvedUser,
@@ -1365,15 +1391,15 @@ class TrimTimeRepository private constructor(context: Context) {
                 customerId = resolvedUser,
                 customerName = doc.getString("customerName")?.trim() ?: "",
                 customerPhone = doc.getString("customerPhone")?.trim() ?: "",
-                salonId = resolvedPartner,
+                salonId = resolvedSalonId,
                 service = doc.getString("service")?.trim() ?: "",
-                servicePrice = doc.getLong("servicePrice")?.toInt() ?: 100,
+                servicePrice = (doc.get("servicePrice") as? Number)?.toInt() ?: 100,
                 timeSlot = resolvedTime,
                 bookingDate = resolvedDate,
                 pin = resolvedPin,
                 customerFcmToken = doc.getString("customerFcmToken")?.trim() ?: "",
-                createdAt = doc.getLong("createdAt") ?: 0L,
-                completedAt = doc.getLong("completedAt")
+                createdAt = rawCreatedAt,
+                completedAt = rawCompletedAt
             )
         } catch (e: Exception) {
             null
@@ -1387,8 +1413,11 @@ class TrimTimeRepository private constructor(context: Context) {
      */
     private fun attachCustomerBookingsListener(customerId: String) {
         customerBookingsListener?.remove()
+        customerFcmNotificationsListener?.remove()
         userDocListener?.remove()
         defaultUserDocListener?.remove()
+        hasLoadedInitialCustomerBookingsSnapshot = false
+        hasLoadedInitialCustomerFcmNotifications = false
         val cleanUid = customerId.trim()
         if (cleanUid.isBlank() || cleanUid in invalidSharedUserIds) {
             _customerBookings.value = emptyList()
@@ -1477,6 +1506,48 @@ class TrimTimeRepository private constructor(context: Context) {
                     return@addSnapshotListener
                 }
                 if (snapshot != null) {
+                    if (hasLoadedInitialCustomerBookingsSnapshot) {
+                        snapshot.documentChanges.forEach { change ->
+                            if (change.type == DocumentChange.Type.MODIFIED) {
+                                val modBooking = parseBookingDocument(change.document)
+                                if (modBooking != null) {
+                                    val newStatusNorm = modBooking.status.lowercase()
+                                    val newAllocatedTime = modBooking.allocatedTime.ifBlank { modBooking.timeSlot }
+                                    val prevPair = previousCustomerBookingStatus[modBooking.id]
+                                    val prevStatusNorm = prevPair?.first
+                                    val prevAllocated = prevPair?.second
+                                    if (prevStatusNorm != newStatusNorm || (prevAllocated != null && prevAllocated != newAllocatedTime)) {
+                                        val salonDisplay = modBooking.salonName.ifBlank { "TrimTime Salon" }
+                                        if (newStatusNorm in listOf("accepted", "confirmed")) {
+                                            val isAdjusted = !prevAllocated.isNullOrBlank() && prevAllocated != newAllocatedTime
+                                            val notifTitle = if (isAdjusted) {
+                                                "⏱️ Booking Accepted & ETA Updated at $salonDisplay"
+                                            } else {
+                                                "✅ Booking Confirmed at $salonDisplay!"
+                                            }
+                                            val notifBody = "Your booking for ${modBooking.service} at $salonDisplay is confirmed! Reach Salon at: $newAllocatedTime."
+                                            TrimTimeNotificationHelper.showCustomerBookingStatusNotification(
+                                                context = appContext,
+                                                bookingId = modBooking.id,
+                                                eventKey = "${modBooking.id}_accepted_${newAllocatedTime}",
+                                                title = notifTitle,
+                                                body = notifBody
+                                            )
+                                        } else if (newStatusNorm in listOf("rejected", "cancelled", "declined")) {
+                                            TrimTimeNotificationHelper.showCustomerBookingStatusNotification(
+                                                context = appContext,
+                                                bookingId = modBooking.id,
+                                                eventKey = "${modBooking.id}_rejected",
+                                                title = "❌ Booking Declined by $salonDisplay",
+                                                body = "Your booking for ${modBooking.service} at $salonDisplay was declined by the partner."
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Backfill userId / bookingId / partnerId / date / time on any legacy documents
                     snapshot.documents.forEach { doc ->
                         if (doc.getString("userId").isNullOrBlank()) {
@@ -1490,10 +1561,50 @@ class TrimTimeRepository private constructor(context: Context) {
                         .mapNotNull { doc -> parseBookingDocument(doc) }
                         .filter { it.customerId == cleanUid && it.id != "past_demo_1" }
                         .sortedByDescending { it.createdAt }
+                    userBookings.forEach { b ->
+                        previousCustomerBookingStatus[b.id] = b.status.lowercase() to b.allocatedTime.ifBlank { b.timeSlot }
+                    }
+                    hasLoadedInitialCustomerBookingsSnapshot = true
                     _customerBookings.value = userBookings
                     _latestCompletedBooking.value = userBookings
                         .filter { it.status.equals("COMPLETED", ignoreCase = true) }
                         .maxByOrNull { it.completedAt ?: it.createdAt }
+                }
+            }
+
+        customerFcmNotificationsListener = db.collection("fcm_notifications")
+            .whereEqualTo("customerId", cleanUid)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null || snapshot == null) return@addSnapshotListener
+                if (!hasLoadedInitialCustomerFcmNotifications) {
+                    snapshot.documents.forEach { knownCustomerFcmNotificationIds.add(it.id) }
+                    hasLoadedInitialCustomerFcmNotifications = true
+                    return@addSnapshotListener
+                }
+                snapshot.documentChanges.forEach { change ->
+                    if (change.type == DocumentChange.Type.ADDED && knownCustomerFcmNotificationIds.add(change.document.id)) {
+                        val doc = change.document
+                        val type = doc.getString("type").orEmpty()
+                        if (type.startsWith("customer_booking_", ignoreCase = true) || type.equals("booking_status_update", ignoreCase = true)) {
+                            val bId = doc.getString("bookingId") ?: doc.id
+                            val statusStr = doc.getString("status")?.lowercase().orEmpty()
+                            val allocTime = doc.getString("allocatedTime").orEmpty()
+                            val salonDisplay = doc.getString("salonName")?.ifBlank { "TrimTime Salon" } ?: "TrimTime Salon"
+                            val serviceDisplay = doc.getString("serviceName")?.ifBlank { "Service" } ?: "Service"
+                            val notifTitle = doc.getString("title")?.takeIf { it.isNotBlank() }
+                                ?: if (statusStr == "rejected") "❌ Booking Declined by $salonDisplay" else "✅ Booking Confirmed at $salonDisplay!"
+                            val notifBody = doc.getString("body")?.takeIf { it.isNotBlank() }
+                                ?: "Your booking for $serviceDisplay at $salonDisplay was updated ($allocTime)."
+                            val evKey = if (statusStr == "rejected") "${bId}_rejected" else "${bId}_accepted_${allocTime}"
+                            TrimTimeNotificationHelper.showCustomerBookingStatusNotification(
+                                context = appContext,
+                                bookingId = bId,
+                                eventKey = evKey,
+                                title = notifTitle,
+                                body = notifBody
+                            )
+                        }
+                    }
                 }
             }
 
@@ -3184,13 +3295,17 @@ class TrimTimeRepository private constructor(context: Context) {
 
         // Strict Shop Closed Validation & Suspended/Rejected Check:
         // Before processing ANY booking request (normal or rush mode), verify the salon's operational status (`isOpen`).
-        val targetSalon = _salons.value.find { it.id == salonId }
-        if (targetSalon != null && (!targetSalon.isOpen || targetSalon.currentStatus.equals("CLOSED", ignoreCase = true))) {
-            onSalonClosed()
-            throw IllegalStateException("This salon is currently closed.")
+        val targetSalon = _salons.value.find {
+            it.id == salonId ||
+                (salonId.isNotBlank() && (it.ownerId == salonId || it.partnerId == salonId))
         }
-        if (targetSalon != null && (targetSalon.isSuspended || targetSalon.approvalStatus.equals("REJECTED", ignoreCase = true))) {
-            throw IllegalStateException("This salon is currently suspended or unavailable for bookings.")
+        if (targetSalon != null && !targetSalon.isAcceptingBookings) {
+            if (!targetSalon.isOpen || targetSalon.currentStatus.equals("CLOSED", ignoreCase = true)) {
+                onSalonClosed()
+                throw IllegalStateException("This salon is currently closed.")
+            } else {
+                throw IllegalStateException("This salon is currently suspended or unavailable for bookings.")
+            }
         }
         if (targetSalon != null &&
             currentProfile?.isWhitelistedAdminOrDev != true &&
@@ -3204,11 +3319,12 @@ class TrimTimeRepository private constructor(context: Context) {
 
         // Edge Case Protection — Closing Time Guard:
         // Block the booking request if the newly calculated ETA exceeds the salon's official closing time.
-        val activeSalonQueueCount = _bookings.value.count { b ->
-            (b.salonId == salonId || (targetSalon != null && targetSalon.partnerId.isNotBlank() && b.partnerId == targetSalon.partnerId)) &&
-                !b.isPendingTimedOut() &&
-                SecurityValidator.isBookingActiveStatus(b.status)
-        }
+        val activeSalonQueueCount = Booking.countActiveInQueueToday(
+            bookings = _bookings.value,
+            salonId = salonId,
+            partnerId = targetSalon?.partnerId.orEmpty(),
+            ownerId = targetSalon?.ownerId.orEmpty()
+        )
         val matchedService = targetSalon?.services?.find {
             it.name.equals(service, ignoreCase = true) || it.serviceName.equals(service, ignoreCase = true)
         }
@@ -3329,25 +3445,44 @@ class TrimTimeRepository private constructor(context: Context) {
                 )
 
                 val salonRef = db.collection("salons").document(cleanSalonId)
+                val altOwnerId = targetSalon?.ownerId?.trim()?.takeIf { it.isNotBlank() && it != cleanSalonId }
+                    ?: targetSalon?.partnerId?.trim()?.takeIf { it.isNotBlank() && it != cleanSalonId }
+                val altSalonRef = altOwnerId?.let { db.collection("salons").document(it) }
                 val bookingRef = db.collection("bookings").document(newBooking.id)
                 val isRushActiveNow = Booking.isRushModeActive(_isGlobalRushModeEnabled.value, activeSalonQueueCount)
 
                 db.runTransaction { transaction ->
                     val salonSnap = transaction.get(salonRef)
-                    if (salonSnap.exists()) {
-                        val isOpenInFirestore = salonSnap.getBoolean("isOpen") ?: true
-                        val statusInFirestore = salonSnap.getString("currentStatus")?.trim().orEmpty()
-                        if (!isOpenInFirestore || statusInFirestore.equals("CLOSED", ignoreCase = true)) {
-                            throw com.google.firebase.firestore.FirebaseFirestoreException(
-                                "This salon is currently closed.",
-                                com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED
-                            )
+                    val altSalonSnap = altSalonRef?.let { transaction.get(it) }
+
+                    listOfNotNull(salonSnap, altSalonSnap).forEach { snap ->
+                        if (snap.exists()) {
+                            val isOpenInFirestore = snap.getBoolean("isOpen")
+                                ?: snap.getString("isOpen")?.toBooleanStrictOrNull()
+                                ?: snap.getBoolean("isShopOpen")
+                                ?: true
+                            val statusInFirestore = snap.getString("currentStatus")?.trim().orEmpty()
+                            val salonStatusInFirestore = snap.getString("salonStatus")?.trim().orEmpty()
+                            val isSuspendedInFirestore = snap.getBoolean("isSuspended") ?: false
+                            if (!isOpenInFirestore ||
+                                statusInFirestore.equals("CLOSED", ignoreCase = true) ||
+                                salonStatusInFirestore.equals("closed", ignoreCase = true) ||
+                                salonStatusInFirestore.equals("suspended", ignoreCase = true) ||
+                                isSuspendedInFirestore
+                            ) {
+                                throw com.google.firebase.firestore.FirebaseFirestoreException(
+                                    "This salon is currently closed.",
+                                    com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED
+                                )
+                            }
                         }
                     }
 
                     val prevLastAllocatedMillis = salonSnap.getLong("lastAllocatedEtaMillis") ?: 0L
                     val prevQueueSeq = salonSnap.getLong("liveQueueSequence") ?: 0L
-                    val dbClosingTimeStr = salonSnap.getString("closingTime")?.takeIf { it.isNotBlank() } ?: salonClosingTimeStr
+                    val dbClosingTimeStr = salonSnap.getString("closingTime")?.takeIf { it.isNotBlank() }
+                        ?: salonSnap.getString("ClosingTime")?.takeIf { it.isNotBlank() }
+                        ?: salonClosingTimeStr
 
                     val baseCalculatedEtaMillis = Booking.calculateEtaArrivalMillis(
                         activeBookingsCount = activeSalonQueueCount,
@@ -3371,11 +3506,10 @@ class TrimTimeRepository private constructor(context: Context) {
 
                     val txFormattedClock = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.US)
                         .format(java.util.Date(safeNextEtaMillis))
-                    val txWaitMins = ((safeNextEtaMillis - nowMillis).coerceAtLeast(0L) / 60_000L).toInt()
-                    val txTimeSlot = if (isRushActiveNow) {
-                        if (txWaitMins > 0) "Live ETA: $txFormattedClock (~${txWaitMins}m)" else "Live ETA: $txFormattedClock (⚡ Instant)"
+                    val txTimeSlot = if (isRushActiveNow || activeSalonQueueCount > 0) {
+                        txFormattedClock
                     } else {
-                        cleanTimeSlot
+                        Booking.formatCleanArrivalTime(cleanTimeSlot)
                     }
 
                     if (salonSnap.exists()) {
@@ -3421,36 +3555,64 @@ class TrimTimeRepository private constructor(context: Context) {
                         knownPartnerFcmToken = partnerFcmToken
                     )
                 }.addOnFailureListener { e ->
-                    Log.w(tag, "Transaction fallback for booking ${newBooking.id}: ${e.message}")
-                    if (e is com.google.firebase.firestore.FirebaseFirestoreException &&
-                        e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED
-                    ) {
-                        // Rolled back due to salon being closed (`isOpen == false`) or closing time exceeded
+                    Log.w(tag, "Transaction failure for booking ${newBooking.id}: ${e.message}")
+                    val isAbortedOrDenied = e is com.google.firebase.firestore.FirebaseFirestoreException &&
+                        (e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.ABORTED ||
+                            e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED)
+                    if (isAbortedOrDenied || e.message?.contains("closed", ignoreCase = true) == true) {
+                        // Rolled back due to salon being closed (`isOpen == false`), security rule rejection, or closing time exceeded
                         _bookings.value = _bookings.value.filterNot { it.id == newBooking.id }
                         _customerBookings.value = _customerBookings.value.filterNot { it.id == newBooking.id }
-                        if (e.message?.contains("closed", ignoreCase = true) == true) {
+                        if (e.message?.contains("closed", ignoreCase = true) == true ||
+                            (e is com.google.firebase.firestore.FirebaseFirestoreException &&
+                                e.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED)
+                        ) {
+                            _salons.value = _salons.value.map {
+                                if (it.id == cleanSalonId) it.copy(isOpen = false, currentStatus = "CLOSED") else it
+                            }
                             onSalonClosed()
                         }
                     } else {
-                        db.collection("bookings").document(newBooking.id).set(newBooking.toMap())
-                        val resolvedPartnerId = targetSalon?.ownerId?.takeIf { it.isNotBlank() }
-                            ?: targetSalon?.partnerId?.takeIf { it.isNotBlank() }
-                            ?: cleanSalonId.removePrefix("salon_")
-                        val partnerFcmToken = _allUsers.value.find { it.id == resolvedPartnerId }?.fcmToken?.takeIf { it.isNotBlank() }
-                            ?: targetSalon?.fcmToken.orEmpty()
-                        TrimTimeNotificationHelper.sendHighPriorityBookingFcmToPartner(
-                            context = appContext,
-                            partnerId = resolvedPartnerId,
-                            salonId = cleanSalonId,
-                            salonName = salonName,
-                            bookingId = newBooking.id,
-                            customerName = newBooking.customerName,
-                            customerPhone = newBooking.customerPhone,
-                            serviceName = newBooking.service,
-                            servicePrice = newBooking.servicePrice,
-                            timeSlot = newBooking.timeSlot,
-                            knownPartnerFcmToken = partnerFcmToken
-                        )
+                        // Final safety check before any fallback write: verify salonRef is open in Firestore
+                        salonRef.get().addOnSuccessListener { snap ->
+                            val isOpenNow = if (snap != null && snap.exists()) {
+                                val openFlag = snap.getBoolean("isOpen")
+                                    ?: snap.getString("isOpen")?.toBooleanStrictOrNull()
+                                    ?: true
+                                val statusFlag = snap.getString("currentStatus")?.trim().orEmpty()
+                                openFlag && !statusFlag.equals("CLOSED", ignoreCase = true)
+                            } else {
+                                targetSalon?.isAcceptingBookings ?: true
+                            }
+                            if (!isOpenNow) {
+                                _bookings.value = _bookings.value.filterNot { it.id == newBooking.id }
+                                _customerBookings.value = _customerBookings.value.filterNot { it.id == newBooking.id }
+                                _salons.value = _salons.value.map {
+                                    if (it.id == cleanSalonId) it.copy(isOpen = false, currentStatus = "CLOSED") else it
+                                }
+                                onSalonClosed()
+                            } else {
+                                db.collection("bookings").document(newBooking.id).set(newBooking.toMap())
+                                val resolvedPartnerId = targetSalon?.ownerId?.takeIf { it.isNotBlank() }
+                                    ?: targetSalon?.partnerId?.takeIf { it.isNotBlank() }
+                                    ?: cleanSalonId.removePrefix("salon_")
+                                val partnerFcmToken = _allUsers.value.find { it.id == resolvedPartnerId }?.fcmToken?.takeIf { it.isNotBlank() }
+                                    ?: targetSalon?.fcmToken.orEmpty()
+                                TrimTimeNotificationHelper.sendHighPriorityBookingFcmToPartner(
+                                    context = appContext,
+                                    partnerId = resolvedPartnerId,
+                                    salonId = cleanSalonId,
+                                    salonName = salonName,
+                                    bookingId = newBooking.id,
+                                    customerName = newBooking.customerName,
+                                    customerPhone = newBooking.customerPhone,
+                                    serviceName = newBooking.service,
+                                    servicePrice = newBooking.servicePrice,
+                                    timeSlot = newBooking.timeSlot,
+                                    knownPartnerFcmToken = partnerFcmToken
+                                )
+                            }
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -3473,9 +3635,10 @@ class TrimTimeRepository private constructor(context: Context) {
         if (booking.isPendingTimedOut()) {
             return false
         }
-        val finalAllocatedTime = allocatedTime.trim().ifBlank {
+        val rawAllocated = allocatedTime.trim().ifBlank {
             booking.allocatedTime.ifBlank { booking.resolvedTime }
         }
+        val finalAllocatedTime = Booking.formatCleanArrivalTime(rawAllocated)
         val acceptedBooking = booking.copy(
             status = BookingStatus.ACCEPTED.name.lowercase(),
             allocatedTime = finalAllocatedTime,
@@ -3514,18 +3677,9 @@ class TrimTimeRepository private constructor(context: Context) {
                     }
                 }
 
-                var nonOverlappingAllocatedTime = finalAllocatedTime
+                val nonOverlappingAllocatedTime = finalAllocatedTime
                 if (salonSnap != null && salonSnap.exists()) {
                     val prevSeq = salonSnap.getLong("liveQueueSequence") ?: 0L
-                    val lastSlotStr = salonSnap.getString("lastAllocatedSlotString").orEmpty()
-                    if (lastSlotStr.isNotBlank() && lastSlotStr.equals(finalAllocatedTime, ignoreCase = true)) {
-                        // Prevent double-allocating the exact same time string to two concurrent bookings
-                        val bumpedClock = Booking.calculateFormattedEtaClockTime(
-                            activeBookingsCount = 1,
-                            defaultServiceDurationMinutes = 10
-                        )
-                        nonOverlappingAllocatedTime = "$bumpedClock (Adjusted Slot)"
-                    }
                     transaction.update(
                         salonRef,
                         mapOf(
@@ -3807,36 +3961,144 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     fun toggleSalonOpenStatus(salonId: String) {
-        val currentSalons = _salons.value
-        val updated = currentSalons.map {
-            if (it.id == salonId) it.copy(isOpen = !it.isOpen) else it
-        }
-        _salons.value = updated
-        val updatedSalon = updated.find { it.id == salonId }
-        if (updatedSalon != null) {
-            firestore?.collection("salons")?.document(salonId)?.set(
-                mapOf("isOpen" to updatedSalon.isOpen) + resolveSalonOwnerMap(salonId),
-                com.google.firebase.firestore.SetOptions.merge()
-            )
-        }
+        val currentSalon = _salons.value.find { it.id == salonId }
+        val nextOpen = !(currentSalon?.isOpen ?: true)
+        setSalonOpenStatus(salonId, nextOpen)
     }
 
     fun setSalonOpenStatus(salonId: String, isOpen: Boolean) {
+        val cleanId = salonId.trim()
         val currentSalons = _salons.value
-        val updated = currentSalons.map {
-            if (it.id == salonId) it.copy(isOpen = isOpen) else it
+        val targetSalon = currentSalons.find {
+            it.id == cleanId ||
+                (cleanId.isNotBlank() && (it.ownerId == cleanId || it.partnerId == cleanId))
+        }
+        val ownerId = targetSalon?.ownerId?.trim().orEmpty()
+        val partnerId = targetSalon?.partnerId?.trim().orEmpty()
+        val nextStatus = if (isOpen) {
+            if (targetSalon?.currentStatus.equals("BUSY", ignoreCase = true)) "BUSY" else "FREE"
+        } else {
+            "CLOSED"
+        }
+
+        val updated = currentSalons.map { s ->
+            val matches = s.id == cleanId ||
+                (ownerId.isNotBlank() && (s.ownerId == ownerId || s.partnerId == ownerId || s.id == "salon_$ownerId")) ||
+                (partnerId.isNotBlank() && (s.ownerId == partnerId || s.partnerId == partnerId || s.id == "salon_$partnerId"))
+            if (matches) {
+                s.copy(isOpen = isOpen, currentStatus = nextStatus)
+            } else {
+                s
+            }
         }
         _salons.value = updated
-        firestore?.collection("salons")?.document(salonId)?.set(
-            mapOf("isOpen" to isOpen) + resolveSalonOwnerMap(salonId),
-            com.google.firebase.firestore.SetOptions.merge()
+
+        // Update only ['isOpen', 'currentStatus'] so Firestore security rules (`affectedKeys().hasOnly(...)`) always succeed
+        val statusUpdates = mapOf<String, Any>(
+            "isOpen" to isOpen,
+            "currentStatus" to nextStatus
         )
-            ?.addOnSuccessListener {
-                Log.d(tag, "Salon $salonId isOpen updated to $isOpen in Firestore.")
+        val candidateDocIds = setOf(
+            cleanId,
+            ownerId,
+            partnerId,
+            if (ownerId.isNotBlank()) "salon_$ownerId" else "",
+            if (partnerId.isNotBlank()) "salon_$partnerId" else ""
+        ).filter { it.isNotBlank() }
+
+        val dbs = listOfNotNull(firestore, defaultFirestore).distinct()
+        dbs.forEach { db ->
+            candidateDocIds.forEach { docId ->
+                val docRef = db.collection("salons").document(docId)
+                if (docId == cleanId) {
+                    docRef.update(statusUpdates)
+                        .addOnSuccessListener {
+                            Log.d(tag, "Salon $docId isOpen updated to $isOpen ($nextStatus) in Firestore.")
+                        }
+                        .addOnFailureListener {
+                            docRef.set(
+                                statusUpdates + resolveSalonOwnerMap(cleanId),
+                                com.google.firebase.firestore.SetOptions.merge()
+                            )
+                        }
+                } else {
+                    docRef.update(statusUpdates)
+                }
             }
-            ?.addOnFailureListener { err ->
-                Log.e(tag, "Failed to update isOpen: ${err.message}")
+        }
+    }
+
+    /**
+     * Strict Real-Time Firestore check on the Salon document's `isOpen` and `currentStatus` fields.
+     * Queries Firestore directly before allowing any Customer booking flow to proceed.
+     */
+    suspend fun fetchRealtimeSalonOpenStatus(
+        salonId: String,
+        partnerId: String = "",
+        ownerId: String = ""
+    ): Boolean {
+        val cleanId = salonId.trim()
+        val cachedSalon = _salons.value.find {
+            it.id == cleanId ||
+                (ownerId.isNotBlank() && (it.ownerId == ownerId || it.partnerId == ownerId)) ||
+                (partnerId.isNotBlank() && (it.ownerId == partnerId || it.partnerId == partnerId))
+        }
+        if (cachedSalon != null && !cachedSalon.isAcceptingBookings) {
+            return false
+        }
+        val dbs = listOfNotNull(firestore, defaultFirestore).distinct()
+        if (dbs.isEmpty()) {
+            return cachedSalon?.isAcceptingBookings ?: true
+        }
+        val candidateDocIds = setOf(
+            cleanId,
+            partnerId.trim(),
+            ownerId.trim(),
+            cachedSalon?.ownerId?.trim().orEmpty(),
+            cachedSalon?.partnerId?.trim().orEmpty(),
+            if (ownerId.isNotBlank()) "salon_${ownerId.trim()}" else "",
+            if (partnerId.isNotBlank()) "salon_${partnerId.trim()}" else ""
+        ).filter { it.isNotBlank() }
+
+        for (db in dbs) {
+            for (docId in candidateDocIds) {
+                try {
+                    val snap = try {
+                        db.collection("salons").document(docId)
+                            .get(com.google.firebase.firestore.Source.SERVER)
+                            .await()
+                    } catch (_: Exception) {
+                        db.collection("salons").document(docId).get().await()
+                    }
+                    if (snap != null && snap.exists()) {
+                        val docOpen = snap.getBoolean("isOpen")
+                            ?: snap.getString("isOpen")?.toBooleanStrictOrNull()
+                            ?: snap.getBoolean("isShopOpen")
+                            ?: true
+                        val docStatus = snap.getString("currentStatus")?.trim().orEmpty()
+                        val docSalonStatus = snap.getString("salonStatus")?.trim().orEmpty()
+                        val docSuspended = snap.getBoolean("isSuspended") ?: false
+                        val isAccepting = docOpen &&
+                            !docStatus.equals("CLOSED", ignoreCase = true) &&
+                            !docSalonStatus.equals("closed", ignoreCase = true) &&
+                            !docSalonStatus.equals("suspended", ignoreCase = true) &&
+                            !docSuspended
+                        if (!isAccepting) {
+                            _salons.value = _salons.value.map { s ->
+                                if (s.id == cleanId || s.id == docId || (ownerId.isNotBlank() && s.ownerId == ownerId)) {
+                                    s.copy(isOpen = false, currentStatus = "CLOSED")
+                                } else {
+                                    s
+                                }
+                            }
+                            return false
+                        }
+                    }
+                } catch (_: Exception) {
+                }
             }
+        }
+        return true
     }
 
     /**
