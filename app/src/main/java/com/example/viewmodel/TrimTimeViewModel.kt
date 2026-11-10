@@ -1138,6 +1138,12 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun markBookingNoShow(bookingId: String) {
+        if (repository.markBookingNoShow(bookingId)) {
+            _userMessage.value = "Booking marked as No-Show and removed from active queue."
+        }
+    }
+
     private fun startPinLockoutCountdown(bookingId: String, initialSeconds: Int) {
         pinLockoutTimerJob?.cancel()
         _pinLockoutSeconds.value = initialSeconds

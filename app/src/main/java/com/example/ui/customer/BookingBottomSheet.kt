@@ -204,6 +204,14 @@ fun BookingBottomSheet(
     } else {
         20
     }
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(15_000L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+
     val isLocalRushMode = remember(activeLiveQueueCount) {
         Booking.isLocalRushMode(activeLiveQueueCount)
     }
@@ -211,15 +219,27 @@ fun BookingBottomSheet(
         isGlobalRushModeEnabled || isLocalRushMode
     }
     val hasQueueOrRush = activeLiveQueueCount > 0 || isRushActive
-    val calculatedEta = remember(activeLiveQueueCount, serviceDurationMins) {
+    val calculatedEta = remember(activeLiveQueueCount, serviceDurationMins, nowMillis) {
         if (activeLiveQueueCount > 0) {
-            Booking.calculateFormattedEtaClockTime(activeLiveQueueCount, serviceDurationMins)
+            Booking.calculateFormattedEtaClockTime(
+                activeBookingsCount = activeLiveQueueCount,
+                defaultServiceDurationMinutes = serviceDurationMins,
+                baseTimeMillis = nowMillis
+            )
         } else {
-            Booking.calculateFormattedEtaClockTime(1, serviceDurationMins)
+            Booking.calculateFormattedEtaClockTime(
+                activeBookingsCount = 1,
+                defaultServiceDurationMinutes = serviceDurationMins,
+                baseTimeMillis = nowMillis
+            )
         }
     }
-    val instantClockTime = remember {
-        Booking.calculateFormattedEtaClockTime(0, 15)
+    val instantClockTime = remember(serviceDurationMins, nowMillis) {
+        Booking.calculateFormattedEtaClockTime(
+            activeBookingsCount = 0,
+            defaultServiceDurationMinutes = serviceDurationMins,
+            baseTimeMillis = nowMillis
+        )
     }
     val effectiveSlotTime = if (hasQueueOrRush) calculatedEta else instantClockTime
 
@@ -229,11 +249,12 @@ fun BookingBottomSheet(
         }
     }
 
-    val isExceedingClosingTime = remember(salon.closingTime, activeLiveQueueCount, serviceDurationMins) {
+    val isExceedingClosingTime = remember(salon.closingTime, activeLiveQueueCount, serviceDurationMins, nowMillis) {
         Booking.isEtaExceedingClosingTime(
             closingTimeStr = salon.closingTime.ifBlank { "9:00 PM" },
             activeBookingsCount = activeLiveQueueCount,
-            defaultServiceDurationMinutes = serviceDurationMins
+            defaultServiceDurationMinutes = serviceDurationMins,
+            baseTimeMillis = nowMillis
         )
     }
 
@@ -699,7 +720,13 @@ fun BookingBottomSheet(
                             if (!isSalonOpen) return@Button
                             keyboardController?.hide()
                             focusManager.clearFocus()
-                            onSlotSelected(effectiveSlotTime)
+                            val clickTimeMs = System.currentTimeMillis()
+                            val freshFutureSlot = Booking.calculateFormattedEtaClockTime(
+                                activeBookingsCount = if (hasQueueOrRush) maxOf(activeLiveQueueCount, 1) else 0,
+                                defaultServiceDurationMinutes = serviceDurationMins,
+                                baseTimeMillis = clickTimeMs
+                            )
+                            onSlotSelected(freshFutureSlot)
                             onConfirm(customerName.trim(), cleanPhoneDigits)
                         },
                         enabled = isButtonEnabled,

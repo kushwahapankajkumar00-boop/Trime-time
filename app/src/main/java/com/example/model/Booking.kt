@@ -72,6 +72,68 @@ data class Booking(
         get() = normalizeStatusValue(status)
 
     /**
+     * Returns the assigned arrival time as an epoch timestamp in milliseconds on the booking's day,
+     * or null if no clock time can be parsed.
+     */
+    fun getAssignedArrivalMillis(referenceMillis: Long = System.currentTimeMillis()): Long? {
+        val dayAnchor = if (createdAt > 0L && isSameCalendarDay(createdAt, referenceMillis)) {
+            createdAt
+        } else {
+            referenceMillis
+        }
+        return parseClockTimeMillisOnDay(cleanAllocatedClockTime, dayAnchor)
+    }
+
+    /**
+     * Returns true if this booking is active today and the current device time has surpassed
+     * the assigned arrival time (`nowMillis > assignedArrivalMillis`).
+     */
+    fun isLateArrival(nowMillis: Long = System.currentTimeMillis()): Boolean {
+        if (!isStatusPendingOrAccepted(status)) return false
+        val dateStr = resolvedDate.trim()
+        val isToday = dateStr.isBlank() ||
+            dateStr.equals("Today", ignoreCase = true) ||
+            isSameCalendarDay(createdAt, nowMillis)
+        if (!isToday) return false
+        val arrivalMillis = getAssignedArrivalMillis(nowMillis) ?: return false
+        return nowMillis > arrivalMillis
+    }
+
+    /**
+     * Returns how many minutes late the customer currently is past their assigned arrival time.
+     */
+    fun minutesLate(nowMillis: Long = System.currentTimeMillis()): Int {
+        val arrivalMillis = getAssignedArrivalMillis(nowMillis) ?: return 0
+        if (nowMillis <= arrivalMillis) return 0
+        return (((nowMillis - arrivalMillis) + 59_999L) / 60_000L).toInt().coerceAtLeast(1)
+    }
+
+    /**
+     * Returns remaining minutes in the 10-minute grace period after the assigned arrival time.
+     */
+    fun remainingGraceMinutes(nowMillis: Long = System.currentTimeMillis()): Int {
+        val arrivalMillis = getAssignedArrivalMillis(nowMillis) ?: return LATE_GRACE_PERIOD_MINUTES
+        val graceDeadline = arrivalMillis + LATE_GRACE_PERIOD_MS
+        if (nowMillis >= graceDeadline) return 0
+        return (((graceDeadline - nowMillis) + 59_999L) / 60_000L).toInt().coerceIn(0, LATE_GRACE_PERIOD_MINUTES)
+    }
+
+    /**
+     * Returns true if this active booking is late beyond the 10-minute grace period
+     * (`nowMillis >= assignedArrivalMillis + LATE_GRACE_PERIOD_MS`), triggering auto-expiry.
+     */
+    fun isGracePeriodExpired(nowMillis: Long = System.currentTimeMillis()): Boolean {
+        if (!isStatusPendingOrAccepted(status)) return false
+        val dateStr = resolvedDate.trim()
+        val isToday = dateStr.isBlank() ||
+            dateStr.equals("Today", ignoreCase = true) ||
+            isSameCalendarDay(createdAt, nowMillis)
+        if (!isToday) return false
+        val arrivalMillis = getAssignedArrivalMillis(nowMillis) ?: return false
+        return nowMillis >= (arrivalMillis + LATE_GRACE_PERIOD_MS)
+    }
+
+    /**
      * Returns true if this booking is still 'Pending' and more than 5 minutes have elapsed
      * without the Partner responding.
      */
@@ -148,6 +210,19 @@ data class Booking(
          */
         const val PENDING_TIMEOUT_MS = 5 * 60 * 1000L
 
+        /**
+         * Default minimum travel buffer (10 minutes) when queue wait time is 0 so the customer
+         * always receives a future arrival time with enough travel time to reach the salon.
+         */
+        const val DEFAULT_MIN_TRAVEL_BUFFER_MINUTES = 10
+
+        /**
+         * 10-minute grace period after the assigned arrival time before a late booking
+         * can be auto-expired / cancelled as a No-Show.
+         */
+        const val LATE_GRACE_PERIOD_MINUTES = 10
+        const val LATE_GRACE_PERIOD_MS = 10 * 60 * 1000L
+
         private val CLOCK_TIME_REGEX = Regex("(\\d{1,2}:\\d{2}\\s*(?:AM|PM|am|pm))")
 
         /**
@@ -185,6 +260,69 @@ data class Booking(
                 .replace(Regex("\\(~?\\d+\\s*(?:m|mins|minutes)\\)", RegexOption.IGNORE_CASE), "")
                 .trim()
                 .ifBlank { trimmed }
+        }
+
+        /**
+         * Parses a formatted clock time string (e.g. "03:47 PM") into an epoch timestamp in milliseconds
+         * on the calendar day of `dayAnchorMillis`.
+         */
+        fun parseClockTimeMillisOnDay(
+            clockTimeStr: String?,
+            dayAnchorMillis: Long = System.currentTimeMillis()
+        ): Long? {
+            val raw = clockTimeStr?.trim().orEmpty()
+            if (raw.isBlank()) return null
+            val match = CLOCK_TIME_REGEX.find(raw)
+            val clean = (match?.groupValues?.get(1) ?: raw).trim().uppercase(java.util.Locale.US)
+            val patterns = listOf("hh:mm a", "h:mm a", "HH:mm", "H:mm")
+            var parsedTime: java.util.Date? = null
+            for (pattern in patterns) {
+                try {
+                    val sdf = java.text.SimpleDateFormat(pattern, java.util.Locale.US)
+                    sdf.isLenient = false
+                    parsedTime = sdf.parse(clean)
+                    if (parsedTime != null) break
+                } catch (_: Exception) {
+                }
+            }
+            if (parsedTime == null) return null
+
+            val parsedCal = java.util.Calendar.getInstance().apply { time = parsedTime }
+            val dayCal = java.util.Calendar.getInstance().apply {
+                timeInMillis = dayAnchorMillis
+                set(java.util.Calendar.HOUR_OF_DAY, parsedCal.get(java.util.Calendar.HOUR_OF_DAY))
+                set(java.util.Calendar.MINUTE, parsedCal.get(java.util.Calendar.MINUTE))
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            return dayCal.timeInMillis
+        }
+
+        /**
+         * Guarantees that a candidate arrival clock time is strictly in the future relative to `nowMillis`.
+         * If the candidate time is blank, unparseable, or already in the past / within 2 minutes of now,
+         * recalculates a fresh future arrival time (`nowMillis + max(queueWait, DEFAULT_MIN_TRAVEL_BUFFER_MINUTES)`).
+         */
+        fun ensureFutureArrivalClockTime(
+            candidateTimeStr: String?,
+            activeBookingsCount: Int = 0,
+            defaultServiceDurationMinutes: Int = 20,
+            nowMillis: Long = System.currentTimeMillis()
+        ): String {
+            val cleanCandidate = formatCleanArrivalTime(candidateTimeStr)
+            val parsedMillis = parseClockTimeMillisOnDay(cleanCandidate, nowMillis)
+            val minFutureMillis = nowMillis + (5 * 60_000L)
+            return if (parsedMillis != null && parsedMillis >= minFutureMillis) {
+                val formatter = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.US)
+                formatter.format(java.util.Date(parsedMillis))
+            } else {
+                calculateFormattedEtaClockTime(
+                    activeBookingsCount = activeBookingsCount,
+                    defaultServiceDurationMinutes = defaultServiceDurationMinutes,
+                    extraOffsetMinutes = 0,
+                    baseTimeMillis = nowMillis
+                )
+            }
         }
 
         /**
@@ -294,15 +432,16 @@ data class Booking(
                 "pending" -> "Pending"
                 "confirmed", "accepted", "in_progress" -> "Confirmed"
                 "completed" -> "Completed"
-                "cancelled", "canceled", "rejected" -> "Cancelled"
+                "cancelled", "canceled", "rejected", "no_show", "expired" -> "Cancelled"
                 else -> "Pending"
             }
         }
 
         /**
          * Calculates the estimated wait time in minutes based on the Partner's current active Live Queue
-         * (`activeInQueue * defaultServiceDurationMinutes`), adding the default service duration for EVERY
-         * pending and accepted booking ahead in the queue.
+         * (`activeInQueue * defaultServiceDurationMinutes`).
+         * If the queue wait time is 0 (`activeBookingsCount == 0`), adds `DEFAULT_MIN_TRAVEL_BUFFER_MINUTES`
+         * (10 minutes) so the customer always gets a future arrival time with time to travel to the salon.
          */
         fun calculateSystemWaitMinutes(
             activeBookingsCount: Int,
@@ -310,11 +449,13 @@ data class Booking(
         ): Int {
             val safeDuration = defaultServiceDurationMinutes.coerceIn(10, 120)
             val safeQueue = activeBookingsCount.coerceAtLeast(0)
-            return safeDuration * safeQueue
+            val rawWait = safeDuration * safeQueue
+            return rawWait.coerceAtLeast(DEFAULT_MIN_TRAVEL_BUFFER_MINUTES)
         }
 
         /**
-         * Calculates the estimated arrival epoch timestamp in milliseconds.
+         * Calculates the estimated arrival epoch timestamp in milliseconds (`Current Time + Wait Time`),
+         * always enforcing at least `DEFAULT_MIN_TRAVEL_BUFFER_MINUTES` (10 minutes) in the future.
          */
         fun calculateEtaArrivalMillis(
             activeBookingsCount: Int,
@@ -323,13 +464,13 @@ data class Booking(
             baseTimeMillis: Long = System.currentTimeMillis()
         ): Long {
             val queueWaitMins = calculateSystemWaitMinutes(activeBookingsCount, defaultServiceDurationMinutes)
-            val totalMinutesFromNow = (queueWaitMins + extraOffsetMinutes).coerceAtLeast(0)
+            val totalMinutesFromNow = (queueWaitMins + extraOffsetMinutes).coerceAtLeast(DEFAULT_MIN_TRAVEL_BUFFER_MINUTES)
             return baseTimeMillis + (totalMinutesFromNow * 60_000L)
         }
 
         /**
          * Calculates the formatted clock arrival time (e.g., "04:35 PM") by adding the system queue wait
-         * (`activeInQueue * defaultServiceDurationMinutes`) plus any Partner manual override (`extraOffsetMinutes`).
+         * (`max(activeInQueue * defaultServiceDurationMinutes, 10m)`) plus any Partner manual override (`extraOffsetMinutes`).
          */
         fun calculateFormattedEtaClockTime(
             activeBookingsCount: Int,

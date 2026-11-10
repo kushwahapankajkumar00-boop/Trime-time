@@ -36,6 +36,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -278,12 +283,23 @@ fun CustomerBookingCard(
     onViewDetails: () -> Unit,
     onCancel: () -> Unit
 ) {
+    var nowMillis by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(System.currentTimeMillis()) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(15_000L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+
     val isPending = booking.status.equals("pending", ignoreCase = true)
     val isAccepted = booking.status.equals("accepted", ignoreCase = true)
     val isActiveSlot = isPending || isAccepted
     val isCompleted = booking.status.equals("completed", ignoreCase = true)
     val isRejected = booking.status.equals("rejected", ignoreCase = true)
     val isCancelled = booking.status.equals("cancelled", ignoreCase = true)
+    val isLate = isActiveSlot && booking.isLateArrival(nowMillis)
+    val minsLate = if (isLate) booking.minutesLate(nowMillis) else 0
+    val graceMinsLeft = if (isLate) booking.remainingGraceMinutes(nowMillis) else Booking.LATE_GRACE_PERIOD_MINUTES
 
     Card(
         modifier = Modifier
@@ -329,11 +345,13 @@ fun CustomerBookingCard(
 
                 // Status chip
                 val statusBg = when {
+                    isLate -> Color(0xFF450A0A)
                     isCompleted || isAccepted -> Color(0xFF064E3B)
                     isPending -> Color(0xFF451A03)
                     else -> Color(0xFF450A0A)
                 }
                 val statusText = when {
+                    isLate -> "⚠️ LATE (${minsLate}m • ${graceMinsLeft}m grace)"
                     isCompleted -> "COMPLETED"
                     isAccepted -> "ACCEPTED • CONFIRMED"
                     isPending -> "PENDING ARRIVAL"
@@ -341,6 +359,7 @@ fun CustomerBookingCard(
                     else -> "CANCELLED"
                 }
                 val statusColor = when {
+                    isLate -> RedAlert
                     isCompleted || isAccepted -> GreenSuccess
                     isPending -> AmberPrimary
                     else -> RedAlert

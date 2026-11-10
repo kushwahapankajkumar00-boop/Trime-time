@@ -205,14 +205,17 @@ class TrimTimeRepository private constructor(context: Context) {
     }
 
     /**
-     * Sweeps `_bookings` for any 'Pending' booking older than 5 minutes and auto-cancels it
-     * in memory and in Firestore without adding a customer cancellation strike.
+     * Sweeps `_bookings` for any 'Pending' booking older than 5 minutes OR any active booking
+     * late beyond the 10-minute grace period (`Booking.LATE_GRACE_PERIOD_MS`) and auto-cancels it
+     * in memory and in Firestore.
      */
     fun sweepExpiredPendingBookings(nowMillis: Long = System.currentTimeMillis()) {
-        val expiredPending = _bookings.value.filter { it.isPendingTimedOut(nowMillis) }
-        if (expiredPending.isEmpty()) return
+        val expiredBookings = _bookings.value.filter {
+            it.isPendingTimedOut(nowMillis) || it.isGracePeriodExpired(nowMillis)
+        }
+        if (expiredBookings.isEmpty()) return
 
-        val expiredIds = expiredPending.map { it.id }.toSet()
+        val expiredIds = expiredBookings.map { it.id }.toSet()
         _bookings.value = _bookings.value.map { b ->
             if (b.id in expiredIds) b.copy(status = "cancelled") else b
         }
@@ -221,25 +224,31 @@ class TrimTimeRepository private constructor(context: Context) {
         }
 
         val db = firestore ?: defaultFirestore ?: return
-        expiredPending.forEach { expired ->
+        expiredBookings.forEach { expired ->
+            val isGraceExpired = expired.isGracePeriodExpired(nowMillis)
             val bookingRef = db.collection("bookings").document(expired.id)
             db.runTransaction { transaction ->
                 val snap = transaction.get(bookingRef)
                 val currentStatus = snap.getString("status")?.trim().orEmpty()
-                if (snap.exists() && currentStatus.equals("pending", ignoreCase = true)) {
+                if (snap.exists() && Booking.isStatusPendingOrAccepted(currentStatus)) {
+                    val reasonNote = if (isGraceExpired) {
+                        "${expired.cleanAllocatedClockTime} (Auto-Expired: >10m Late)"
+                    } else {
+                        "Auto-Cancelled (5m Partner Timeout)"
+                    }
                     transaction.update(
                         bookingRef,
                         mapOf(
                             "status" to "cancelled",
-                            "allocatedTime" to "Auto-Cancelled (5m Partner Timeout)"
+                            "allocatedTime" to reasonNote
                         )
                     )
                 }
                 null
             }.addOnSuccessListener {
-                Log.d(tag, "Auto-cancelled expired Pending booking (>5m): ${expired.id}")
+                Log.d(tag, "Auto-cancelled expired booking (graceExpired=$isGraceExpired): ${expired.id}")
             }.addOnFailureListener { err ->
-                Log.w(tag, "Fallback auto-cancel for expired Pending booking ${expired.id}: ${err.message}")
+                Log.w(tag, "Fallback auto-cancel for expired booking ${expired.id}: ${err.message}")
                 bookingRef.set(
                     mapOf("status" to "cancelled"),
                     com.google.firebase.firestore.SetOptions.merge()
@@ -967,8 +976,8 @@ class TrimTimeRepository private constructor(context: Context) {
                             booking.customerId !in invalidSharedUserIds &&
                             booking.id != "past_demo_1"
                     }.map { booking ->
-                        if (booking.isPendingTimedOut(nowMillis)) {
-                            // Auto-cancel 'Pending' booking in Firestore if Partner didn't respond within 5 mins
+                        if (booking.isPendingTimedOut(nowMillis) || booking.isGracePeriodExpired(nowMillis)) {
+                            // Auto-cancel 'Pending' (>5m) or late (>10m grace period) booking in Firestore
                             db.collection("bookings").document(booking.id).set(
                                 mapOf("status" to "cancelled"),
                                 com.google.firebase.firestore.SetOptions.merge()
@@ -3410,7 +3419,13 @@ class TrimTimeRepository private constructor(context: Context) {
 
         val cleanSalonId = salonId.trim()
         val cleanSalonName = SecurityValidator.sanitizeName(salonName, trimEdges = true)
-        val cleanTimeSlot = SecurityValidator.sanitizeName(timeSlot, trimEdges = true)
+        val rawSanitizedSlot = SecurityValidator.sanitizeName(timeSlot, trimEdges = true)
+        val cleanTimeSlot = Booking.ensureFutureArrivalClockTime(
+            candidateTimeStr = rawSanitizedSlot,
+            activeBookingsCount = activeSalonQueueCount,
+            defaultServiceDurationMinutes = serviceDurationMins,
+            nowMillis = nowMillis
+        )
         val cleanBookingDate = SecurityValidator.sanitizeName(bookingDate, trimEdges = true)
 
         val resolvedCustomerFcmToken = currentProfile?.fcmToken?.takeIf { it.isNotBlank() }
@@ -3423,6 +3438,7 @@ class TrimTimeRepository private constructor(context: Context) {
             salonName = cleanSalonName,
             date = cleanBookingDate,
             time = cleanTimeSlot,
+            allocatedTime = cleanTimeSlot,
             status = "Pending",
             id = newBookingId,
             customerId = resolvedCustomerId,
@@ -3502,10 +3518,11 @@ class TrimTimeRepository private constructor(context: Context) {
                         ?: salonSnap.getString("ClosingTime")?.takeIf { it.isNotBlank() }
                         ?: salonClosingTimeStr
 
+                    val txNowMillis = System.currentTimeMillis()
                     val baseCalculatedEtaMillis = Booking.calculateEtaArrivalMillis(
                         activeBookingsCount = activeSalonQueueCount,
                         defaultServiceDurationMinutes = serviceDurationMins,
-                        baseTimeMillis = nowMillis
+                        baseTimeMillis = txNowMillis
                     )
                     // Prevent concurrent double-booking of the exact same ETA minute slot:
                     val safeNextEtaMillis = if (prevLastAllocatedMillis >= baseCalculatedEtaMillis) {
@@ -3514,7 +3531,7 @@ class TrimTimeRepository private constructor(context: Context) {
                         baseCalculatedEtaMillis
                     }
 
-                    val closingMillis = Booking.parseSalonClosingTimeMillisToday(dbClosingTimeStr, nowMillis)
+                    val closingMillis = Booking.parseSalonClosingTimeMillisToday(dbClosingTimeStr, txNowMillis)
                     if (closingMillis != null && safeNextEtaMillis > closingMillis) {
                         throw com.google.firebase.firestore.FirebaseFirestoreException(
                             "Estimated ETA exceeds salon closing time ($dbClosingTimeStr).",
@@ -3527,7 +3544,12 @@ class TrimTimeRepository private constructor(context: Context) {
                     val txTimeSlot = if (isRushActiveNow || activeSalonQueueCount > 0) {
                         txFormattedClock
                     } else {
-                        Booking.formatCleanArrivalTime(cleanTimeSlot)
+                        Booking.ensureFutureArrivalClockTime(
+                            candidateTimeStr = cleanTimeSlot,
+                            activeBookingsCount = activeSalonQueueCount,
+                            defaultServiceDurationMinutes = serviceDurationMins,
+                            nowMillis = txNowMillis
+                        )
                     }
 
                     if (salonSnap.exists()) {
@@ -3542,7 +3564,8 @@ class TrimTimeRepository private constructor(context: Context) {
 
                     val txBooking = newBooking.copy(
                         time = txTimeSlot,
-                        timeSlot = txTimeSlot
+                        timeSlot = txTimeSlot,
+                        allocatedTime = txTimeSlot
                     )
                     transaction.set(bookingRef, txBooking.toMap())
                     txBooking
@@ -3643,20 +3666,35 @@ class TrimTimeRepository private constructor(context: Context) {
 
     /**
      * Partner Action: Accept an incoming customer booking in real time in Firestore
-     * using a Firestore Transaction (`db.runTransaction`) to prevent double-booking the exact same slot
+     * using a Firestore Transaction (`db.runTransaction`) to prevent double-booking the exact same slot,
+     * ensure the allocated arrival time is always in the future (`>= Current Time + Buffer`),
      * and verify the booking has not timed out or been cancelled.
      */
     fun acceptBooking(bookingId: String, allocatedTime: String = ""): Boolean {
-        sweepExpiredPendingBookings()
+        val nowMillis = System.currentTimeMillis()
+        sweepExpiredPendingBookings(nowMillis)
         val currentBookings = _bookings.value
         val booking = currentBookings.find { it.id == bookingId } ?: return false
-        if (booking.isPendingTimedOut()) {
+        if (booking.isPendingTimedOut(nowMillis)) {
             return false
         }
+        val activeAheadCount = Booking.countActiveInQueueToday(
+            bookings = currentBookings,
+            salonId = booking.salonId,
+            partnerId = booking.partnerId,
+            salonName = booking.salonName,
+            excludeBookingId = booking.id,
+            referenceMillis = nowMillis
+        )
         val rawAllocated = allocatedTime.trim().ifBlank {
             booking.allocatedTime.ifBlank { booking.resolvedTime }
         }
-        val finalAllocatedTime = Booking.formatCleanArrivalTime(rawAllocated)
+        val finalAllocatedTime = Booking.ensureFutureArrivalClockTime(
+            candidateTimeStr = rawAllocated,
+            activeBookingsCount = activeAheadCount,
+            defaultServiceDurationMinutes = 20,
+            nowMillis = nowMillis
+        )
         val acceptedBooking = booking.copy(
             status = BookingStatus.ACCEPTED.name.lowercase(),
             allocatedTime = finalAllocatedTime,
@@ -3695,7 +3733,12 @@ class TrimTimeRepository private constructor(context: Context) {
                     }
                 }
 
-                val nonOverlappingAllocatedTime = finalAllocatedTime
+                val nonOverlappingAllocatedTime = Booking.ensureFutureArrivalClockTime(
+                    candidateTimeStr = finalAllocatedTime,
+                    activeBookingsCount = activeAheadCount,
+                    defaultServiceDurationMinutes = 20,
+                    nowMillis = System.currentTimeMillis()
+                )
                 if (salonSnap != null && salonSnap.exists()) {
                     val prevSeq = salonSnap.getLong("liveQueueSequence") ?: 0L
                     transaction.update(
@@ -3740,8 +3783,9 @@ class TrimTimeRepository private constructor(context: Context) {
                 Log.d(tag, "Booking $bookingId accepted via Firestore Transaction with allocatedTime=$resolvedAllocated.")
 
                 // Send high-priority FCM push notification to the Customer's fcmToken
-                val isEtaAdjusted = allocatedTime.isNotBlank() &&
-                    !allocatedTime.trim().equals(booking.timeSlot.trim(), ignoreCase = true)
+                val isEtaAdjusted = (allocatedTime.isNotBlank() &&
+                    !allocatedTime.trim().equals(booking.timeSlot.trim(), ignoreCase = true)) ||
+                    !resolvedAllocated.equals(booking.timeSlot.trim(), ignoreCase = true)
                 val customerFcmToken = _allUsers.value.find { it.id == booking.customerId }?.fcmToken?.takeIf { it.isNotBlank() }
                     ?: booking.customerFcmToken
                 TrimTimeNotificationHelper.sendHighPriorityBookingStatusFcmToCustomer(
@@ -3768,8 +3812,9 @@ class TrimTimeRepository private constructor(context: Context) {
                     }
                 } else {
                     bookingRef.set(updates, com.google.firebase.firestore.SetOptions.merge())
-                    val isEtaAdjusted = allocatedTime.isNotBlank() &&
-                        !allocatedTime.trim().equals(booking.timeSlot.trim(), ignoreCase = true)
+                    val isEtaAdjusted = (allocatedTime.isNotBlank() &&
+                        !allocatedTime.trim().equals(booking.timeSlot.trim(), ignoreCase = true)) ||
+                        !finalAllocatedTime.equals(booking.timeSlot.trim(), ignoreCase = true)
                     val customerFcmToken = _allUsers.value.find { it.id == booking.customerId }?.fcmToken?.takeIf { it.isNotBlank() }
                         ?: booking.customerFcmToken
                     TrimTimeNotificationHelper.sendHighPriorityBookingStatusFcmToCustomer(
@@ -3822,6 +3867,49 @@ class TrimTimeRepository private constructor(context: Context) {
             ?.addOnFailureListener { e ->
                 Log.w(tag, "Failed to reject booking in Firestore: ${e.message}")
             }
+        return true
+    }
+
+    /**
+     * Partner Action: Mark a late customer booking as 'No Show' (cancelled due to late arrival)
+     * in real time in Firestore and notify the Customer.
+     */
+    fun markBookingNoShow(bookingId: String): Boolean {
+        val currentBookings = _bookings.value
+        val booking = currentBookings.find { it.id == bookingId } ?: return false
+        val noShowNote = "${booking.cleanAllocatedClockTime} (Marked No-Show)"
+        val noShowBooking = booking.copy(
+            status = "cancelled",
+            allocatedTime = noShowNote
+        )
+        _bookings.value = currentBookings.map { if (it.id == bookingId) noShowBooking else it }
+        _customerBookings.value = _customerBookings.value.map { if (it.id == bookingId) noShowBooking else it }
+
+        val customerFcmToken = _allUsers.value.find { it.id == booking.customerId }?.fcmToken?.takeIf { it.isNotBlank() }
+            ?: booking.customerFcmToken
+        TrimTimeNotificationHelper.sendHighPriorityBookingStatusFcmToCustomer(
+            context = appContext,
+            customerId = booking.customerId,
+            salonId = booking.salonId,
+            salonName = booking.salonName,
+            bookingId = booking.id,
+            serviceName = booking.service,
+            allocatedTime = noShowNote,
+            eventType = "BOOKING_DECLINED",
+            knownCustomerFcmToken = customerFcmToken
+        )
+
+        firestore?.collection("bookings")?.document(bookingId)?.set(
+            mapOf(
+                "status" to "cancelled",
+                "allocatedTime" to noShowNote
+            ),
+            com.google.firebase.firestore.SetOptions.merge()
+        )?.addOnSuccessListener {
+            Log.d(tag, "Booking $bookingId marked as No-Show in Firestore.")
+        }?.addOnFailureListener { e ->
+            Log.w(tag, "Failed to mark booking as No-Show in Firestore: ${e.message}")
+        }
         return true
     }
 

@@ -568,6 +568,7 @@ fun TrimTimeApp(
                                             viewModel.acceptBooking(bookingId, allocatedTime)
                                         },
                                         onRejectBooking = { viewModel.rejectBooking(it) },
+                                        onMarkNoShow = { viewModel.markBookingNoShow(it) },
                                         onToggleSalonOpen = { viewModel.toggleSalonOpenStatus(it) },
                                         onSetSalonOpen = { id, isOpen -> viewModel.setSalonOpenStatus(id, isOpen) },
                                         onSetSalonBusyStatus = { id, status -> viewModel.setSalonBusyStatus(id, status) },

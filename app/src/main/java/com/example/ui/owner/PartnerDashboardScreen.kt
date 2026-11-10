@@ -166,6 +166,7 @@ fun PartnerDashboardScreen(
     onAcceptBooking: (String) -> Unit = {},
     onAcceptBookingWithTime: (String, String) -> Unit = { id, _ -> onAcceptBooking(id) },
     onRejectBooking: (String) -> Unit = {},
+    onMarkNoShow: (String) -> Unit = { onRejectBooking(it) },
     onToggleSalonOpen: (String) -> Unit,
     onSetSalonOpen: (String, Boolean) -> Unit = { id, _ -> onToggleSalonOpen(id) },
     onSetSalonBusyStatus: (String, String) -> Unit = { _, _ -> },
@@ -332,6 +333,7 @@ fun PartnerDashboardScreen(
                     onAcceptBooking = onAcceptBooking,
                     onAcceptBookingWithTime = onAcceptBookingWithTime,
                     onRejectBooking = onRejectBooking,
+                    onMarkNoShow = onMarkNoShow,
                     onNavigateToProfile = { currentTab = PartnerTab.SHOP_PROFILE }
                 )
             }
@@ -605,6 +607,7 @@ fun PartnerLiveQueueTabContent(
     onAcceptBooking: (String) -> Unit = {},
     onAcceptBookingWithTime: (String, String) -> Unit = { id, _ -> onAcceptBooking(id) },
     onRejectBooking: (String) -> Unit = {},
+    onMarkNoShow: (String) -> Unit = { onRejectBooking(it) },
     onNavigateToProfile: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -797,6 +800,7 @@ fun PartnerLiveQueueTabContent(
                         }
                     },
                     onRejectClick = { onRejectBooking(booking.id) },
+                    onMarkNoShowClick = { onMarkNoShow(booking.id) },
                     onVerifyPinClick = { onOpenPinVerification(booking) }
                 )
             }
@@ -1483,12 +1487,24 @@ fun LiveQueueBookingCard(
     booking: Booking,
     onAcceptClick: () -> Unit = {},
     onRejectClick: () -> Unit = {},
+    onMarkNoShowClick: () -> Unit = onRejectClick,
     onVerifyPinClick: () -> Unit
 ) {
     val context = LocalContext.current
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(15_000L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+
     val isAccepted = booking.status.equals("accepted", ignoreCase = true) ||
         booking.status.equals("in_progress", ignoreCase = true)
     val isActiveBooking = SecurityValidator.isBookingActiveStatus(booking.status)
+    val isLate = isActiveBooking && booking.isLateArrival(nowMillis)
+    val minsLate = if (isLate) booking.minutesLate(nowMillis) else 0
+    val graceMinsLeft = if (isLate) booking.remainingGraceMinutes(nowMillis) else Booking.LATE_GRACE_PERIOD_MINUTES
     val displayPhone = SecurityValidator.maskCustomerPhoneForStatus(booking.customerPhone, booking.status)
 
     Card(
@@ -1500,7 +1516,11 @@ fun LiveQueueBookingCard(
         colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
         border = CardDefaults.outlinedCardBorder().copy(
             brush = androidx.compose.ui.graphics.SolidColor(
-                if (isAccepted) GreenSuccess.copy(alpha = 0.6f) else AmberPrimary.copy(alpha = 0.4f)
+                when {
+                    isLate -> RedAlert.copy(alpha = 0.85f)
+                    isAccepted -> GreenSuccess.copy(alpha = 0.6f)
+                    else -> AmberPrimary.copy(alpha = 0.4f)
+                }
             )
         )
     ) {
@@ -1545,15 +1565,29 @@ fun LiveQueueBookingCard(
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(6.dp))
-                                .background(if (isAccepted) Color(0xFF064E3B) else Color(0xFF3B2306))
+                                .background(
+                                    when {
+                                        isLate -> Color(0xFF450A0A)
+                                        isAccepted -> Color(0xFF064E3B)
+                                        else -> Color(0xFF3B2306)
+                                    }
+                                )
                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = if (isAccepted) "✓ ACCEPTED" else "NEW",
+                                text = when {
+                                    isLate -> "⚠️ LATE (${minsLate}m)"
+                                    isAccepted -> "✓ ACCEPTED"
+                                    else -> "NEW"
+                                },
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = if (isAccepted) GreenSuccess else AmberPrimary,
+                                color = when {
+                                    isLate -> RedAlert
+                                    isAccepted -> GreenSuccess
+                                    else -> AmberPrimary
+                                },
                                 maxLines = 1,
                                 softWrap = false
                             )
@@ -1614,15 +1648,20 @@ fun LiveQueueBookingCard(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF451A03))
+                            .background(if (isLate) Color(0xFF450A0A) else Color(0xFF451A03))
+                            .border(
+                                width = 1.dp,
+                                color = if (isLate) RedAlert else Color.Transparent,
+                                shape = RoundedCornerShape(8.dp)
+                            )
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "⏱ ${booking.allocatedTime.ifBlank { booking.timeSlot }}",
+                            text = "⏱ ${booking.cleanAllocatedClockTime}",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = AmberPrimary,
+                            color = if (isLate) Color(0xFFFCA5A5) else AmberPrimary,
                             maxLines = 1,
                             softWrap = false
                         )
@@ -1657,6 +1696,40 @@ fun LiveQueueBookingCard(
                                 softWrap = false
                             )
                         }
+                    }
+                }
+            }
+
+            // Dynamic Late Arrival Warning Banner for Partner
+            if (isLate) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF450A0A))
+                        .border(1.dp, RedAlert, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("partner_late_badge_${booking.id}"),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Late Arrival Warning",
+                            tint = RedAlert,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Customer is ${minsLate}m late (Slot: ${booking.cleanAllocatedClockTime}) • Auto-expires in ${graceMinsLeft}m",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFFECACA)
+                        )
                     }
                 }
             }
@@ -1702,7 +1775,7 @@ fun LiveQueueBookingCard(
                 )
             }
 
-            // Accept & Decline Action Row (Syncs directly to Firestore bookings/{bookingId})
+            // Accept & Decline / Mark No-Show Action Row (Syncs directly to Firestore bookings/{bookingId})
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1738,31 +1811,63 @@ fun LiveQueueBookingCard(
                     }
                 }
 
-                OutlinedButton(
-                    onClick = onRejectClick,
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp)
-                        .testTag("reject_booking_btn_${booking.id}"),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, RedAlert.copy(alpha = 0.7f)),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Decline Booking",
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = "Decline",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                if (isLate) {
+                    OutlinedButton(
+                        onClick = onMarkNoShowClick,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("mark_no_show_button_${booking.id}"),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color(0xFF450A0A),
+                            contentColor = Color(0xFFFECACA)
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, RedAlert),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Mark No-Show",
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Mark No-Show",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onRejectClick,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 48.dp)
+                            .testTag("reject_booking_btn_${booking.id}"),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = RedAlert),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, RedAlert.copy(alpha = 0.7f)),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Decline Booking",
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Decline",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
 
@@ -4262,6 +4367,14 @@ fun PartnerEtaAllocationDialog(
         }
     }
 
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(15_000L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+
     val activeInQueue = maxOf(activeBookingsAheadCount, firestoreActiveInQueue)
     val systemWaitMins = Booking.calculateSystemWaitMinutes(
         activeBookingsCount = activeInQueue,
@@ -4271,7 +4384,8 @@ fun PartnerEtaAllocationDialog(
     val calculatedClockTime = Booking.calculateFormattedEtaClockTime(
         activeBookingsCount = activeInQueue,
         defaultServiceDurationMinutes = defaultServiceDurationMinutes,
-        extraOffsetMinutes = selectedOffsetMins
+        extraOffsetMinutes = selectedOffsetMins,
+        baseTimeMillis = nowMillis
     )
     val previewFormattedSlot = if (totalWaitMins > 0) {
         "$calculatedClockTime (~$totalWaitMins mins)"
@@ -4399,7 +4513,8 @@ fun PartnerEtaAllocationDialog(
                         val optionTimePreview = Booking.calculateFormattedEtaClockTime(
                             activeBookingsCount = activeInQueue,
                             defaultServiceDurationMinutes = defaultServiceDurationMinutes,
-                            extraOffsetMinutes = offsetMins
+                            extraOffsetMinutes = offsetMins,
+                            baseTimeMillis = nowMillis
                         )
                         Card(
                             modifier = Modifier
@@ -4470,7 +4585,15 @@ fun PartnerEtaAllocationDialog(
                     }
 
                     Button(
-                        onClick = { onConfirmAllocatedTime(calculatedClockTime) },
+                        onClick = {
+                            val freshConfirmTime = Booking.calculateFormattedEtaClockTime(
+                                activeBookingsCount = activeInQueue,
+                                defaultServiceDurationMinutes = defaultServiceDurationMinutes,
+                                extraOffsetMinutes = selectedOffsetMins,
+                                baseTimeMillis = System.currentTimeMillis()
+                            )
+                            onConfirmAllocatedTime(freshConfirmTime)
+                        },
                         modifier = Modifier
                             .weight(1.4f)
                             .height(48.dp)

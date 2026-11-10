@@ -78,12 +78,13 @@ class MyBookingsViewModel : ViewModel() {
         authStateListener = listener
         auth.addAuthStateListener(listener)
 
-        // Periodically check for 'Pending' bookings that exceed the 5-minute Partner response timeout
+        // Periodically check for 'Pending' bookings (>5m timeout) or late bookings (>10m grace period)
         viewModelScope.launch {
             while (true) {
                 kotlinx.coroutines.delay(15_000L)
-                if (cachedFirestoreBookings.any { it.isPendingTimedOut() } ||
-                    cachedLocalBookings.any { it.isPendingTimedOut() }
+                val nowMs = System.currentTimeMillis()
+                if (cachedFirestoreBookings.any { it.isPendingTimedOut(nowMs) || it.isGracePeriodExpired(nowMs) } ||
+                    cachedLocalBookings.any { it.isPendingTimedOut(nowMs) || it.isGracePeriodExpired(nowMs) }
                 ) {
                     applyCategorizedBookings(cachedFirestoreBookings)
                 }
@@ -258,7 +259,7 @@ class MyBookingsViewModel : ViewModel() {
         }
         val nowMillis = System.currentTimeMillis()
         val bookings = mergedById.values.map { booking ->
-            if (booking.isPendingTimedOut(nowMillis)) {
+            if (booking.isPendingTimedOut(nowMillis) || booking.isGracePeriodExpired(nowMillis)) {
                 try {
                     resolveDb().collection("bookings")
                         .document(booking.resolvedBookingId)

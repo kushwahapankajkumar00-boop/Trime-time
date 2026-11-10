@@ -56,9 +56,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -463,34 +466,50 @@ fun BookingCard(
     onRateSalonClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(15_000L)
+            nowMillis = System.currentTimeMillis()
+        }
+    }
+
     val canonicalStatus = booking.normalizedStatus
-    val statusColor = when (canonicalStatus.lowercase()) {
-        "pending" -> Color(0xFFF59E0B) // Yellow / Orange for Pending
-        "confirmed", "completed" -> GreenSuccess // Green for Confirmed / Completed
-        "cancelled" -> RedAlert // Red for Cancelled
-        else -> AmberPrimary
-    }
-
-    val statusBgColor = when (canonicalStatus.lowercase()) {
-        "pending" -> Color(0xFF451A03).copy(alpha = 0.85f)
-        "confirmed", "completed" -> Color(0xFF064E3B).copy(alpha = 0.85f)
-        "cancelled" -> Color(0xFF450A0A).copy(alpha = 0.85f)
-        else -> Color(0xFF1E293B)
-    }
-
-    val statusIcon = when (canonicalStatus.lowercase()) {
-        "pending" -> Icons.Default.Schedule
-        "confirmed", "completed" -> Icons.Default.CheckCircle
-        "cancelled" -> Icons.Default.Cancel
-        else -> Icons.Default.Schedule
-    }
-
     val displayDate = booking.resolvedDate.ifBlank { "Today" }
     val finalAllocatedTime = booking.cleanAllocatedClockTime
     val isUpcoming = canonicalStatus.equals("Pending", ignoreCase = true) ||
         canonicalStatus.equals("Confirmed", ignoreCase = true)
     val isConfirmed = canonicalStatus.equals("Confirmed", ignoreCase = true)
     val isCompleted = canonicalStatus.equals("Completed", ignoreCase = true)
+    val isLate = isUpcoming && booking.isLateArrival(nowMillis)
+    val minsLate = if (isLate) booking.minutesLate(nowMillis) else 0
+    val graceMinsLeft = if (isLate) booking.remainingGraceMinutes(nowMillis) else Booking.LATE_GRACE_PERIOD_MINUTES
+
+    val statusColor = when {
+        isLate -> RedAlert
+        canonicalStatus.equals("pending", ignoreCase = true) -> Color(0xFFF59E0B) // Yellow / Orange for Pending
+        canonicalStatus.equals("confirmed", ignoreCase = true) || canonicalStatus.equals("completed", ignoreCase = true) -> GreenSuccess
+        canonicalStatus.equals("cancelled", ignoreCase = true) -> RedAlert
+        else -> AmberPrimary
+    }
+
+    val statusBgColor = when {
+        isLate -> Color(0xFF450A0A).copy(alpha = 0.9f)
+        canonicalStatus.equals("pending", ignoreCase = true) -> Color(0xFF451A03).copy(alpha = 0.85f)
+        canonicalStatus.equals("confirmed", ignoreCase = true) || canonicalStatus.equals("completed", ignoreCase = true) -> Color(0xFF064E3B).copy(alpha = 0.85f)
+        canonicalStatus.equals("cancelled", ignoreCase = true) -> Color(0xFF450A0A).copy(alpha = 0.85f)
+        else -> Color(0xFF1E293B)
+    }
+
+    val statusIcon = when {
+        isLate -> Icons.Default.ErrorOutline
+        canonicalStatus.equals("pending", ignoreCase = true) -> Icons.Default.Schedule
+        canonicalStatus.equals("confirmed", ignoreCase = true) || canonicalStatus.equals("completed", ignoreCase = true) -> Icons.Default.CheckCircle
+        canonicalStatus.equals("cancelled", ignoreCase = true) -> Icons.Default.Cancel
+        else -> Icons.Default.Schedule
+    }
+
+    val displayStatusBadgeText = if (isLate) "Late (${minsLate}m)" else canonicalStatus
 
     Card(
         modifier = modifier
@@ -499,8 +518,8 @@ fun BookingCard(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = DarkCardSurface),
         border = BorderStroke(
-            width = if (isConfirmed) 1.5.dp else 1.dp,
-            color = statusColor.copy(alpha = if (isConfirmed) 0.75f else 0.45f)
+            width = if (isConfirmed || isLate) 1.5.dp else 1.dp,
+            color = statusColor.copy(alpha = if (isConfirmed || isLate) 0.75f else 0.45f)
         ),
         elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
     ) {
@@ -594,12 +613,12 @@ fun BookingCard(
                     ) {
                         Icon(
                             imageVector = statusIcon,
-                            contentDescription = canonicalStatus,
+                            contentDescription = displayStatusBadgeText,
                             tint = statusColor,
                             modifier = Modifier.size(13.dp)
                         )
                         Text(
-                            text = canonicalStatus,
+                            text = displayStatusBadgeText,
                             color = statusColor,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.ExtraBold
@@ -607,19 +626,26 @@ fun BookingCard(
                     }
                 }
 
-                // Digital Ticket Hero Banner: "Reach Salon exactly at [Final Allocated Time]"
+                // Digital Ticket Hero Banner: "Reach Salon exactly at [Final Allocated Time]" + Late Warning
                 if (isUpcoming) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
                             .background(
-                                if (isConfirmed) Color(0xFF064E3B).copy(alpha = 0.75f)
-                                else Color(0xFF451A03).copy(alpha = 0.65f)
+                                when {
+                                    isLate -> Color(0xFF450A0A).copy(alpha = 0.85f)
+                                    isConfirmed -> Color(0xFF064E3B).copy(alpha = 0.75f)
+                                    else -> Color(0xFF451A03).copy(alpha = 0.65f)
+                                }
                             )
                             .border(
                                 width = 1.5.dp,
-                                color = if (isConfirmed) GreenSuccess else AmberPrimary,
+                                color = when {
+                                    isLate -> RedAlert
+                                    isConfirmed -> GreenSuccess
+                                    else -> AmberPrimary
+                                },
                                 shape = RoundedCornerShape(14.dp)
                             )
                             .padding(horizontal = 16.dp, vertical = 14.dp)
@@ -635,9 +661,13 @@ fun BookingCard(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.AccessTime,
+                                    imageVector = if (isLate) Icons.Default.ErrorOutline else Icons.Default.AccessTime,
                                     contentDescription = "Final Allocated Time",
-                                    tint = if (isConfirmed) GreenSuccess else AmberPrimary,
+                                    tint = when {
+                                        isLate -> RedAlert
+                                        isConfirmed -> GreenSuccess
+                                        else -> AmberPrimary
+                                    },
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Text(
@@ -649,12 +679,16 @@ fun BookingCard(
                                 )
                             }
                             Text(
-                                text = if (isConfirmed) {
-                                    "Confirmed by Salon • Zero waiting at the shop"
-                                } else {
-                                    "Awaiting Salon Partner confirmation"
+                                text = when {
+                                    isLate -> "⚠️ LATE ARRIVAL ($minsLate min late) • Auto-expires in ${graceMinsLeft}m grace period"
+                                    isConfirmed -> "Confirmed by Salon • Zero waiting at the shop"
+                                    else -> "Awaiting Salon Partner confirmation"
                                 },
-                                color = if (isConfirmed) Color(0xFFA7F3D0) else Color(0xFFFDE68A),
+                                color = when {
+                                    isLate -> Color(0xFFFCA5A5)
+                                    isConfirmed -> Color(0xFFA7F3D0)
+                                    else -> Color(0xFFFDE68A)
+                                },
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 textAlign = TextAlign.Center
