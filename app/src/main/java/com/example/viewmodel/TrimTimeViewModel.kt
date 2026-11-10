@@ -704,8 +704,8 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 )
 
                 try {
-                    FirebaseFirestore.getInstance()
-                        .collection("users")
+                    val fs = repository.getActiveFirestore() ?: FirebaseFirestore.getInstance()
+                    fs.collection("users")
                         .document(uid)
                         .set(userDocData, SetOptions.merge())
                         .await()
@@ -1589,7 +1589,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                     "adminCategoryTag" to cleanTag,
                     "salonCategory" to cleanTag
                 )
-                val fs = try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
+                val fs = repository.getActiveFirestore() ?: try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
                 if (fs != null) {
                     if (resolvedPartnerUid.isNotBlank()) {
                         fs.collection("users").document(resolvedPartnerUid)
@@ -1668,7 +1668,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                     salonUpdates["currentStatus"] = "CLOSED"
                 }
 
-                val fs = try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
+                val fs = repository.getActiveFirestore() ?: try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
                 if (fs != null) {
                     if (resolvedPartnerUid.isNotBlank()) {
                         fs.collection("users").document(resolvedPartnerUid)
@@ -1793,7 +1793,7 @@ class TrimTimeViewModel(application: Application) : AndroidViewModel(application
                 )
 
                 // 1. Direct Firestore update on users and salons
-                val fs = try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
+                val fs = repository.getActiveFirestore() ?: try { FirebaseFirestore.getInstance() } catch (_: Exception) { null }
                 if (fs != null) {
                     if (cleanUserId.isNotBlank()) {
                         fs.collection("users").document(cleanUserId)

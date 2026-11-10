@@ -72,10 +72,19 @@ class LiveQueueViewModel : ViewModel() {
 
         try {
             val app = FirebaseApp.getInstance()
-            val primaryDb = try {
-                FirebaseFirestore.getInstance(app, "ai-studio-260b673c-6e6b-45c7-b680-335d42dc251f")
+            val dbId = try {
+                app.applicationContext.getString(com.example.R.string.firestore_database_id).trim()
             } catch (_: Exception) {
-                FirebaseFirestore.getInstance()
+                ""
+            }
+            val primaryDb = if (dbId.isNotBlank() && dbId != "(default)") {
+                try {
+                    FirebaseFirestore.getInstance(app, dbId)
+                } catch (_: Exception) {
+                    FirebaseFirestore.getInstance(app)
+                }
+            } else {
+                FirebaseFirestore.getInstance(app)
             }
 
             bookingsListener = attachFirestoreBookingListener(

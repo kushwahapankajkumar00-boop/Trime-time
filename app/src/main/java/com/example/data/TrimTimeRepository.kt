@@ -430,13 +430,28 @@ class TrimTimeRepository private constructor(context: Context) {
             }
             val apps = FirebaseApp.getApps(context)
             if (apps.isNotEmpty()) {
+                val app = FirebaseApp.getInstance()
                 auth = FirebaseAuth.getInstance()
-                firestore = FirebaseFirestore.getInstance()
+                val dbId = try {
+                    context.getString(com.example.R.string.firestore_database_id).trim()
+                } catch (_: Exception) {
+                    ""
+                }
+                firestore = if (dbId.isNotBlank() && dbId != "(default)") {
+                    try {
+                        FirebaseFirestore.getInstance(app, dbId)
+                    } catch (e: Exception) {
+                        Log.w(tag, "Failed to get named firestore instance for dbId: $dbId", e)
+                        FirebaseFirestore.getInstance(app)
+                    }
+                } else {
+                    FirebaseFirestore.getInstance(app)
+                }
                 defaultFirestore = firestore
                 val projectId = FirebaseApp.getInstance().options.projectId
                 isFirebaseReady = true
                 _isCloudSynced.value = true
-                Log.d(tag, "Firebase Auth and Firestore (project=$projectId) initialized strictly from default google-services.json.")
+                Log.d(tag, "Firebase Auth and Firestore (project=$projectId, dbId=$dbId) initialized strictly from default google-services.json.")
 
                 // Verify real Firebase Auth state against the server on startup
                 val firebaseUser = auth?.currentUser
@@ -497,6 +512,9 @@ class TrimTimeRepository private constructor(context: Context) {
             salonsListener = db.collection("salons").addSnapshotListener { snapshot, error ->
                 if (error != null) {
                     Log.e(tag, "Firestore salons listener error: ${error.message}")
+                    if (_salons.value.isEmpty()) {
+                        populateInitialLiveSalons()
+                    }
                     return@addSnapshotListener
                 }
                 if (snapshot != null) {
@@ -1836,7 +1854,7 @@ class TrimTimeRepository private constructor(context: Context) {
                     "createdAt" to System.currentTimeMillis()
                 )
 
-                FirebaseFirestore.getInstance()
+                (getActiveFirestore() ?: FirebaseFirestore.getInstance())
                     .collection("users")
                     .document(uid)
                     .set(userDocData, com.google.firebase.firestore.SetOptions.merge())

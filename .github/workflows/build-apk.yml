@@ -166,9 +166,9 @@ jobs:
               create("release") {
                 val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
                 storeFile = file(keystorePath)
-                storePassword = System.getenv("STORE_PASSWORD")
+                storePassword = System.getenv("STORE_PASSWORD") ?: "trimtime123"
                 keyAlias = "upload"
-                keyPassword = System.getenv("KEY_PASSWORD")
+                keyPassword = System.getenv("KEY_PASSWORD") ?: "trimtime123"
               }
               create("debugConfig") {
                 storeFile = file("${rootDir}/debug.keystore")
@@ -264,7 +264,7 @@ jobs:
           }
           EOF
 
-          # 6. Ensure app/google-services.json exists for debug builds
+          # 6. Ensure app/google-services.json exists for builds
           if [ ! -f "app/google-services.json" ]; then
             cat > app/google-services.json << 'EOF'
           {
@@ -287,7 +287,7 @@ jobs:
                     "client_type": 1,
                     "android_info": {
                       "package_name": "com.trimtime.app",
-                      "certificate_hash": "9d75b640a696525658555b5088642858f738e3ef"
+                      "certificate_hash": "7e094335bbe9289816b0415e943395275b6ab7a4"
                     }
                   },
                   {
@@ -325,7 +325,12 @@ jobs:
           EOF
           fi
 
-          # 7. Prepare debug.keystore & .env
+          # 7. Prepare release.keystore / my-upload-key.jks, debug.keystore & .env
+          if [ -f "release.keystore" ] && [ ! -f "my-upload-key.jks" ]; then
+            cp release.keystore my-upload-key.jks
+          elif [ -f "my-upload-key.jks" ] && [ ! -f "release.keystore" ]; then
+            cp my-upload-key.jks release.keystore
+          fi
           if [ -f "debug.keystore.base64" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f "debug.keystore" ]; then
@@ -347,13 +352,24 @@ jobs:
 
           chmod +x gradlew
 
-      - name: Build Debug APK with Gradle 8.9
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Build Production Release & Debug APKs with Gradle 8.9
+        env:
+          STORE_PASSWORD: trimtime123
+          KEY_PASSWORD: trimtime123
+        run: ./gradlew assembleRelease assembleDebug --stacktrace
+
+      - name: Upload Production Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30

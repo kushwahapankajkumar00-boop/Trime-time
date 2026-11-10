@@ -108,12 +108,32 @@ class MyBookingsViewModel : ViewModel() {
         observeAndFetchBookings(currentUid)
     }
 
+    private fun resolveDb(): FirebaseFirestore {
+        val app = try { com.google.firebase.FirebaseApp.getInstance() } catch (_: Exception) { null }
+        val dbId = try {
+            app?.applicationContext?.getString(com.example.R.string.firestore_database_id)?.trim().orEmpty()
+        } catch (_: Exception) {
+            ""
+        }
+        return if (app != null && dbId.isNotBlank() && dbId != "(default)") {
+            try {
+                FirebaseFirestore.getInstance(app, dbId)
+            } catch (_: Exception) {
+                FirebaseFirestore.getInstance(app)
+            }
+        } else if (app != null) {
+            FirebaseFirestore.getInstance(app)
+        } else {
+            FirebaseFirestore.getInstance()
+        }
+    }
+
     private fun observeAndFetchBookings(uid: String) {
         _uiState.value = MyBookingsUiState.Loading
         _errorMessage.value = null
 
         val db = try {
-            FirebaseFirestore.getInstance()
+            resolveDb()
         } catch (e: Exception) {
             val errMsg = "Failed to initialize Firestore: ${e.message ?: e.toString()}"
             Log.e(tag, errMsg, e)
@@ -240,8 +260,7 @@ class MyBookingsViewModel : ViewModel() {
         val bookings = mergedById.values.map { booking ->
             if (booking.isPendingTimedOut(nowMillis)) {
                 try {
-                    FirebaseFirestore.getInstance()
-                        .collection("bookings")
+                    resolveDb().collection("bookings")
                         .document(booking.resolvedBookingId)
                         .set(mapOf("status" to "cancelled"), SetOptions.merge())
                 } catch (_: Exception) {
@@ -353,7 +372,7 @@ class MyBookingsViewModel : ViewModel() {
         }
 
         val db = try {
-            FirebaseFirestore.getInstance()
+            resolveDb()
         } catch (e: Exception) {
             val errMsg = "Failed to initialize Firestore: ${e.message ?: e.toString()}"
             Log.e(tag, errMsg, e)

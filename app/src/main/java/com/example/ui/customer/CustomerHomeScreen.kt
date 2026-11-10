@@ -1688,11 +1688,11 @@ fun BlinkitSalonCard(
                 .fillMaxWidth()
                 .wrapContentHeight()
         ) {
-            // 1. Tall 230.dp Salon Cover Photo Container — unobstructed center with bottom readability gradient
+            // 1. Tall 240.dp Salon Cover Photo Container — unobstructed center with bottom readability gradient
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(230.dp)
+                    .height(240.dp)
                     .background(
                         Brush.horizontalGradient(
                             listOf(

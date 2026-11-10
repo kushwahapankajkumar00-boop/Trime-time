@@ -491,13 +491,15 @@ fun PartnerTopBar(
                     onClick = onExitPartnerMode,
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                     shape = RoundedCornerShape(10.dp),
-                    border = ButtonDefaults.outlinedButtonBorder.copy(
+                    border = ButtonDefaults.outlinedButtonBorder(enabled = true).copy(
                         brush = androidx.compose.ui.graphics.SolidColor(AmberPrimary)
                     ),
                     colors = ButtonDefaults.outlinedButtonColors(
                         containerColor = Color(0xFF2E2210)
                     ),
-                    modifier = Modifier.testTag("exit_partner_mode_btn")
+                    modifier = Modifier
+                        .heightIn(min = 36.dp)
+                        .testTag("exit_partner_mode_btn")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Person,
@@ -555,7 +557,9 @@ fun PartnerDashboardTabs(
                             text = tab.title,
                             fontSize = 12.sp,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) AmberPrimary else Color(0xFF94A3B8)
+                            color = if (isSelected) AmberPrimary else Color(0xFF94A3B8),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         if (tab == PartnerTab.LIVE_QUEUE && pendingCount > 0) {
                             Box(
@@ -759,13 +763,15 @@ fun PartnerLiveQueueTabContent(
                         color = if (isRushActive) AmberPrimary else Color.White,
                         letterSpacing = 0.5.sp,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                 }
 
                 Text(
                     text = "${completedBookings.size} Finished",
                     fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
                     color = Color(0xFF94A3B8),
                     maxLines = 1,
                     softWrap = false,
@@ -2779,11 +2785,11 @@ fun PartnerShopProfileTabContent(
                         )
                     }
 
-                    // Clickable Image Preview / Upload Box
+                    // Clickable Image Preview / Upload Box (230.dp tall to match Customer view without vertical cropping)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(165.dp)
+                            .height(230.dp)
                             .clip(RoundedCornerShape(14.dp))
                             .background(Color(0xFF0F172A))
                             .border(
@@ -2822,27 +2828,29 @@ fun PartnerShopProfileTabContent(
                                 model = coilShopModel ?: localPhotoDataUrl,
                                 contentDescription = "Uploaded Shop Cover Photo",
                                 contentScale = ContentScale.Crop,
+                                alignment = Alignment.Center,
                                 modifier = Modifier.fillMaxSize()
                             )
-                            // Subtle gradient scrim so image is bright and text remains readable
+                            // Bottom gradient scrim so image center is unobstructed and text at bottom remains readable
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .background(
                                         Brush.verticalGradient(
-                                            listOf(
-                                                Color.Black.copy(alpha = 0.35f),
-                                                Color.Transparent,
-                                                Color.Black.copy(alpha = 0.72f)
+                                            colorStops = arrayOf(
+                                                0.0f to Color.Black.copy(alpha = 0.08f),
+                                                0.55f to Color.Transparent,
+                                                0.82f to Color(0xB3090D16),
+                                                1.0f to Color(0xF2090D16)
                                             )
                                         )
                                     )
                             )
                             Column(
                                 modifier = Modifier
-                                    .align(Alignment.TopStart)
-                                    .padding(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    .align(Alignment.BottomStart)
+                                    .padding(start = 14.dp, end = 160.dp, bottom = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp)
                             ) {
                                 Text(
                                     text = shopName.ifBlank { salon?.name ?: "Your Grooming Studio" },
@@ -4212,12 +4220,16 @@ fun PartnerEtaAllocationDialog(
 
             val app = com.google.firebase.FirebaseApp.getInstance()
             val dbId = try {
-                context.getString(com.example.R.string.firestore_database_id)
+                context.getString(com.example.R.string.firestore_database_id).trim()
             } catch (_: Exception) {
-                "ai-studio-260b673c-6e6b-45c7-b680-335d42dc251f"
+                ""
             }
             val db = if (dbId.isNotBlank() && dbId != "(default)") {
-                com.google.firebase.firestore.FirebaseFirestore.getInstance(app, dbId)
+                try {
+                    com.google.firebase.firestore.FirebaseFirestore.getInstance(app, dbId)
+                } catch (_: Exception) {
+                    com.google.firebase.firestore.FirebaseFirestore.getInstance(app)
+                }
             } else {
                 com.google.firebase.firestore.FirebaseFirestore.getInstance(app)
             }

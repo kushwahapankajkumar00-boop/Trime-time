@@ -105,8 +105,8 @@ object SalonImageUtils {
      * so 1-tap preset cover selection persists directly in Firestore `salons/{salonId}`.
      */
     fun generatePresetCoverBase64(preset: PresetSalonCover): String {
-        val width = 600
-        val height = 280
+        val width = 800
+        val height = 500
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
@@ -121,43 +121,43 @@ object SalonImageUtils {
         }
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
 
-        // Subtle studio mirror arches in background
+        // Subtle studio mirror arches in background (proportioned for 800x500)
         val archPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = preset.accentColorHex
-            alpha = 40
+            alpha = 45
             style = Paint.Style.STROKE
-            strokeWidth = 4f
+            strokeWidth = 5f
         }
         val archFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = 0xFFFFFFFF.toInt()
-            alpha = 14
+            alpha = 16
             style = Paint.Style.FILL
         }
         for (i in 0..2) {
-            val left = 60f + i * 175f
-            val rect = RectF(left, 36f, left + 125f, 220f)
-            canvas.drawRoundRect(rect, 62f, 62f, archFillPaint)
-            canvas.drawRoundRect(rect, 62f, 62f, archPaint)
+            val left = 95f + i * 225f
+            val rect = RectF(left, 64f, left + 160f, 380f)
+            canvas.drawRoundRect(rect, 80f, 80f, archFillPaint)
+            canvas.drawRoundRect(rect, 80f, 80f, archPaint)
         }
 
         // Glowing top ceiling light bar
         val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = preset.accentColorHex
-            alpha = 90
+            alpha = 95
             style = Paint.Style.FILL
         }
-        canvas.drawRoundRect(RectF(40f, 14f, width - 40f, 22f), 4f, 4f, glowPaint)
+        canvas.drawRoundRect(RectF(60f, 24f, width - 60f, 36f), 6f, 6f, glowPaint)
 
-        // Barber pole / chair silhouette accents at bottom
+        // Barber counter silhouette accent at bottom
         val counterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = 0xFF0F172A.toInt()
             alpha = 210
             style = Paint.Style.FILL
         }
-        canvas.drawRect(0f, 220f, width.toFloat(), height.toFloat(), counterPaint)
+        canvas.drawRect(0f, 385f, width.toFloat(), height.toFloat(), counterPaint)
 
         val outputStream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 70, outputStream)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 72, outputStream)
         val base64 = Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
         return "data:image/jpeg;base64,$base64"
     }

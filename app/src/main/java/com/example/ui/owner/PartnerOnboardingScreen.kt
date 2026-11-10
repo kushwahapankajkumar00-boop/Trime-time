@@ -611,8 +611,8 @@ fun PartnerOnboardingScreen(
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(140.dp)
-                                            .clip(RoundedCornerShape(8.dp))
+                                            .height(220.dp)
+                                            .clip(RoundedCornerShape(10.dp))
                                     ) {
                                         AsyncImage(
                                             model = ImageRequest.Builder(context)
@@ -621,6 +621,7 @@ fun PartnerOnboardingScreen(
                                                 .build(),
                                             contentDescription = "Salon Photo Preview",
                                             modifier = Modifier.fillMaxSize(),
+                                            alignment = Alignment.Center,
                                             contentScale = androidx.compose.ui.layout.ContentScale.Crop
                                         )
                                     }
