@@ -241,6 +241,13 @@ fun BookingBottomSheet(
             baseTimeMillis = nowMillis
         )
     }
+    val customerReachByTime = remember(serviceDurationMins, nowMillis) {
+        Booking.calculateCustomerReachByClockTime(
+            activeBookingsCount = 0,
+            defaultServiceDurationMinutes = serviceDurationMins,
+            baseTimeMillis = nowMillis
+        )
+    }
     val effectiveSlotTime = if (hasQueueOrRush) calculatedEta else instantClockTime
 
     LaunchedEffect(effectiveSlotTime) {
@@ -405,7 +412,7 @@ fun BookingBottomSheet(
                                 textAlign = TextAlign.Center
                             )
                             Text(
-                                text = "Confirm your booking for $displayServiceName (₹${service.price}) around $instantClockTime?",
+                                text = "Confirm your booking for $displayServiceName (₹${service.price}) • Reach by $customerReachByTime?",
                                 fontSize = 12.sp,
                                 color = Color(0xFFE2E8F0),
                                 textAlign = TextAlign.Center

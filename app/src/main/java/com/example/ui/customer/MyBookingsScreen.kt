@@ -477,6 +477,8 @@ fun BookingCard(
     val canonicalStatus = booking.normalizedStatus
     val displayDate = booking.resolvedDate.ifBlank { "Today" }
     val finalAllocatedTime = booking.cleanAllocatedClockTime
+    val isZeroWaitSlot = booking.isZeroWaitInternalSlot(nowMillis)
+    val customerReachByTime = booking.customerReachByClockTime
     val isUpcoming = canonicalStatus.equals("Pending", ignoreCase = true) ||
         canonicalStatus.equals("Confirmed", ignoreCase = true)
     val isConfirmed = canonicalStatus.equals("Confirmed", ignoreCase = true)
@@ -671,7 +673,11 @@ fun BookingCard(
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Text(
-                                    text = "Reach Salon exactly at $finalAllocatedTime",
+                                    text = if (isZeroWaitSlot) {
+                                        "Reach by $customerReachByTime"
+                                    } else {
+                                        "Reach Salon exactly at $finalAllocatedTime"
+                                    },
                                     color = Color.White,
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.Black,
@@ -681,7 +687,9 @@ fun BookingCard(
                             Text(
                                 text = when {
                                     isLate -> "⚠️ LATE ARRIVAL ($minsLate min late) • Auto-expires in ${graceMinsLeft}m grace period"
+                                    isConfirmed && isZeroWaitSlot -> "Confirmed by Salon (Slot: $finalAllocatedTime) • Zero waiting at the shop"
                                     isConfirmed -> "Confirmed by Salon • Zero waiting at the shop"
+                                    isZeroWaitSlot -> "Booked at $finalAllocatedTime • Awaiting Salon Partner confirmation"
                                     else -> "Awaiting Salon Partner confirmation"
                                 },
                                 color = when {

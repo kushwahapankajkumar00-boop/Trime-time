@@ -110,7 +110,11 @@ fun PinDisplayDialog(
                 )
 
                 Text(
-                    text = "Slot around ${booking.cleanAllocatedClockTime} • ₹${booking.servicePrice}",
+                    text = if (booking.isZeroWaitInternalSlot()) {
+                        "Reach by ${booking.customerReachByClockTime} (Slot: ${booking.cleanAllocatedClockTime}) • ₹${booking.servicePrice}"
+                    } else {
+                        "Slot around ${booking.cleanAllocatedClockTime} • ₹${booking.servicePrice}"
+                    },
                     style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
                     color = AmberPrimary,
                     textAlign = TextAlign.Center

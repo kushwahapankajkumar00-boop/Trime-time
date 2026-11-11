@@ -402,7 +402,11 @@ fun CustomerBookingCard(
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "Slot: ${booking.timeSlot}",
+                        text = if (isActiveSlot && booking.isZeroWaitInternalSlot(nowMillis)) {
+                            "Slot: ${booking.cleanAllocatedClockTime} • Reach by ${booking.customerReachByClockTime}"
+                        } else {
+                            "Slot: ${booking.timeSlot}"
+                        },
                         fontSize = 12.sp,
                         color = Color(0xFF94A3B8),
                         modifier = Modifier.padding(top = 2.dp),

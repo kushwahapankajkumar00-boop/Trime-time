@@ -65,6 +65,37 @@ data class Booking(
         get() = formatCleanArrivalTime(allocatedTime.ifBlank { resolvedTime })
 
     /**
+     * Returns true if this booking's internal slot time is at the booking creation time
+     * (Wait Time = 0m, within 2 minutes of `createdAt`), meaning no queue wait or extra offset
+     * was added to the salon's internal queue schedule.
+     */
+    fun isZeroWaitInternalSlot(referenceMillis: Long = System.currentTimeMillis()): Boolean {
+        val slotMillis = getAssignedArrivalMillis(referenceMillis) ?: return false
+        if (createdAt <= 0L) return false
+        return kotlin.math.abs(slotMillis - createdAt) <= 2 * 60_000L
+    }
+
+    /**
+     * Customer-facing arrival target time:
+     * - When Wait Time is 0m (internal booking slot is logged at `createdAt`, e.g. 06:39 PM),
+     *   returns `Current + 10m` (e.g. "06:49 PM") so the customer UI can say "Reach by 06:49 PM"
+     *   while the backend and Partner Live Queue log the actual current time ("06:39 PM").
+     * - When Wait Time > 0m or Partner allocated a custom future slot, returns `cleanAllocatedClockTime`.
+     */
+    val customerReachByClockTime: String
+        get() {
+            val now = System.currentTimeMillis()
+            val slotMillis = getAssignedArrivalMillis(now)
+            if (slotMillis != null && createdAt > 0L && kotlin.math.abs(slotMillis - createdAt) <= 2 * 60_000L) {
+                val baseMillis = maxOf(slotMillis, createdAt)
+                val bufferedMillis = baseMillis + (DEFAULT_MIN_TRAVEL_BUFFER_MINUTES * 60_000L)
+                val formatter = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.US)
+                return formatter.format(java.util.Date(bufferedMillis))
+            }
+            return cleanAllocatedClockTime
+        }
+
+    /**
      * Normalizes raw Firestore status strings into one of the four canonical display statuses:
      * "Pending", "Confirmed", "Completed", or "Cancelled".
      */
@@ -72,7 +103,7 @@ data class Booking(
         get() = normalizeStatusValue(status)
 
     /**
-     * Returns the assigned arrival time as an epoch timestamp in milliseconds on the booking's day,
+     * Returns the assigned internal arrival slot time as an epoch timestamp in milliseconds on the booking's day,
      * or null if no clock time can be parsed.
      */
     fun getAssignedArrivalMillis(referenceMillis: Long = System.currentTimeMillis()): Long? {
@@ -85,8 +116,23 @@ data class Booking(
     }
 
     /**
+     * Returns the effective arrival deadline in milliseconds for late-arrival detection:
+     * - For a 0m-wait instant booking (logged at `createdAt`, e.g. 6:39 PM), includes the
+     *   10-minute customer travel buffer (`6:49 PM`) before marking the customer as late.
+     * - For a queued or Partner-offset booking, uses the assigned slot time directly.
+     */
+    fun getEffectiveArrivalDeadlineMillis(referenceMillis: Long = System.currentTimeMillis()): Long? {
+        val slotMillis = getAssignedArrivalMillis(referenceMillis) ?: return null
+        return if (createdAt > 0L && kotlin.math.abs(slotMillis - createdAt) <= 2 * 60_000L) {
+            maxOf(slotMillis, createdAt) + (DEFAULT_MIN_TRAVEL_BUFFER_MINUTES * 60_000L)
+        } else {
+            slotMillis
+        }
+    }
+
+    /**
      * Returns true if this booking is active today and the current device time has surpassed
-     * the assigned arrival time (`nowMillis > assignedArrivalMillis`).
+     * the effective arrival deadline (`nowMillis > effectiveArrivalDeadlineMillis`).
      */
     fun isLateArrival(nowMillis: Long = System.currentTimeMillis()): Boolean {
         if (!isStatusPendingOrAccepted(status)) return false
@@ -95,24 +141,24 @@ data class Booking(
             dateStr.equals("Today", ignoreCase = true) ||
             isSameCalendarDay(createdAt, nowMillis)
         if (!isToday) return false
-        val arrivalMillis = getAssignedArrivalMillis(nowMillis) ?: return false
+        val arrivalMillis = getEffectiveArrivalDeadlineMillis(nowMillis) ?: return false
         return nowMillis > arrivalMillis
     }
 
     /**
-     * Returns how many minutes late the customer currently is past their assigned arrival time.
+     * Returns how many minutes late the customer currently is past their arrival deadline.
      */
     fun minutesLate(nowMillis: Long = System.currentTimeMillis()): Int {
-        val arrivalMillis = getAssignedArrivalMillis(nowMillis) ?: return 0
+        val arrivalMillis = getEffectiveArrivalDeadlineMillis(nowMillis) ?: return 0
         if (nowMillis <= arrivalMillis) return 0
         return (((nowMillis - arrivalMillis) + 59_999L) / 60_000L).toInt().coerceAtLeast(1)
     }
 
     /**
-     * Returns remaining minutes in the 10-minute grace period after the assigned arrival time.
+     * Returns remaining minutes in the 10-minute grace period after the arrival deadline.
      */
     fun remainingGraceMinutes(nowMillis: Long = System.currentTimeMillis()): Int {
-        val arrivalMillis = getAssignedArrivalMillis(nowMillis) ?: return LATE_GRACE_PERIOD_MINUTES
+        val arrivalMillis = getEffectiveArrivalDeadlineMillis(nowMillis) ?: return LATE_GRACE_PERIOD_MINUTES
         val graceDeadline = arrivalMillis + LATE_GRACE_PERIOD_MS
         if (nowMillis >= graceDeadline) return 0
         return (((graceDeadline - nowMillis) + 59_999L) / 60_000L).toInt().coerceIn(0, LATE_GRACE_PERIOD_MINUTES)
@@ -120,7 +166,7 @@ data class Booking(
 
     /**
      * Returns true if this active booking is late beyond the 10-minute grace period
-     * (`nowMillis >= assignedArrivalMillis + LATE_GRACE_PERIOD_MS`), triggering auto-expiry.
+     * (`nowMillis >= effectiveArrivalDeadlineMillis + LATE_GRACE_PERIOD_MS`), triggering auto-expiry.
      */
     fun isGracePeriodExpired(nowMillis: Long = System.currentTimeMillis()): Boolean {
         if (!isStatusPendingOrAccepted(status)) return false
@@ -129,7 +175,7 @@ data class Booking(
             dateStr.equals("Today", ignoreCase = true) ||
             isSameCalendarDay(createdAt, nowMillis)
         if (!isToday) return false
-        val arrivalMillis = getAssignedArrivalMillis(nowMillis) ?: return false
+        val arrivalMillis = getEffectiveArrivalDeadlineMillis(nowMillis) ?: return false
         return nowMillis >= (arrivalMillis + LATE_GRACE_PERIOD_MS)
     }
 
@@ -299,9 +345,11 @@ data class Booking(
         }
 
         /**
-         * Guarantees that a candidate arrival clock time is strictly in the future relative to `nowMillis`.
-         * If the candidate time is blank, unparseable, or already in the past / within 2 minutes of now,
-         * recalculates a fresh future arrival time (`nowMillis + max(queueWait, DEFAULT_MIN_TRAVEL_BUFFER_MINUTES)`).
+         * Guarantees that a candidate internal arrival clock time is never in the past relative to `nowMillis`.
+         * - If `candidateTimeStr` is at the current clock minute or in the future (`>= nowMillis - 60_000L`),
+         *   preserves it (so a 0m-wait booking at 6:39 PM logs at 06:39 PM in the backend).
+         * - If `candidateTimeStr` is blank, unparseable, or in the past (`< nowMillis - 60_000L`),
+         *   recalculates `Current Time + Queue Wait` (`06:39 PM` when Wait Time is 0m).
          */
         fun ensureFutureArrivalClockTime(
             candidateTimeStr: String?,
@@ -311,8 +359,8 @@ data class Booking(
         ): String {
             val cleanCandidate = formatCleanArrivalTime(candidateTimeStr)
             val parsedMillis = parseClockTimeMillisOnDay(cleanCandidate, nowMillis)
-            val minFutureMillis = nowMillis + (5 * 60_000L)
-            return if (parsedMillis != null && parsedMillis >= minFutureMillis) {
+            val currentMinuteFloorMillis = nowMillis - 60_000L
+            return if (parsedMillis != null && parsedMillis >= currentMinuteFloorMillis) {
                 val formatter = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.US)
                 formatter.format(java.util.Date(parsedMillis))
             } else {
@@ -438,10 +486,10 @@ data class Booking(
         }
 
         /**
-         * Calculates the estimated wait time in minutes based on the Partner's current active Live Queue
+         * Calculates the salon's internal queue wait time in minutes based on the Partner's current active Live Queue
          * (`activeInQueue * defaultServiceDurationMinutes`).
-         * If the queue wait time is 0 (`activeBookingsCount == 0`), adds `DEFAULT_MIN_TRAVEL_BUFFER_MINUTES`
-         * (10 minutes) so the customer always gets a future arrival time with time to travel to the salon.
+         * When `activeBookingsCount == 0`, returns `0` so the internal booking slot is logged at the CURRENT time
+         * without pushing the salon's internal queue schedule forward.
          */
         fun calculateSystemWaitMinutes(
             activeBookingsCount: Int,
@@ -449,13 +497,12 @@ data class Booking(
         ): Int {
             val safeDuration = defaultServiceDurationMinutes.coerceIn(10, 120)
             val safeQueue = activeBookingsCount.coerceAtLeast(0)
-            val rawWait = safeDuration * safeQueue
-            return rawWait.coerceAtLeast(DEFAULT_MIN_TRAVEL_BUFFER_MINUTES)
+            return safeDuration * safeQueue
         }
 
         /**
-         * Calculates the estimated arrival epoch timestamp in milliseconds (`Current Time + Wait Time`),
-         * always enforcing at least `DEFAULT_MIN_TRAVEL_BUFFER_MINUTES` (10 minutes) in the future.
+         * Calculates the internal booking slot epoch timestamp in milliseconds (`Current Time + Queue Wait Time`).
+         * When `activeBookingsCount == 0` and `extraOffsetMinutes == 0`, returns `baseTimeMillis` (Current Time).
          */
         fun calculateEtaArrivalMillis(
             activeBookingsCount: Int,
@@ -464,13 +511,13 @@ data class Booking(
             baseTimeMillis: Long = System.currentTimeMillis()
         ): Long {
             val queueWaitMins = calculateSystemWaitMinutes(activeBookingsCount, defaultServiceDurationMinutes)
-            val totalMinutesFromNow = (queueWaitMins + extraOffsetMinutes).coerceAtLeast(DEFAULT_MIN_TRAVEL_BUFFER_MINUTES)
+            val totalMinutesFromNow = (queueWaitMins + extraOffsetMinutes).coerceAtLeast(0)
             return baseTimeMillis + (totalMinutesFromNow * 60_000L)
         }
 
         /**
-         * Calculates the formatted clock arrival time (e.g., "04:35 PM") by adding the system queue wait
-         * (`max(activeInQueue * defaultServiceDurationMinutes, 10m)`) plus any Partner manual override (`extraOffsetMinutes`).
+         * Calculates the formatted internal booking slot clock time (e.g., "06:39 PM" when Wait Time is 0m,
+         * or `Current Time + Queue Wait + Offset` when there is a queue or Partner offset).
          */
         fun calculateFormattedEtaClockTime(
             activeBookingsCount: Int,
@@ -486,6 +533,24 @@ data class Booking(
             )
             val formatter = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.US)
             return formatter.format(java.util.Date(arrivalMillis))
+        }
+
+        /**
+         * Calculates the customer-facing "Reach by" clock time:
+         * Adds a 10-minute travel buffer when Wait Time is 0m (`Current + 10m`, e.g. "06:49 PM" when current time is "06:39 PM"),
+         * while keeping the backend internal slot at `Current Time`.
+         */
+        fun calculateCustomerReachByClockTime(
+            activeBookingsCount: Int = 0,
+            defaultServiceDurationMinutes: Int = 20,
+            extraOffsetMinutes: Int = 0,
+            baseTimeMillis: Long = System.currentTimeMillis()
+        ): String {
+            val queueWaitMins = calculateSystemWaitMinutes(activeBookingsCount, defaultServiceDurationMinutes)
+            val customerBufferMins = (queueWaitMins + extraOffsetMinutes).coerceAtLeast(DEFAULT_MIN_TRAVEL_BUFFER_MINUTES)
+            val reachByMillis = baseTimeMillis + (customerBufferMins * 60_000L)
+            val formatter = java.text.SimpleDateFormat("hh:mm a", java.util.Locale.US)
+            return formatter.format(java.util.Date(reachByMillis))
         }
 
         /**

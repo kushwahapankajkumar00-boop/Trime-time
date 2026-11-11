@@ -86,6 +86,7 @@ class TrimTimeRepository private constructor(context: Context) {
     private var bookingsListener: ListenerRegistration? = null
     private var customerBookingsListener: ListenerRegistration? = null
     private var customerFcmNotificationsListener: ListenerRegistration? = null
+    private var partnerFcmNotificationsListener: ListenerRegistration? = null
     private var userDocListener: ListenerRegistration? = null
     private var defaultUserDocListener: ListenerRegistration? = null
     private var usersListener: ListenerRegistration? = null
@@ -102,6 +103,7 @@ class TrimTimeRepository private constructor(context: Context) {
     private var hasLoadedInitialCustomerFcmNotifications = false
     private val knownRealtimeBookingIds = mutableSetOf<String>()
     private val knownCustomerFcmNotificationIds = mutableSetOf<String>()
+    private val knownPartnerFcmNotificationIds = mutableSetOf<String>()
     private val previousCustomerBookingStatus = mutableMapOf<String, Pair<String, String>>()
 
     private val invalidSharedUserIds = setOf("dev_test_user_001", "dev_tester", "default_user", "guest")
@@ -876,6 +878,27 @@ class TrimTimeRepository private constructor(context: Context) {
                 }
                 if (snapshot != null) {
                     val nowMillis = System.currentTimeMillis()
+                    val activeUid = _currentUserProfile.value?.id?.trim().orEmpty()
+                        .ifBlank { runCatching { auth?.currentUser?.uid.orEmpty() }.getOrDefault("") }
+                    val ownedSalons = _salons.value.filter {
+                        activeUid.isNotBlank() && (it.ownerId == activeUid || it.partnerId == activeUid)
+                    }
+                    val ownedSalonId = _currentUserProfile.value?.salonId?.trim().orEmpty()
+                        .ifBlank { ownedSalons.firstOrNull()?.id.orEmpty() }
+                    val partnerCandidateIds = buildSet {
+                        if (activeUid.isNotBlank()) {
+                            add(activeUid)
+                            add("salon_$activeUid")
+                        }
+                        if (ownedSalonId.isNotBlank()) {
+                            add(ownedSalonId)
+                            add(ownedSalonId.removePrefix("salon_"))
+                        }
+                        ownedSalons.forEach { s ->
+                            if (s.id.isNotBlank()) add(s.id.trim())
+                        }
+                    }
+
                     if (!hasLoadedInitialBookingsSnapshot) {
                         for (doc in snapshot.documents) {
                             knownRealtimeBookingIds.add(doc.id)
@@ -884,17 +907,32 @@ class TrimTimeRepository private constructor(context: Context) {
                             parseBookingDocument(doc)?.let { existingBooking ->
                                 previousCustomerBookingStatus[existingBooking.id] =
                                     Pair(existingBooking.status.trim().lowercase(), existingBooking.resolvedTime)
+                                // If a fresh 'Pending' booking arrived while the app was closed/restarting and hasn't been notified yet, ring now
+                                val isRecentPending = existingBooking.status.trim().equals("Pending", ignoreCase = true) &&
+                                    !existingBooking.isPendingTimedOut(nowMillis)
+                                val matchesPartner = partnerCandidateIds.isNotEmpty() && (
+                                    existingBooking.partnerId.trim() in partnerCandidateIds ||
+                                        existingBooking.salonId.trim() in partnerCandidateIds ||
+                                        existingBooking.partnerId.trim().removePrefix("salon_") in partnerCandidateIds ||
+                                        existingBooking.salonId.trim().removePrefix("salon_") in partnerCandidateIds
+                                    )
+                                if (isRecentPending && matchesPartner &&
+                                    !TrimTimeNotificationHelper.hasBookingBeenNotified(appContext, existingBooking.id)
+                                ) {
+                                    TrimTimeNotificationHelper.showIncomingBookingNotification(
+                                        context = appContext,
+                                        bookingId = existingBooking.id,
+                                        title = "🔔 New Booking at ${existingBooking.salonName.ifBlank { "Your Salon" }}!",
+                                        body = "${existingBooking.customerName} booked ${existingBooking.service} (₹${existingBooking.servicePrice} • ${existingBooking.timeSlot}). Tap to accept.",
+                                        customerName = existingBooking.customerName,
+                                        serviceName = existingBooking.service,
+                                        timeSlot = existingBooking.timeSlot
+                                    )
+                                }
                             }
                         }
                         hasLoadedInitialBookingsSnapshot = true
                     } else {
-                        val activeUid = _currentUserProfile.value?.id?.trim().orEmpty()
-                        val ownedSalonId = _currentUserProfile.value?.salonId?.trim().orEmpty()
-                            .ifBlank {
-                                _salons.value.find {
-                                    activeUid.isNotBlank() && (it.ownerId == activeUid || it.partnerId == activeUid)
-                                }?.id.orEmpty()
-                            }
                         for (change in snapshot.documentChanges) {
                             if (change.type == DocumentChange.Type.ADDED) {
                                 val addedBooking = parseBookingDocument(change.document)
@@ -906,10 +944,11 @@ class TrimTimeRepository private constructor(context: Context) {
                                     knownRealtimeBookingIds.add(addedBooking.id) &&
                                     addedBooking.status.trim().equals("Pending", ignoreCase = true)
                                 ) {
-                                    val isForCurrentPartner = activeUid.isNotBlank() && (
-                                        addedBooking.partnerId == activeUid ||
-                                            addedBooking.salonId == "salon_$activeUid" ||
-                                            (ownedSalonId.isNotBlank() && addedBooking.salonId == ownedSalonId)
+                                    val isForCurrentPartner = partnerCandidateIds.isNotEmpty() && (
+                                        addedBooking.partnerId.trim() in partnerCandidateIds ||
+                                            addedBooking.salonId.trim() in partnerCandidateIds ||
+                                            addedBooking.partnerId.trim().removePrefix("salon_") in partnerCandidateIds ||
+                                            addedBooking.salonId.trim().removePrefix("salon_") in partnerCandidateIds
                                         )
                                     if (isForCurrentPartner) {
                                         TrimTimeNotificationHelper.showIncomingBookingNotification(
@@ -991,8 +1030,7 @@ class TrimTimeRepository private constructor(context: Context) {
                     _bookings.value = sortedAll
 
                     // Also keep _customerBookings strictly filtered to currentUser.uid
-                    val activeUid = _currentUserProfile.value?.id
-                    if (!activeUid.isNullOrBlank() && activeUid !in invalidSharedUserIds) {
+                    if (activeUid.isNotBlank() && activeUid !in invalidSharedUserIds) {
                         _customerBookings.value = sortedAll.filter { it.customerId == activeUid }
                     } else {
                         _customerBookings.value = emptyList()
@@ -1441,6 +1479,7 @@ class TrimTimeRepository private constructor(context: Context) {
     private fun attachCustomerBookingsListener(customerId: String) {
         customerBookingsListener?.remove()
         customerFcmNotificationsListener?.remove()
+        partnerFcmNotificationsListener?.remove()
         userDocListener?.remove()
         defaultUserDocListener?.remove()
         hasLoadedInitialCustomerBookingsSnapshot = false
@@ -1612,7 +1651,11 @@ class TrimTimeRepository private constructor(context: Context) {
                     if (change.type == DocumentChange.Type.ADDED && knownCustomerFcmNotificationIds.add(change.document.id)) {
                         val doc = change.document
                         val type = doc.getString("type").orEmpty()
-                        if (type.startsWith("customer_booking_", ignoreCase = true) || type.equals("booking_status_update", ignoreCase = true)) {
+                            .ifBlank { doc.getString("eventType").orEmpty() }
+                        if (type.startsWith("customer_booking_", ignoreCase = true) ||
+                            type.equals("booking_status_update", ignoreCase = true) ||
+                            type.uppercase() in setOf("BOOKING_ACCEPTED", "ETA_ADJUSTED", "BOOKING_DECLINED")
+                        ) {
                             val bId = doc.getString("bookingId") ?: doc.id
                             val statusStr = doc.getString("status")?.lowercase().orEmpty()
                             val allocTime = doc.getString("allocatedTime").orEmpty()
@@ -1630,6 +1673,35 @@ class TrimTimeRepository private constructor(context: Context) {
                                 title = notifTitle,
                                 body = notifBody
                             )
+                        }
+                    }
+                }
+            }
+
+        // Real-time listener on `fcm_notifications` for Partner incoming booking alerts
+        partnerFcmNotificationsListener = db.collection("fcm_notifications")
+            .whereEqualTo("partnerId", cleanUid)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null || snapshot == null) return@addSnapshotListener
+                val nowMs = System.currentTimeMillis()
+                snapshot.documentChanges.forEach { change ->
+                    if (change.type == DocumentChange.Type.ADDED && knownPartnerFcmNotificationIds.add(change.document.id)) {
+                        val doc = change.document
+                        val createdAt = (doc.get("createdAt") as? Number)?.toLong() ?: nowMs
+                        if (nowMs - createdAt <= 5 * 60_000L) {
+                            val bId = doc.getString("bookingId")?.takeIf { it.isNotBlank() } ?: doc.id
+                            if (!TrimTimeNotificationHelper.hasBookingBeenNotified(appContext, bId)) {
+                                val notifTitle = doc.getString("title")?.takeIf { it.isNotBlank() }
+                                    ?: "🔔 New Booking Received!"
+                                val notifBody = doc.getString("body")?.takeIf { it.isNotBlank() }
+                                    ?: "A customer just booked a slot at your salon. Tap to view in Live Queue."
+                                TrimTimeNotificationHelper.showIncomingBookingNotification(
+                                    context = appContext,
+                                    bookingId = bId,
+                                    title = notifTitle,
+                                    body = notifBody
+                                )
+                            }
                         }
                     }
                 }
@@ -3430,11 +3502,14 @@ class TrimTimeRepository private constructor(context: Context) {
 
         val resolvedCustomerFcmToken = currentProfile?.fcmToken?.takeIf { it.isNotBlank() }
             ?: TrimTimeNotificationHelper.getCachedFcmToken(appContext)
+        val resolvedPartnerUidForDoc = targetSalon?.ownerId?.trim()?.takeIf { it.isNotBlank() }
+            ?: targetSalon?.partnerId?.trim()?.takeIf { it.isNotBlank() }
+            ?: cleanSalonId.removePrefix("salon_").ifBlank { cleanSalonId }
 
         val newBooking = Booking(
             bookingId = newBookingId,
             userId = resolvedCustomerId,
-            partnerId = cleanSalonId,
+            partnerId = resolvedPartnerUidForDoc,
             salonName = cleanSalonName,
             date = cleanBookingDate,
             time = cleanTimeSlot,
@@ -3524,8 +3599,9 @@ class TrimTimeRepository private constructor(context: Context) {
                         defaultServiceDurationMinutes = serviceDurationMins,
                         baseTimeMillis = txNowMillis
                     )
-                    // Prevent concurrent double-booking of the exact same ETA minute slot:
-                    val safeNextEtaMillis = if (prevLastAllocatedMillis >= baseCalculatedEtaMillis) {
+                    // Only offset past prevLastAllocatedMillis when there is an active queue (`activeSalonQueueCount > 0`).
+                    // When Wait Time is 0m (`activeSalonQueueCount == 0`), log at the CURRENT time (`baseCalculatedEtaMillis`).
+                    val safeNextEtaMillis = if (activeSalonQueueCount > 0 && prevLastAllocatedMillis >= baseCalculatedEtaMillis) {
                         prevLastAllocatedMillis + (serviceDurationMins * 60_000L)
                     } else {
                         baseCalculatedEtaMillis

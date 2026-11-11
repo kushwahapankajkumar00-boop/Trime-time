@@ -168,14 +168,38 @@ fun TrimTimeApp(
             com.example.util.SecurityValidator.isBookingActiveStatus(it.status)
     }
 
-    // Retrieve FCM device token upon successful login and persist `fcmToken` to the user's Firestore profile
-    LaunchedEffect(currentCustomerUid, currentUserProfile?.salonId) {
+    // Retrieve FCM device token upon successful login, persist `fcmToken`, and start Partner background queue monitor
+    LaunchedEffect(
+        currentCustomerUid,
+        currentUserProfile?.salonId,
+        hasRegisteredPartnerSalon,
+        partnerSelectedSalonId,
+        authState
+    ) {
         if (currentCustomerUid.isNotBlank()) {
+            val resolvedPartnerSalon = allSalons.find {
+                it.ownerId == currentCustomerUid ||
+                    it.partnerId == currentCustomerUid ||
+                    (!partnerSelectedSalonId.isNullOrBlank() && it.id == partnerSelectedSalonId)
+            }
+            val resolvedSalonId = currentUserProfile?.salonId?.takeIf { it.isNotBlank() }
+                ?: resolvedPartnerSalon?.id?.takeIf { it.isNotBlank() }
+                ?: partnerSelectedSalonId.orEmpty()
             TrimTimeNotificationHelper.fetchAndSaveCurrentUserFcmToken(
                 context = appContext,
                 userId = currentCustomerUid,
-                salonId = currentUserProfile?.salonId
+                salonId = resolvedSalonId
             )
+            if (hasRegisteredPartnerSalon || resolvedPartnerSalon != null || authState == AppAuthState.Authenticated(UserRole.PARTNER)) {
+                TrimTimeNotificationHelper.startPartnerBackgroundQueueMonitor(
+                    context = appContext,
+                    partnerUid = currentCustomerUid,
+                    salonId = resolvedSalonId.ifBlank { "salon_$currentCustomerUid" },
+                    salonName = resolvedPartnerSalon?.name.orEmpty()
+                )
+            }
+        } else if (authState is AppAuthState.Unauthenticated) {
+            TrimTimeNotificationHelper.stopPartnerBackgroundQueueMonitor(appContext)
         }
     }
 
